@@ -1,0 +1,23 @@
+node_modules/
+dist/
+.git/
+.github/
+
+# Local dev config — secrets must come from Container Apps secrets at runtime
+local.settings.json
+.env
+.env.*
+*.env
+
+# OS / editor noise
+.DS_Store
+*.log
+/tmp/
+
+# Test artifacts
+coverage/
+src/__tests__/
+
+# Infra source — not needed in image
+infra/
+docs/

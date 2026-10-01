@@ -1,0 +1,22 @@
+From: Client Contact <client@example.com>
+To: Alex Example <alex@example.com>
+Subject: FW: Q3 vendor contract thread
+Date: Mon, 21 Sep 2026 09:14:00 -0700
+Message-ID: <fwd-thread-1@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer"
+
+--outer
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Nate, see the thread below. The renewal terms changed on page 2 — café meeting moved to Friday.
+
+--outer
+Content-Type: text/plain; name="terms.txt"
+Content-Disposition: attachment; filename="terms.txt"
+Content-Transfer-Encoding: base64
+
+UmVuZXdhbCB0ZXJtczogMTIgbW9udGhzLg==
+
+--outer--

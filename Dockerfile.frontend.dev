@@ -1,0 +1,16 @@
+# Dev frontend: Vite dev server with HMR
+# Binds to 0.0.0.0 so the port is reachable from the host and other containers.
+# VITE_API_TARGET is set by docker-compose to route /api proxy to the backend container.
+
+FROM node:20-slim
+WORKDIR /app
+
+COPY package*.json tsconfig.admin.json vite.config.ts ./
+RUN npm ci
+
+COPY src/admin/ ./src/admin/
+
+EXPOSE 5173
+
+# --host binds to 0.0.0.0 instead of 127.0.0.1
+CMD ["npx", "vite", "--config", "vite.config.ts", "--host"]

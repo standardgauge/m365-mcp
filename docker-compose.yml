@@ -1,0 +1,61 @@
+name: m365-mcp
+
+services:
+
+  # ── Azure Storage emulator ────────────────────────────────────────────────────
+  azurite:
+    container_name: m365-mcp-azurite
+    image: mcr.microsoft.com/azure-storage/azurite
+    command: azurite --loose --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
+    ports:
+      - "10000:10000"   # blob
+      - "10001:10001"   # queue
+      - "10002:10002"   # table
+    volumes:
+      - azurite_data:/data
+
+  # ── Azure Functions backend ───────────────────────────────────────────────────
+  # Internally listens on port 8080 (non-root Functions host — F8 /).
+  # Exposed as localhost:7071 on the host so the OAuth redirect URI and
+  # any direct curl tests use the familiar port.
+  backend:
+    container_name: m365-mcp-backend
+    build:
+      context: .
+      dockerfile: Dockerfile.backend.dev
+    ports:
+      - "7071:8080"
+    env_file:
+      - .env
+    environment:
+      # Storage: falls back to the Azurite container for local dev.
+      # Set AZURE_STORAGE_CONNECTION_STRING in .env to point at real Azure Storage in production.
+      AzureWebJobsStorage: "${AZURE_STORAGE_CONNECTION_STRING:-DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;QueueEndpoint=http://azurite:10001/devstoreaccount1;TableEndpoint=http://azurite:10002/devstoreaccount1;}"
+      AZURE_STORAGE_CONNECTION_STRING: "${AZURE_STORAGE_CONNECTION_STRING:-DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;QueueEndpoint=http://azurite:10001/devstoreaccount1;TableEndpoint=http://azurite:10002/devstoreaccount1;}"
+      FUNCTIONS_WORKER_RUNTIME: node
+      FUNCTIONS_EXTENSION_VERSION: "~4"
+      WEBSITE_NODE_DEFAULT_VERSION: "~20"
+    depends_on:
+      - azurite
+
+  # ── Vite admin UI ─────────────────────────────────────────────────────────────
+  # /api requests are proxied to the backend container on its internal port 8080.
+  # The browser still sees localhost:5173 for the UI and localhost:7071 for direct
+  # API calls (e.g. OAuth callback).
+  frontend:
+    container_name: m365-mcp-frontend
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend.dev
+    ports:
+      - "5173:5173"
+    env_file:
+      - .env
+    environment:
+      # Vite server-side proxy target — must use the Docker service name + internal port
+      VITE_API_TARGET: http://backend:8080
+    depends_on:
+      - backend
+
+volumes:
+  azurite_data:

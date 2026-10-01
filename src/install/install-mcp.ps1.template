@@ -1,0 +1,415 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+{{INSTANCE_NAME}} Installer for Windows.
+
+.DESCRIPTION
+Sets up the M365 MCP connector for Claude Desktop and Claude Code on Windows.
+Hands-free flow: generates a one-time nonce, opens your browser to complete
+OAuth, then polls the server until the session is ready. You never see, copy,
+or paste a token.
+
+This script is served live from {{MCP_URL}}/install.ps1 — to install or
+re-authenticate, run:
+
+  iwr -useb {{MCP_URL}}/install.ps1 | iex
+
+Claude connects through a small local shim served by the same server
+({{MCP_URL}}/install/m365-mcp-shim.js), saved under %USERPROFILE%\.m365-mcp.
+It forwards MCP traffic and lets mail attachments and OneDrive uploads name a
+local file under Downloads, Documents or the OneDrive sync folder. To allow
+other folders, add "env": {"M365_MCP_ATTACH_ROOTS": "default;C:\path\one"}
+to the server entry in your Claude config; re-running this script keeps it.
+
+.NOTES
+Requires Node.js 18+ (to run the shim). The script will check for it.
+Tested on Windows 10/11 with PowerShell 5.1 and PowerShell 7+.
+#>
+
+$ErrorActionPreference = 'Stop'
+
+$MCP_URL = "{{MCP_URL}}"
+$MCP_NAME = "{{MCP_NAME}}"
+$DESKTOP_CONFIG = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+$CLI_CONFIG = Join-Path $env:USERPROFILE '.claude.json'
+$SETTINGS_CONFIG = Join-Path $env:USERPROFILE '.claude\settings.json'
+$SHIM_DIR = Join-Path $env:USERPROFILE '.m365-mcp'
+$SHIM_PATH = Join-Path $SHIM_DIR "$MCP_NAME-shim.js"
+$NODE_BIN = $null
+$POLL_INTERVAL_SEC = 2
+$POLL_MAX_ATTEMPTS = 150  # 5 minutes at 2s intervals
+
+function Write-Banner {
+    Write-Host ""
+    Write-Host "╔══════════════════════════════════════════════════╗"
+    Write-Host "║      {{INSTANCE_NAME}} — Claude Setup            ║"
+    Write-Host "╚══════════════════════════════════════════════════╝"
+    Write-Host ""
+}
+
+function Update-EnvPath {
+    # After installing Node, the current session's PATH doesn't reflect the new
+    # install. Refresh from the Machine + User registry entries so subsequent
+    # commands in this script can find `node`.
+    $machinePath = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $userPath = [System.Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = "$machinePath;$userPath"
+}
+
+function Install-NodeJs {
+    # Try winget first (built into Windows 10 1809+ and Windows 11)
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Host "  Installing Node.js LTS via winget..."
+        try {
+            $proc = Start-Process winget -ArgumentList @(
+                'install', '--id', 'OpenJS.NodeJS.LTS',
+                '--silent', '--accept-source-agreements', '--accept-package-agreements'
+            ) -Wait -PassThru -NoNewWindow
+            if ($proc.ExitCode -eq 0) {
+                Update-EnvPath
+                if (Get-Command node -ErrorAction SilentlyContinue) {
+                    $version = node --version
+                    Write-Host "  ✓ Node.js $version installed via winget" -ForegroundColor Green
+                    return $true
+                }
+            }
+            Write-Host "  ⚠ winget install completed but node still not on PATH" -ForegroundColor Yellow
+            Write-Host "  You may need to close and re-open PowerShell, then re-run this script."
+            return $false
+        } catch {
+            Write-Host "  ⚠ winget install failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    # Fall back to Chocolatey if it's installed
+    if (Get-Command choco -ErrorAction SilentlyContinue) {
+        Write-Host "  Installing Node.js LTS via Chocolatey..."
+        try {
+            $proc = Start-Process choco -ArgumentList @('install', 'nodejs-lts', '-y') -Wait -PassThru -NoNewWindow
+            if ($proc.ExitCode -eq 0) {
+                Update-EnvPath
+                if (Get-Command node -ErrorAction SilentlyContinue) {
+                    $version = node --version
+                    Write-Host "  ✓ Node.js $version installed via Chocolatey" -ForegroundColor Green
+                    return $true
+                }
+            }
+        } catch {
+            Write-Host "  ⚠ Chocolatey install failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    return $false
+}
+
+function Test-NodeJs {
+    Write-Host "Step 1: Checking for Node.js..."
+    if (Get-Command node -ErrorAction SilentlyContinue) {
+        $version = node --version
+        Write-Host "  ✓ Node.js $version found" -ForegroundColor Green
+        return
+    }
+
+    Write-Host "  Node.js not found." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Node.js is required to connect to the MCP server."
+    Write-Host ""
+
+    # Offer to auto-install if a package manager is available
+    $hasWinget = $null -ne (Get-Command winget -ErrorAction SilentlyContinue)
+    $hasChoco = $null -ne (Get-Command choco -ErrorAction SilentlyContinue)
+
+    if ($hasWinget -or $hasChoco) {
+        $manager = if ($hasWinget) { 'winget' } else { 'Chocolatey' }
+        $reply = Read-Host "  Install Node.js LTS via $manager now? [Y/n]"
+        if ($reply -eq '' -or $reply -match '^[Yy]') {
+            if (Install-NodeJs) {
+                return
+            }
+            Write-Host ""
+            Write-Host "  Auto-install didn't complete. Please install manually:" -ForegroundColor Yellow
+            Write-Host "    https://nodejs.org/en/download"
+            Write-Host "    or: winget install OpenJS.NodeJS.LTS"
+            Write-Host ""
+            Write-Host "  Then close and re-open PowerShell and re-run this script."
+            throw "Node.js install incomplete."
+        }
+        Write-Host "  Please install Node.js and re-run this script."
+        throw "Node.js is required."
+    }
+
+    # No package manager available — give clear manual instructions
+    Write-Host "  No package manager (winget or Chocolatey) detected." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Install Node.js LTS using one of these options:"
+    Write-Host "    1. Direct download: https://nodejs.org/en/download"
+    Write-Host "    2. Install winget first (Windows 10 1809+ comes with it):"
+    Write-Host "       https://learn.microsoft.com/en-us/windows/package-manager/winget/"
+    Write-Host "       Then re-run this script."
+    Write-Host ""
+    throw "Node.js is required."
+}
+
+function Install-Shim {
+    Write-Host ""
+    Write-Host "Step 2: Downloading the connector shim..."
+    $script:NODE_BIN = (Get-Command node -ErrorAction Stop).Source
+    if (-not (Test-Path $SHIM_DIR)) {
+        New-Item -ItemType Directory -Path $SHIM_DIR -Force | Out-Null
+    }
+    $tmp = Join-Path $SHIM_DIR "$MCP_NAME-shim.download.js"
+    try {
+        Invoke-WebRequest -Uri "$MCP_URL/install/m365-mcp-shim.js" -OutFile $tmp -UseBasicParsing
+        & $script:NODE_BIN --check $tmp
+        if ($LASTEXITCODE -ne 0) { throw "downloaded shim failed a syntax check" }
+        Move-Item -Path $tmp -Destination $SHIM_PATH -Force
+        $shimVersion = & $script:NODE_BIN $SHIM_PATH --version
+        Write-Host "  ✓ Shim $shimVersion saved to $SHIM_PATH" -ForegroundColor Green
+    } catch {
+        Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue
+        Write-Host "  ✗ Could not download $MCP_URL/install/m365-mcp-shim.js" -ForegroundColor Red
+        throw
+    }
+}
+
+function New-PkceVerifier {
+    # 16 random bytes → 32 hex chars (raw verifier — kept secret, sent only to poll)
+    $bytes = New-Object byte[] 16
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    return ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
+}
+
+function Get-PkceChallenge {
+    # SHA256(verifier) → 64 hex chars (code_challenge — safe to embed in browser URL)
+    param([string]$Verifier)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $hash = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Verifier))
+    return ($hash | ForEach-Object { $_.ToString('x2') }) -join ''
+}
+
+function Start-OAuthFlow {
+    # PKCE-style binding: browser URL carries only the challenge; the raw
+    # verifier stays in memory and is sent only to the poll endpoint. An attacker
+    # who intercepts the login URL cannot poll — SHA256 is preimage-resistant.
+    param([string]$Challenge)
+
+    Write-Host ""
+    Write-Host "Step 3: Sign in with Microsoft 365"
+
+    $deviceLabel = $env:COMPUTERNAME
+    $loginUrl = "$MCP_URL/api/auth/login?install_nonce=$Challenge&device_label=$deviceLabel"
+
+    Write-Host ""
+    Write-Host "  Opening your browser to sign in..."
+    Write-Host "  (If the browser doesn't open, visit this URL manually:)"
+    Write-Host "  $loginUrl"
+    Write-Host ""
+
+    try {
+        Start-Process $loginUrl -ErrorAction Stop
+    } catch {
+        Write-Host "  (couldn't auto-launch browser — open the URL above manually)"
+    }
+}
+
+function Wait-ForSession {
+    param([string]$Verifier)
+
+    Write-Host "  Waiting for sign-in to complete..."
+
+    $pollUrl = "$MCP_URL/api/auth/install-poll?nonce_verifier=$Verifier"
+
+    for ($attempt = 1; $attempt -le $POLL_MAX_ATTEMPTS; $attempt++) {
+        try {
+            $response = Invoke-WebRequest -Uri $pollUrl -Method Get -UseBasicParsing -ErrorAction Stop
+            $statusCode = $response.StatusCode
+            $body = $response.Content | ConvertFrom-Json
+
+            if ($statusCode -eq 200) {
+                Write-Host ""
+                Write-Host "  ✓ Signed in as $($body.displayName) <$($body.email)>"
+                return @{
+                    SessionToken = $body.sessionToken
+                    UserId = $body.userId
+                    Email = $body.email
+                    DisplayName = $body.displayName
+                }
+            }
+        } catch {
+            $statusCode = $null
+            if ($_.Exception.Response) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+
+            if ($statusCode -eq 202) {
+                Write-Host -NoNewline "."
+                Start-Sleep -Seconds $POLL_INTERVAL_SEC
+                continue
+            } elseif ($statusCode -eq 410) {
+                Write-Host ""
+                Write-Host "  ✗ Sign-in window expired or was already used. Run this script again." -ForegroundColor Red
+                throw "Nonce expired."
+            } else {
+                Write-Host ""
+                Write-Host "  ✗ Unexpected response (HTTP $statusCode) from $pollUrl" -ForegroundColor Red
+                throw "Poll failed: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "  ✗ Timed out waiting for sign-in (5 minutes). Run this script again." -ForegroundColor Red
+    throw "Timeout."
+}
+
+function Test-McpConnection {
+    param([string]$SessionToken)
+
+    Write-Host ""
+    Write-Host "Step 5: Testing MCP connection..."
+
+    $body = @{ jsonrpc = '2.0'; id = 1; method = 'tools/list'; params = @{} } | ConvertTo-Json -Compress
+    $headers = @{ Authorization = "Bearer $SessionToken" }
+
+    try {
+        $response = Invoke-RestMethod -Uri "$MCP_URL/api/mcp" -Method Post -Body $body -ContentType 'application/json' -Headers $headers
+        $toolCount = $response.result.tools.Count
+        if ($toolCount -gt 0) {
+            Write-Host "  ✓ Connected. $toolCount tools available."
+            return $toolCount
+        } else {
+            throw "No tools returned."
+        }
+    } catch {
+        Write-Host "  ✗ Connection test failed." -ForegroundColor Red
+        Write-Host "  Error: $($_.Exception.Message)"
+        throw
+    }
+}
+
+function Update-ClaudeConfig {
+    param(
+        [string]$ConfigPath,
+        [string]$SessionToken,
+        [bool]$IncludeStdioType
+    )
+
+    if (-not (Test-Path $ConfigPath)) {
+        return $false
+    }
+
+    # Backup
+    Copy-Item $ConfigPath "$ConfigPath.backup" -Force
+
+    # Read existing JSON, mutate the named slot, write back. Other entries
+    # in mcpServers and other top-level keys are preserved.
+    $config = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+
+    if (-not $config.mcpServers) {
+        $config | Add-Member -MemberType NoteProperty -Name 'mcpServers' -Value (New-Object PSObject) -Force
+    }
+
+    # Note: $args is a PowerShell automatic variable — using $mcpArgs to avoid conflict
+    $mcpArgs = @(
+        $SHIM_PATH,
+        '--streamableHttp',
+        "$MCP_URL/api/mcp",
+        '--header',
+        "Authorization:Bearer $SessionToken"
+    )
+
+    # node.exe by absolute path: Claude Desktop spawns the command directly,
+    # without a shell, so PATH lookups are not guaranteed.
+    $entry = [ordered]@{}
+    if ($IncludeStdioType) { $entry.type = 'stdio' }
+    $entry.command = $NODE_BIN
+    $entry.args = $mcpArgs
+
+    # Replace or add the named entry under mcpServers, carrying over an
+    # existing env block (M365_MCP_ATTACH_ROOTS) so a re-install keeps it.
+    if ($config.mcpServers.PSObject.Properties.Name -contains $MCP_NAME) {
+        $previous = $config.mcpServers.$MCP_NAME
+        if ($previous.env) { $entry.env = $previous.env }
+        $config.mcpServers.PSObject.Properties.Remove($MCP_NAME)
+    }
+    $config.mcpServers | Add-Member -MemberType NoteProperty -Name $MCP_NAME -Value ([PSCustomObject]$entry)
+
+    # PowerShell 5.1's -Encoding UTF8 writes a BOM (\xEF\xBB\xBF) that breaks
+    # JSON parsers (Claude Desktop rejects the file). Use .NET directly to
+    # write UTF-8 without BOM, which works on both PS 5.1 and 7+.
+    $json = $config | ConvertTo-Json -Depth 32
+    [System.IO.File]::WriteAllText($ConfigPath, $json, (New-Object System.Text.UTF8Encoding $false))
+    return $true
+}
+
+function Update-AllConfigs {
+    param([string]$SessionToken)
+
+    Write-Host ""
+    Write-Host "Step 6: Configuring Claude..."
+
+    if (Update-ClaudeConfig -ConfigPath $CLI_CONFIG -SessionToken $SessionToken -IncludeStdioType $true) {
+        Write-Host "  ✓ Updated $CLI_CONFIG (Claude Code CLI)"
+    } else {
+        Write-Host "  ⚠ $CLI_CONFIG not found — skipping CLI config"
+    }
+
+    if (Update-ClaudeConfig -ConfigPath $SETTINGS_CONFIG -SessionToken $SessionToken -IncludeStdioType $false) {
+        Write-Host "  ✓ Updated $SETTINGS_CONFIG (Claude Code settings)"
+    } else {
+        Write-Host "  ⚠ $SETTINGS_CONFIG not found — skipping"
+    }
+
+    if (Update-ClaudeConfig -ConfigPath $DESKTOP_CONFIG -SessionToken $SessionToken -IncludeStdioType $false) {
+        Write-Host "  ✓ Updated Claude Desktop config"
+    } else {
+        # Create the directory + file if missing
+        $desktopDir = Split-Path $DESKTOP_CONFIG -Parent
+        if (-not (Test-Path $desktopDir)) {
+            New-Item -ItemType Directory -Path $desktopDir -Force | Out-Null
+        }
+        [System.IO.File]::WriteAllText($DESKTOP_CONFIG, '{ "mcpServers": {} }', (New-Object System.Text.UTF8Encoding $false))
+        if (Update-ClaudeConfig -ConfigPath $DESKTOP_CONFIG -SessionToken $SessionToken -IncludeStdioType $false) {
+            Write-Host "  ✓ Created Claude Desktop config"
+        }
+    }
+}
+
+function Show-Done {
+    param([int]$ToolCount)
+
+    Write-Host ""
+    Write-Host "╔══════════════════════════════════════════════════╗"
+    Write-Host "║                   Setup Complete!                ║"
+    Write-Host "╚══════════════════════════════════════════════════╝"
+    Write-Host ""
+    Write-Host "  Restart Claude Desktop and/or Claude Code to activate."
+    Write-Host ""
+    Write-Host "  You now have access to $ToolCount tools for:"
+    Write-Host "    • Email (read, search, send, drafts)"
+    Write-Host "    • OneDrive (browse, read, write, move, delete)"
+    Write-Host "    • SharePoint (sites, folders, files, lists)"
+    Write-Host "    • Calendar (view, create, update, delete events)"
+    Write-Host "    • Contacts (search, create, update, delete)"
+    Write-Host "    • OneNote (notebooks, sections, pages)"
+    Write-Host ""
+    Write-Host "  Attachments and OneDrive uploads can name a local file under"
+    Write-Host "  Downloads, Documents or your OneDrive folder, up to 10 MB."
+    Write-Host ""
+    Write-Host "  To re-authenticate later, just re-run this script."
+    Write-Host "  Sessions persist across container restarts via Azure Table"
+    Write-Host "  Storage and refresh M365 tokens silently."
+    Write-Host ""
+}
+
+# ── Main flow ──
+Write-Banner
+Test-NodeJs
+Install-Shim
+$verifier = New-PkceVerifier
+$challenge = Get-PkceChallenge -Verifier $verifier
+Start-OAuthFlow -Challenge $challenge
+$session = Wait-ForSession -Verifier $verifier
+$toolCount = Test-McpConnection -SessionToken $session.SessionToken
+Update-AllConfigs -SessionToken $session.SessionToken
+Show-Done -ToolCount $toolCount

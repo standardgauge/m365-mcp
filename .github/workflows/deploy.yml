@@ -1,0 +1,196 @@
+name: Deploy
+
+# Builds the image, pushes it to your Azure Container Registry, rolls the
+# Container App, and then proves the deploy rather than assuming it.
+#
+# This workflow is inert until you turn it on. Set these repository VARIABLES:
+#   DEPLOY_ENABLED         'true' to allow this workflow to run at all
+#   AUTO_UPDATE            'true' to deploy on every push to main.
+#                          Unset means pinned: only a manual dispatch deploys.
+#   AZURE_RESOURCE_GROUP   e.g. rg-m365-mcp
+#   CONTAINER_APP_NAME     e.g. m365-mcp
+#   ACR_NAME               e.g. m365mcpacr  (no hyphens)
+#
+# And these repository SECRETS:
+#   AZURE_CREDENTIALS   service principal JSON with Contributor on the resource
+#                       group and AcrPush on the registry. Used by azure/login
+#                       and by az acr login, so no ACR admin user is needed.
+#   AZURE_CLIENT_ID     your Entra app client ID. Baked into the admin SPA at
+#                       build time; the backend reads its own from a Container
+#                       App secret.
+#   AZURE_TENANT_ID     your Microsoft 365 tenant ID. Same dual purpose.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/dependabot.yml'
+      - '.github/pull_request_template.md'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to deploy (default: sha-<short>)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: write  # docker/build-push-action GHA cache backend
+
+# Serialize deploys so a fast follow-up commit cannot race the previous run
+# into az containerapp update. Never cancel in progress: a half-rolled
+# revision is worse than waiting.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}
+  ACR_NAME: ${{ vars.ACR_NAME }}
+
+jobs:
+  build-push-deploy:
+    name: Build, push to ACR, deploy to Container App
+    if: >-
+      vars.DEPLOY_ENABLED == 'true' &&
+      (github.event_name == 'workflow_dispatch' || vars.AUTO_UPDATE == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check required configuration
+        run: |
+          missing=
+          for v in AZURE_RESOURCE_GROUP CONTAINER_APP_NAME ACR_NAME; do
+            eval "val=\${$v}"
+            [ -n "$val" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository variables:$missing"
+            exit 1
+          fi
+
+      - name: Resolve image tag
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="sha-$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          fi
+          if ! echo "$TAG" | grep -qE '^[a-zA-Z0-9._-]+$'; then
+            echo "::error::Invalid tag: '$TAG' — only [a-zA-Z0-9._-] allowed"
+            exit 1
+          fi
+          IMAGE="${ACR_NAME}.azurecr.io/${CONTAINER_APP_NAME}:${TAG}"
+          echo "tag=${TAG}"     >>"$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >>"$GITHUB_OUTPUT"
+          echo "Will deploy: ${IMAGE}"
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: ACR login
+        run: az acr login --name "$ACR_NAME"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ${{ env.ACR_NAME }}.azurecr.io/${{ env.CONTAINER_APP_NAME }}:latest
+          build-args: |
+            AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}
+            AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Update Container App
+        env:
+          DEPLOY_IMAGE: ${{ steps.meta.outputs.image }}
+        run: |
+          az containerapp update \
+            --name "${CONTAINER_APP_NAME}" \
+            --resource-group "${AZURE_RESOURCE_GROUP}" \
+            --image "$DEPLOY_IMAGE"
+
+      # Prove the deploy works rather than that az returned 0. Both assertions
+      # below have failed silently in production before: a 200 from the SPA
+      # catch-all masking a dead /health route, and a post-login redirect
+      # pointing at a path the Functions host reserves.
+      - name: Post-deploy smoke
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          FQDN=$(az containerapp show \
+            --name "${CONTAINER_APP_NAME}" \
+            --resource-group "${AZURE_RESOURCE_GROUP}" \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+
+          # 1. /health must serve JSON carrying the commit we just shipped.
+          deadline=$(( $(date +%s) + 300 ))
+          while :; do
+            code=$(curl -s -o /tmp/health.json -w '%{http_code}' --max-time 15 "https://${FQDN}/health" || echo 000)
+            ctype=$(curl -s -o /dev/null -w '%{content_type}' --max-time 15 "https://${FQDN}/health" || echo none)
+            got=$(jq -r '.sha // empty' /tmp/health.json 2>/dev/null || true)
+            if [ "$code" = "200" ] && [ "$got" = "$EXPECTED_SHA" ]; then
+              case "$ctype" in
+                application/json*) break ;;
+                *) echo "::error::/health returned 200 but Content-Type is '${ctype}', not JSON — the SPA catch-all is masking a dead route"; exit 1 ;;
+              esac
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::/health did not report ${EXPECTED_SHA} within 300s (last: code=${code} type=${ctype} sha=${got:-none})"
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "health OK — serving ${EXPECTED_SHA} as ${ctype}"
+
+          # 2. The post-login redirect target must actually be the admin UI.
+          FRONTEND_URL=$(az containerapp secret show \
+            --name "${CONTAINER_APP_NAME}" \
+            --resource-group "${AZURE_RESOURCE_GROUP}" \
+            --secret-name frontend-url --query value -o tsv 2>/dev/null || true)
+          if [ -z "$FRONTEND_URL" ]; then
+            echo "::notice::no frontend-url secret set; app falls back to the site root"
+            FRONTEND_URL="https://${FQDN}/"
+          fi
+
+          # /admin and /runtime belong to the Functions host: it answers them
+          # before any of our routes, so a redirect there can never land.
+          FRONTEND_PATH=$(echo "$FRONTEND_URL" | sed -E 's#^https?://[^/]+##; s#/+$##' | tr 'A-Z' 'a-z')
+          case "$FRONTEND_PATH" in
+            /admin|/admin/*|/runtime|/runtime/*)
+              echo "::error::frontend-url is '${FRONTEND_URL}', whose path is reserved by the Azure Functions host — post-login redirects there 404 (see docs/operations-runbook.md, Reserved paths)"
+              exit 1 ;;
+          esac
+
+          fcode=$(curl -s -o /tmp/frontend.html -w '%{http_code}' --max-time 20 "$FRONTEND_URL" || echo 000)
+          if [ "$fcode" != "200" ]; then
+            echo "::error::frontend-url '${FRONTEND_URL}' returned HTTP ${fcode}, expected 200"
+            exit 1
+          fi
+          if ! grep -q '<title>MCP Admin</title>' /tmp/frontend.html; then
+            echo "::error::frontend-url '${FRONTEND_URL}' returned 200 but is not the admin SPA"
+            exit 1
+          fi
+          echo "frontend OK — ${FRONTEND_URL} serves the admin SPA"

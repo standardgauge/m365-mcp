@@ -1,0 +1,80 @@
+# Dependency monitoring for the M365 MCP server.
+#
+# Tracks: npm (root + mcp-bridge), Docker base images (all Dockerfiles at /),
+# and GitHub Actions versions. Production npm deps are grouped so security
+# patches arrive as one PR per ecosystem rather than one per package.
+#
+# Snyk () is not configured here — it requires SNYK_TOKEN
+# in repo secrets. Add the workflow once that secret is provisioned.
+
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "security"
+    groups:
+      production-deps:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+      dev-deps:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "npm"
+    directory: "/mcp-bridge"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "security"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "docker"
+      - "security"
+    ignore:
+      # The build-stage Node major MUST track the azure-functions/node:4-node20
+      # production runtime (Dockerfile stage 2) so compiled native modules match
+      # the runtime. Dependabot proposed node:20-slim -> node:26-slim (PR #15,
+      #) — Node Current, pre-LTS, and it desyncs the builder from the
+      # node20 runtime. Ignore major node bumps; move the builder deliberately,
+      # together with the runtime image, when adopting a new Node LTS.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "ci"
+      - "security"

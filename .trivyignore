@@ -1,0 +1,52 @@
+# .trivyignore — suppressions for the Container Scan (Trivy) CI job (.github/workflows/ci.yml)
+#
+# Wired into the BLOCKING app-layer scan step only ("Scan image with Trivy — app
+# layer (gate)", vuln-type: library). Base-OS CVEs are handled by a separate
+# report-only step (vuln-type: os, exit-code 0) and are NOT listed here — see
+# docs/trivy-suppressions.md for why the OS layer does not gate.
+# This file therefore only ever needs entries for app/library (lang-pkg) findings.
+#
+# Each entry MUST carry a justification and a re-review date. Remove an entry the
+# moment the underlying condition changes (e.g. the base image ships a patched
+# assembly) — a fresh `docker build` re-pulls the rolling base tag on every main
+# push, so a genuinely-fixed vuln stops being reported without any change here.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# MessagePack (MessagePack-CSharp) 2.5.192 — June-2026 advisory batch
+#   Fixed upstream in: 2.5.301 (v2 line) / 3.1.7 (v3 line)
+#   Re-review by:      2026-10-01  (or sooner if the base image is bumped)
+
+#
+# Why this is ignored rather than bumped:
+#   MessagePack.dll is a .NET assembly vendored inside the Azure Functions host
+#   runtime that ships in our stage-2 base image
+#   (mcr.microsoft.com/azure-functions/node:4-node20). It is NOT an npm
+#   dependency of this app (grep the package-lock: there is no messagepack), and
+#   it is NOT part of our application code under /home/site/wwwroot — it belongs
+#   to the Microsoft-maintained host. We do not build the host and cannot bump
+#   the assembly independently. `4-node20` is a rolling tag and CI rebuilds fresh
+#   on every main push, yet the image still ships 2.5.192, so Microsoft has not
+#   yet published a host image carrying MessagePack >= 2.5.301. The scan job
+#   already runs with `ignore-unfixed: true`; these advisories surface only
+#   because an upstream fix version exists that the base image has not adopted.
+#
+# Why it is not reachable in our deployment (CWE-20, remote DoS):
+#   The vulnerable path is LZ4 decompression / deserialization of *untrusted*
+#   MessagePack payloads. This is a Node.js/TypeScript Azure Functions app; it
+#   neither references nor invokes MessagePack. The host uses MessagePack only
+#   for internal, trusted, in-process communication with its language workers —
+#   it does not deserialize attacker-controlled MessagePack from the public HTTP
+#   surface. The precondition (an attacker delivering a crafted MessagePack LZ4
+#   payload to a deserializer) is therefore not met.
+#
+# Trivy currently flags CVE-2026-48109 (CVSS 8.2) and CVE-2026-48506 (CVSS 7.5)
+# as HIGH on this assembly. The remaining IDs below are the rest of the same
+# June-2026 MessagePack-CSharp batch — identical root cause, threat model, and
+# fix version — listed so main does not re-redden if Trivy's DB reclassifies any
+# of them to HIGH before the base image is patched.
+CVE-2026-48109
+CVE-2026-48506
+CVE-2026-48502
+CVE-2026-48510
+CVE-2026-48512
+CVE-2026-48515

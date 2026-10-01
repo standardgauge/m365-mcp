@@ -1,0 +1,23 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_EXTENSION_VERSION": "~4",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "WEBSITE_NODE_DEFAULT_VERSION": "~20",
+
+    "AZURE_CLIENT_ID": "<AAD app registration client ID>",
+    "AZURE_CLIENT_SECRET": "<AAD app registration client secret>",
+    "AZURE_TENANT_ID": "<your M365 tenant ID>",
+
+    "OAUTH_REDIRECT_URI": "http://localhost:7071/api/auth/callback",
+    "FRONTEND_URL": "http://localhost:5173",
+
+    "AZURE_STORAGE_CONNECTION_STRING": "UseDevelopmentStorage=true"
+  },
+  "Host": {
+    "LocalHttpPort": 7071,
+    "CORS": "http://localhost:5173",
+    "CORSCredentials": true
+  }
+}

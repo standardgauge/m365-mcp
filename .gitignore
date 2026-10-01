@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+local.settings.json
+.func/
+.azure/
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db

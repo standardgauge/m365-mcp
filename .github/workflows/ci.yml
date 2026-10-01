@@ -1,0 +1,292 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-type-check:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        run: npx eslint .
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit for HIGH/CRITICAL vulnerabilities
+        run: npm audit --audit-level=high
+
+  secrets-scan:
+    name: Secrets Scan (TruffleHog)
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # full history required for git-log scanning
+
+      - name: TruffleHog secrets scan
+        # Pinned to a commit SHA (v3.95.8) rather than a mutable @main ref so a
+        # compromised upstream tag/branch can't silently run in CI (F15).
+        uses: trufflesecurity/trufflehog@00155c9dc586f34d189adc83d3ac2698c2ec551f
+        with:
+          path: ./
+          # Use event SHAs so push-to-main (where branch name == HEAD) doesn't fail
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          head: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.after }}
+          extra_args: --only-verified
+
+  codeql:
+    name: CodeQL SAST
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          source-root: src
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: '/language:javascript-typescript'
+          output: codeql-results
+          upload: 'never'  # GHAS not enabled on this private repo; store results locally
+
+      - name: Fail on HIGH/CRITICAL CodeQL findings
+        run: |
+          SARIF=$(find codeql-results -name '*.sarif' | head -1)
+          if [ -z "$SARIF" ]; then
+            echo "No SARIF output found — analysis may have produced no results."
+            exit 0
+          fi
+          COUNT=$(jq '[.runs[].results[] | select(.level == "error" or .level == "warning")] | length' "$SARIF" 2>/dev/null || echo "0")
+          if [ "$COUNT" -gt 0 ]; then
+            echo "::error::CodeQL found $COUNT security finding(s). Enable GitHub Advanced Security to view in the Security tab."
+            exit 1
+          fi
+          echo "CodeQL: no HIGH/CRITICAL findings."
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (includes postbuild template copy to dist/install/)
+        run: npm run build
+
+      - name: Run tests (exercises dist/install packaging path)
+        run: npm test
+
+      - name: Verify dist/install packaging
+        run: |
+          for f in install-mcp.ps1.template install-mcp.sh.template m365-mcp-shim.js; do
+            test -f "dist/install/$f" || { echo "ERROR dist/install/$f missing after build"; exit 1; }
+          done
+
+  # ── Container boot (pull requests) ───────────────────────────────────────────
+  # container-scan below builds the image only after merge, so nothing proved a
+  # PR's image boots before it shipped. That gap is what held the non-root
+  # change (F8) open: the Functions base image historically
+  # expected root, and only a real boot can say whether it still does.
+  #
+  # Builds the image into the runner's daemon (never pushed, read-only token),
+  # boots it, and fails unless:
+  #   1. GET /health returns the JSON body for this exact build (sha matches),
+  #   2. no process in the container runs as uid 0, and
+  #   3. trivy's DS-0002 ("image user should not be root") ran against the
+  #      Dockerfile and passed, so a regression fails here, not at release.
+  container-boot:
+    name: Container Boot (PR)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      IMAGE: m365-mcp:pr-boot
+      CONTAINER: m365-mcp-boot
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build image (local daemon only, never pushed)
+        run: docker build --build-arg GIT_SHA="$GITHUB_SHA" -t "$IMAGE" .
+
+      # No AzureWebJobsStorage, matching infra/container-app.bicep: without it
+      # the Functions host keeps secrets and logs on the local filesystem, which
+      # is the path a non-root user might not be able to write.
+      - name: Boot container
+        run: docker run -d --name "$CONTAINER" -p 8080:8080 "$IMAGE"
+
+      - name: Wait for /health to serve JSON from this build
+        run: |
+          for i in $(seq 1 60); do
+            if body=$(curl -fsS --max-time 5 http://localhost:8080/health 2>/dev/null); then
+              echo "GET /health after ~$((i * 2))s: $body"
+              echo "$body" | jq -e --arg sha "$GITHUB_SHA" '.status == "ok" and .sha == $sha' > /dev/null \
+                || { echo "::error::/health answered, but not with status ok for sha $GITHUB_SHA"; exit 1; }
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]; then
+              echo "::error::container exited before /health answered"
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::error::/health did not answer within 120s"
+          exit 1
+
+      - name: Assert nothing in the container runs as root
+        run: |
+          uid=$(docker exec "$CONTAINER" id -u)
+          echo "docker exec id -u: $uid"
+          [ "$uid" != "0" ] || { echo "::error::the image's user is root"; exit 1; }
+          # The exec user only shows the image's USER. Check every live process
+          # as well, the Functions host and its Node language worker included.
+          docker top "$CONTAINER" -eo uid,pid,args
+          if docker top "$CONTAINER" -eo uid,pid | awk 'NR > 1 && $1 == 0 { found = 1 } END { exit !found }'; then
+            echo "::error::a process in the container runs as uid 0"
+            exit 1
+          fi
+
+      - name: Container logs
+        if: always()
+        run: docker logs "$CONTAINER" 2>&1 | tail -n 200 || true
+
+      # Same setup-trivy commit and trivy version that the pinned trivy-action
+      # (v0.36.0) in container-scan installs, so both jobs run one scanner build.
+      - name: Install trivy
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: v0.70.0
+
+      # trivy treats only Dockerfile, Dockerfile.<ext> and *.Dockerfile as
+      # Dockerfiles, so this evaluates the production Dockerfile and skips the
+      # Dockerfile.*.dev files docker-compose uses. --include-non-failures lists
+      # passing checks too, so the gate can require DS-0002 to have run and
+      # passed rather than merely be absent from the failures.
+      - name: "trivy config: DS-0002 must pass on the Dockerfile"
+        run: |
+          trivy config --include-non-failures --format json --output trivy-config.json .
+          jq -r '.Results[]? | select(.Type == "dockerfile")
+            | "\(.Target): \(.MisconfSummary.Successes) checks passed, \(.MisconfSummary.Failures) failed"' trivy-config.json
+          jq -r '.Results[]? | .Target as $t | .Misconfigurations[]? | select(.Status == "FAIL")
+            | "  FAIL \($t) \(.ID) \(.Severity) \(.Title)"' trivy-config.json
+          jq -e '
+            def ds0002: select((.ID // "" | test("DS-?0*2$")) or (.AVDID // "" | test("DS-?0*2$")));
+            ([.Results[]? | select(.Target == "Dockerfile") | .Misconfigurations[]? | ds0002 | select(.Status == "PASS")] | length > 0)
+            and ([.Results[]? | .Misconfigurations[]? | ds0002 | select(.Status == "FAIL")] | length == 0)
+          ' trivy-config.json > /dev/null \
+            || { echo "::error::trivy DS-0002 did not run and pass on Dockerfile"; exit 1; }
+          echo "DS-0002 (image user should not be root): PASS on Dockerfile"
+
+  container-scan:
+    name: Container Scan (Trivy)
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    # Vulnerability scan on push to main only; it is too slow for every PR.
+    # PRs still build and boot the image in container-boot above.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build Docker image
+        run: docker build -t m365-mcp:${{ github.sha }} .
+
+      # ── App-layer scan (BLOCKING) ─────────────────────────────────────────────
+      # The meaningful gate: fixable HIGH/CRITICAL vulns in packages this repo
+      # actually ships and controls — our production npm deps and any bundled
+      # library. `vuln-type: library` (lang-pkgs) covers these. Fails the build.
+      # MessagePack-CSharp is a `dotnet-core` lang-pkg vendored in the base image,
+      # so it is caught here and suppressed via .trivyignore.
+      - name: Scan image with Trivy — app layer (gate)
+        # Pinned to a commit SHA (v0.36.0) rather than the mutable @master ref (F15).
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: m365-mcp:${{ github.sha }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'library'
+          severity: 'CRITICAL,HIGH'
+          # Exclude base-image npm packages (/usr/lib/node_modules) that we
+          # don't control. App packages at /home/site/wwwroot are still scanned.
+          skip-dirs: '/usr/lib/node_modules,/usr/local/lib/node_modules'
+          # Documented, justified CVE suppressions (each entry carries a reason
+          # and a re-review date). Currently: MessagePack-CSharp assemblies
+          # vendored in the Azure Functions host base image — see
+          # and docs/trivy-suppressions.md.
+          trivyignores: .trivyignore
+
+      # ── Base-OS scan (REPORT-ONLY) ────────────────────────────────────────────
+      # OS-layer CVEs live entirely inside Microsoft's vendor base image
+      # (mcr.microsoft.com/azure-functions/node:4-node20, currently debian 11.11).
+      # We do not build that image and cannot bump its packages independently —
+      # `4-node20` is a rolling tag CI already re-pulls on every main push, so the
+      # only remediation available to us is to wait for Microsoft to rebuild (or
+      # for Dependabot's docker ecosystem watch to bump the tag). Gating on these
+      # therefore reddens CI on every new base-OS CVE wave (e.g. the July-2026
+      # linux-libc-dev kernel-header batch) with no action we can
+      # take. Kernel-header CVEs in particular are non-exploitable in a container
+      # (no running kernel; the host kernel is shared). So we surface base-OS
+      # findings for visibility but do not gate on them (exit-code 0). This is NOT
+      # a blanket HIGH ignore — the app-layer gate above still fails the build on
+      # anything we ship. See docs/trivy-suppressions.md.
+      - name: Scan image with Trivy — base OS (report-only)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: m365-mcp:${{ github.sha }}
+          format: table
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os'
+          severity: 'CRITICAL,HIGH'

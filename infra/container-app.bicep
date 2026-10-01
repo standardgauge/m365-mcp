@@ -1,0 +1,237 @@
+@description('Azure region for all resources.')
+param location string = resourceGroup().location
+
+@description('Short name prefix used for all resource names.')
+param appName string = 'm365-mcp'
+
+@description('Container image tag to deploy.')
+param imageTag string = 'latest'
+
+// ── Secrets (passed in at deploy time — never hard-code) ──────────────────────
+@secure()
+param azureClientId string
+@secure()
+param azureClientSecret string
+@secure()
+param azureTenantId string
+@secure()
+param oauthRedirectUri string
+@secure()
+param frontendUrl string
+@secure()
+param azureStorageConnectionString string
+
+// — credential-at-rest hardening keys.
+// Generate fresh values per environment with `openssl rand -hex 32` and pass
+// them in at deploy time. NEVER reuse across tenants or environments.
+@secure()
+@description('64-hex-char HMAC-SHA256 key for hashing session tokens at rest.')
+param mcpSessionHmacKey string
+@secure()
+@description('64-hex-char AES-256-GCM data encryption key for access tokens and MSAL cache at rest.')
+param mcpDataEncryptionKey string
+
+// ── Derived names ──────────────────────────────────────────────────────────────
+var acrName = replace('${appName}acr', '-', '')          // ACR names: alphanumeric only
+var environmentName = '${appName}-env'
+var containerAppName = appName
+
+// AcrPull built-in role
+var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+
+// ── Azure Container Registry ──────────────────────────────────────────────────
+resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+  // checkov:skip=CKV_AZURE_139: ACR public networking disabled after private endpoint is provisioned; Container Apps Consumption requires public routing until custom VNet integration is configured
+  // checkov:skip=CKV_AZURE_163: Vulnerability scanning is enabled via Microsoft Defender for Containers at subscription scope, not at the registry resource level
+  // checkov:skip=CKV_AZURE_166: ACR quarantine requires a dedicated quarantine processor pipeline to release images before Container Apps can pull them; enabling without this infrastructure blocks all deployments. Image security scanning is handled by Microsoft Defender for Containers at subscription scope.
+  name: acrName
+  location: location
+  sku: {
+    name: 'Standard'  // Standard SKU for better retention, content trust, and geo-replication capabilities
+  }
+  properties: {
+    adminUserEnabled: false  // CKV_AZURE_137: use managed identity (AcrPull role) instead of admin credentials
+  }
+}
+
+// ── User-assigned identity for ACR pull (must exist before Container App is created) ──
+// Using user-assigned identity avoids the first-deploy ordering problem: system-assigned
+// identity does not exist until after the Container App is provisioned, but image pull
+// needs AcrPull permission during provisioning. User-assigned identity is created and
+// granted AcrPull first, so image pull succeeds on first deploy.
+resource acrPullIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: '${appName}-acr-pull'
+  location: location
+}
+
+// ── Grant user-assigned identity AcrPull on the registry (before Container App) ─
+resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: acr
+  name: guid(acr.id, acrPullIdentity.id, acrPullRoleId)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
+    principalId: acrPullIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// ── Log Analytics Workspace (90-day retention for MCP access logs) ────────────
+//: retentionInDays=90 satisfies the 90-day MCP access log target
+// in the AI Tool Permissioning framework.
+resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
+  name: '${appName}-logs'
+  location: location
+  properties: {
+    retentionInDays: 90
+    sku: {
+      name: 'PerGB2018'
+    }
+  }
+}
+
+// ── Application Insights (workspace-based, linked to Log Analytics) ────────────
+resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
+  name: '${appName}-insights'
+  location: location
+  kind: 'web'
+  properties: {
+    Application_Type: 'web'
+    WorkspaceResourceId: logAnalyticsWorkspace.id
+  }
+}
+
+// ── Container Apps Environment (Consumption) ───────────────────────────────────
+resource cae 'Microsoft.App/managedEnvironments@2023-05-01' = {
+  name: environmentName
+  location: location
+  properties: {
+    zoneRedundant: false
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: logAnalyticsWorkspace.properties.customerId
+        sharedKey: logAnalyticsWorkspace.listKeys().primarySharedKey
+      }
+    }
+  }
+}
+
+// ── Container App ──────────────────────────────────────────────────────────────
+resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
+  name: containerAppName
+  location: location
+  dependsOn: [
+    acrPullRoleAssignment  // ensure AcrPull RBAC is assigned before Container App pulls from ACR
+  ]
+  identity: {
+    type: 'SystemAssigned, UserAssigned'
+    userAssignedIdentities: {
+      '${acrPullIdentity.id}': {}
+    }
+  }
+  properties: {
+    managedEnvironmentId: cae.id
+    configuration: {
+      ingress: {
+        external: true
+        // Container listens on 8080 so the Functions host can run as a non-root
+        // user (privileged port 80 is unbindable non-root — see Dockerfile,
+        // F8 /). Public 80→443 redirect is unaffected (ACA edge).
+        targetPort: 8080
+        transport: 'auto'
+        allowInsecure: false
+      }
+      registries: [
+        {
+          server: acr.properties.loginServer
+          identity: acrPullIdentity.id  // user-assigned identity; AcrPull granted before Container App is created
+        }
+      ]
+      secrets: [
+        {
+          name: 'azure-client-id'
+          value: azureClientId
+        }
+        {
+          name: 'azure-client-secret'
+          value: azureClientSecret
+        }
+        {
+          name: 'azure-tenant-id'
+          value: azureTenantId
+        }
+        {
+          name: 'oauth-redirect-uri'
+          value: oauthRedirectUri
+        }
+        {
+          name: 'frontend-url'
+          value: frontendUrl
+        }
+        {
+          name: 'azure-storage-connection-string'
+          value: azureStorageConnectionString
+        }
+        {
+          name: 'mcp-session-hmac-key'
+          value: mcpSessionHmacKey
+        }
+        {
+          name: 'mcp-data-encryption-key'
+          value: mcpDataEncryptionKey
+        }
+        {
+          name: 'appinsights-connection-string'
+          value: applicationInsights.properties.ConnectionString
+        }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: containerAppName
+          image: '${acr.properties.loginServer}/${containerAppName}:${imageTag}'
+          resources: {
+            cpu: json('0.5')
+            memory: '1Gi'
+          }
+          env: [
+            { name: 'AZURE_CLIENT_ID',                 secretRef: 'azure-client-id' }
+            { name: 'AZURE_CLIENT_SECRET',              secretRef: 'azure-client-secret' }
+            { name: 'AZURE_TENANT_ID',                  secretRef: 'azure-tenant-id' }
+            { name: 'OAUTH_REDIRECT_URI',               secretRef: 'oauth-redirect-uri' }
+            { name: 'FRONTEND_URL',                     secretRef: 'frontend-url' }
+            { name: 'AZURE_STORAGE_CONNECTION_STRING',  secretRef: 'azure-storage-connection-string' }
+            { name: 'MCP_SESSION_HMAC_KEY',             secretRef: 'mcp-session-hmac-key' }
+            { name: 'MCP_DATA_ENCRYPTION_KEY',          secretRef: 'mcp-data-encryption-key' }
+            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-connection-string' }
+            { name: 'FUNCTIONS_EXTENSION_VERSION',      value: '~4' }
+            { name: 'WEBSITE_NODE_DEFAULT_VERSION',     value: '~20' }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 3
+        rules: [
+          {
+            name: 'http-scaling'
+            http: {
+              metadata: {
+                concurrentRequests: '20'
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+
+// ── Outputs ────────────────────────────────────────────────────────────────────
+output acrLoginServer string = acr.properties.loginServer
+output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
+output containerAppPrincipalId string = containerApp.identity.principalId
+output acrPullIdentityId string = acrPullIdentity.id
+output logAnalyticsWorkspaceName string = logAnalyticsWorkspace.name
+output applicationInsightsName string = applicationInsights.name

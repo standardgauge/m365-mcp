@@ -1,0 +1,91 @@
+{
+  "name": "m365-mcp",
+  "version": "0.1.0",
+  "description": "Microsoft 365 SharePoint + Exchange MCP server via Azure Functions with React admin UI",
+  "license": "AGPL-3.0-only",
+  "main": "dist/functions/**/*.js",
+  "scripts": {
+    "prebuild": "npm run clean",
+    "build": "tsc -p tsconfig.json",
+    "postbuild": "node -e \"const{cpSync,mkdirSync}=require('fs'),{join}=require('path');mkdirSync(join('dist','install'),{recursive:true});cpSync(join('src','install'),join('dist','install'),{recursive:true});process.stdout.write('templates \\u2192 dist/install\\n')\"",
+    "build:admin": "vite build --config vite.config.ts",
+    "watch": "tsc -p tsconfig.json --watch",
+    "start": "func start",
+    "dev": "concurrently \"npm run watch\" \"npm run start\"",
+    "dev:admin": "vite --config vite.config.ts",
+    "clean": "rimraf dist",
+    "test": "jest --passWithNoTests",
+    "test:watch": "jest --watch"
+  },
+  "dependencies": {
+    "@azure/data-tables": "^13.2.0",
+    "@azure/functions": "^4.0.0",
+    "@azure/msal-browser": "^3.27.0",
+    "@azure/msal-node": "^2.16.2",
+    "@azure/msal-react": "^2.1.0",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "applicationinsights": "^3.15.0",
+    "isomorphic-fetch": "^3.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^20.17.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@typescript-eslint/eslint-plugin": "^8.58.2",
+    "@typescript-eslint/parser": "^8.58.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "eslint": "^10.2.0",
+    "eslint-plugin-security": "^4.0.0",
+    "jest": "^29.7.0",
+    "rimraf": "^6.0.1",
+    "ts-jest": "^29.2.5",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "extensionsToTreatAsEsm": [
+      ".ts"
+    ],
+    "moduleNameMapper": {
+      "^(\\.{1,2}/.*)\\.js$": "$1"
+    },
+    "transform": {
+      "^.+\\.tsx?$": [
+        "ts-jest",
+        {
+          "useESM": true,
+          "tsconfig": {
+            "module": "ESNext",
+            "moduleResolution": "bundler"
+          }
+        }
+      ]
+    },
+    "testMatch": [
+      "**/src/__tests__/**/*.test.ts"
+    ],
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/dist/"
+    ]
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "overrides": {
+    "protobufjs": "^8.4.2",
+    "fast-uri": "^3.1.2",
+    "fast-xml-builder": "^1.2.0",
+    "fast-xml-parser": "^5.8.0",
+    "@opentelemetry/propagator-jaeger": "^2.9.0",
+    "@opentelemetry/core": "^2.8.0",
+    "brace-expansion": "^5.0.8"
+  }
+}

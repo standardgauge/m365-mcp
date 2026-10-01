@@ -1,0 +1,263 @@
+#!/bin/bash
+#
+# {{INSTANCE_NAME}} Installer
+# Sets up the M365 MCP connector for Claude Desktop + Claude Code on macOS.
+#
+# Hands-free flow: the script generates a one-time nonce, opens your browser
+# to complete OAuth, then polls the server until the session is ready. You
+# never see, copy, or paste a token.
+#
+# This script is served live from {{MCP_URL}}/install.sh — to install or
+# re-authenticate, run:
+#
+#   curl -fsSL {{MCP_URL}}/install.sh | bash
+#
+# Claude connects through a small local shim served by the same server
+# ({{MCP_URL}}/install/m365-mcp-shim.js), written to ~/.m365-mcp/. It forwards
+# MCP traffic and lets mail attachments and OneDrive uploads name a local file
+# under ~/Downloads, ~/Documents or the OneDrive sync folder. To allow other
+# folders, add "env": {"M365_MCP_ATTACH_ROOTS": "default:/path/one:/path/two"}
+# to the server entry in your Claude config; re-running this script keeps it.
+#
+
+set -e
+
+MCP_URL="{{MCP_URL}}"
+MCP_NAME="{{MCP_NAME}}"
+DESKTOP_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+CLI_CONFIG="$HOME/.claude.json"
+SETTINGS_CONFIG="$HOME/.claude/settings.json"
+POLL_INTERVAL=2
+POLL_MAX_ATTEMPTS=150  # 5 minutes at 2s intervals
+
+echo ""
+echo "╔══════════════════════════════════════════════════╗"
+echo "║      {{INSTANCE_NAME}} — Claude Setup            ║"
+echo "╚══════════════════════════════════════════════════╝"
+echo ""
+
+# ── Step 1: Check Node.js ──
+echo "Step 1: Checking for Node.js..."
+if command -v node &> /dev/null; then
+    NODE_VERSION=$(node --version)
+    echo "  ✓ Node.js ${NODE_VERSION} found"
+else
+    echo "  ✗ Node.js not found."
+    echo ""
+    echo "  Node.js is required to connect to the MCP server."
+    echo "  Install it from: https://nodejs.org"
+    echo ""
+    if command -v brew &> /dev/null; then
+        read -p "  Install via Homebrew? (y/n) " -n 1 -r
+        echo ""
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            brew install node
+            echo "  ✓ Node.js installed"
+        else
+            echo "  Please install Node.js and run this script again."
+            exit 1
+        fi
+    else
+        echo "  Please install Node.js from https://nodejs.org and run this script again."
+        exit 1
+    fi
+fi
+
+# ── Step 2: Download the connector shim ──
+echo ""
+echo "Step 2: Downloading the connector shim..."
+NODE_BIN=$(command -v node)
+SHIM_DIR="$HOME/.m365-mcp"
+SHIM_PATH="${SHIM_DIR}/${MCP_NAME}-shim.js"
+mkdir -p "$SHIM_DIR"
+SHIM_TMP="${SHIM_DIR}/${MCP_NAME}-shim.download.js"
+if curl -fsSL "${MCP_URL}/install/m365-mcp-shim.js" -o "$SHIM_TMP" && "$NODE_BIN" --check "$SHIM_TMP"; then
+    chmod 644 "$SHIM_TMP"
+    mv "$SHIM_TMP" "$SHIM_PATH"
+    echo "  ✓ Shim $("$NODE_BIN" "$SHIM_PATH" --version) saved to ${SHIM_PATH}"
+else
+    rm -f "$SHIM_TMP"
+    echo "  ✗ Could not download ${MCP_URL}/install/m365-mcp-shim.js"
+    exit 1
+fi
+
+# ── Step 3: Generate PKCE verifier + open browser ──
+echo ""
+echo "Step 3: Sign in with Microsoft 365"
+
+# PKCE-style binding: generate a random verifier, derive the code_challenge as
+# SHA256(verifier). The browser URL carries only the challenge; the poll
+# endpoint requires the verifier. An attacker who sees the URL cannot poll —
+# they would need to invert SHA256 to recover the verifier.
+VERIFIER=$(openssl rand -hex 16)
+# Use $NF (last field), not $2: macOS LibreSSL prints the bare hash with no
+# "SHA256(stdin)= " prefix, so $2 is empty there. $NF grabs the hash from both
+# LibreSSL (bare) and OpenSSL ("SHA2-256(stdin)= <hash>") output.
+CHALLENGE=$(printf '%s' "$VERIFIER" | openssl dgst -sha256 | awk '{print $NF}')
+DEVICE_LABEL=$(hostname)
+LOGIN_URL="${MCP_URL}/api/auth/login?install_nonce=${CHALLENGE}&device_label=${DEVICE_LABEL}"
+
+echo ""
+echo "  Opening your browser to sign in..."
+echo "  (If the browser doesn't open, visit this URL manually:)"
+echo "  ${LOGIN_URL}"
+echo ""
+open "${LOGIN_URL}" 2>/dev/null || true
+
+# ── Step 4: Poll for completion ──
+echo "  Waiting for sign-in to complete..."
+printf "  "
+
+POLL_URL="${MCP_URL}/api/auth/install-poll?nonce_verifier=${VERIFIER}"
+SESSION_TOKEN=""
+USER_EMAIL=""
+USER_NAME=""
+USER_ID=""
+
+for attempt in $(seq 1 ${POLL_MAX_ATTEMPTS}); do
+    HTTP_CODE=$(curl -s -o /tmp/install-poll-resp.json -w "%{http_code}" "${POLL_URL}" || echo "000")
+
+    if [ "$HTTP_CODE" = "200" ]; then
+        SESSION_TOKEN=$(python3 -c "import json; d=json.load(open('/tmp/install-poll-resp.json')); print(d.get('sessionToken',''))" 2>/dev/null || echo "")
+        USER_EMAIL=$(python3 -c "import json; d=json.load(open('/tmp/install-poll-resp.json')); print(d.get('email',''))" 2>/dev/null || echo "")
+        USER_NAME=$(python3 -c "import json; d=json.load(open('/tmp/install-poll-resp.json')); print(d.get('displayName',''))" 2>/dev/null || echo "")
+        USER_ID=$(python3 -c "import json; d=json.load(open('/tmp/install-poll-resp.json')); print(d.get('userId',''))" 2>/dev/null || echo "")
+        echo ""
+        echo "  ✓ Signed in as ${USER_NAME} <${USER_EMAIL}>"
+        break
+    elif [ "$HTTP_CODE" = "202" ]; then
+        printf "."
+        sleep ${POLL_INTERVAL}
+    elif [ "$HTTP_CODE" = "410" ]; then
+        echo ""
+        echo "  ✗ Sign-in window expired or was already used. Run this script again."
+        rm -f /tmp/install-poll-resp.json
+        exit 1
+    else
+        echo ""
+        echo "  ✗ Unexpected response (HTTP ${HTTP_CODE}) from ${POLL_URL}"
+        if [ -s /tmp/install-poll-resp.json ]; then
+            echo "  Body: $(cat /tmp/install-poll-resp.json)"
+        fi
+        rm -f /tmp/install-poll-resp.json
+        exit 1
+    fi
+done
+
+rm -f /tmp/install-poll-resp.json
+
+if [ -z "$SESSION_TOKEN" ]; then
+    echo ""
+    echo "  ✗ Timed out waiting for sign-in (5 minutes). Run this script again."
+    exit 1
+fi
+
+# ── Step 5: Test connection ──
+echo ""
+echo "Step 5: Testing MCP connection..."
+TEST_RESULT=$(curl -s -X POST \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${SESSION_TOKEN}" \
+    "${MCP_URL}/api/mcp" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' 2>/dev/null)
+
+TOOL_COUNT=$(echo "$TEST_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('result',{}).get('tools',[])))" 2>/dev/null || echo "0")
+
+if [ "$TOOL_COUNT" -gt 0 ]; then
+    echo "  ✓ Connected. ${TOOL_COUNT} tools available."
+else
+    echo "  ✗ Connection test failed. The session may not have been created correctly."
+    if [ -n "$TEST_RESULT" ]; then
+        echo "  Response: $(echo "$TEST_RESULT" | head -c 300)"
+    fi
+    exit 1
+fi
+
+# ── Step 6: Configure all Claude config files ──
+echo ""
+echo "Step 6: Configuring Claude..."
+
+# Every config gets the same entry: node runs the shim, which forwards to the
+# server with the session token. Values reach python through the environment,
+# not by splicing them into its source. An existing "env" block on the entry
+# (M365_MCP_ATTACH_ROOTS) is carried over.
+write_mcp_entry() {
+    CONFIG_PATH="$1" INCLUDE_TYPE="$2" MCP_NAME="$MCP_NAME" MCP_URL="$MCP_URL" \
+    NODE_BIN="$NODE_BIN" SHIM_PATH="$SHIM_PATH" SESSION_TOKEN="$SESSION_TOKEN" \
+    python3 << 'PYEOF'
+import json, os
+p = os.environ["CONFIG_PATH"]
+try:
+    with open(p) as f:
+        config = json.load(f)
+except FileNotFoundError:
+    config = {}
+servers = config.setdefault("mcpServers", {})
+name = os.environ["MCP_NAME"]
+entry = {}
+if os.environ["INCLUDE_TYPE"] == "1":
+    entry["type"] = "stdio"
+entry["command"] = os.environ["NODE_BIN"]
+entry["args"] = [os.environ["SHIM_PATH"], "--streamableHttp", os.environ["MCP_URL"] + "/api/mcp",
+                 "--header", "Authorization:Bearer " + os.environ["SESSION_TOKEN"]]
+previous = servers.get(name)
+if isinstance(previous, dict) and isinstance(previous.get("env"), dict):
+    entry["env"] = previous["env"]
+servers[name] = entry
+with open(p, "w") as f:
+    json.dump(config, f, indent=2)
+PYEOF
+}
+
+# 6a. Claude Code CLI config (~/.claude.json)
+if [ -f "$CLI_CONFIG" ]; then
+    cp "$CLI_CONFIG" "${CLI_CONFIG}.backup"
+    write_mcp_entry "$CLI_CONFIG" 1
+    echo "  ✓ Updated ~/.claude.json (Claude Code CLI)"
+else
+    echo "  ⚠ ~/.claude.json not found — skipping CLI config (create it manually if needed)"
+fi
+
+# 6b. Claude Code settings (~/.claude/settings.json)
+if [ -f "$SETTINGS_CONFIG" ]; then
+    cp "$SETTINGS_CONFIG" "${SETTINGS_CONFIG}.backup"
+    write_mcp_entry "$SETTINGS_CONFIG" 0
+    echo "  ✓ Updated ~/.claude/settings.json (Claude Code settings)"
+else
+    echo "  ⚠ ~/.claude/settings.json not found — skipping"
+fi
+
+# 6c. Claude Desktop config
+if [ -f "$DESKTOP_CONFIG" ]; then
+    cp "$DESKTOP_CONFIG" "${DESKTOP_CONFIG}.backup"
+    write_mcp_entry "$DESKTOP_CONFIG" 0
+    echo "  ✓ Updated Claude Desktop config"
+else
+    mkdir -p "$(dirname "$DESKTOP_CONFIG")"
+    write_mcp_entry "$DESKTOP_CONFIG" 0
+    echo "  ✓ Created Claude Desktop config"
+fi
+
+# ── Done ──
+echo ""
+echo "╔══════════════════════════════════════════════════╗"
+echo "║                   Setup Complete!                ║"
+echo "╚══════════════════════════════════════════════════╝"
+echo ""
+echo "  Restart Claude Desktop and/or Claude Code to activate."
+echo ""
+echo "  You now have access to ${TOOL_COUNT} tools for:"
+echo "    • Email (read, search, send, drafts)"
+echo "    • OneDrive (browse, read, write, move, delete)"
+echo "    • SharePoint (sites, folders, files, lists)"
+echo "    • Calendar (view, create, update, delete events)"
+echo "    • Contacts (search, create, update, delete)"
+echo "    • OneNote (notebooks, sections, pages)"
+echo ""
+echo "  Attachments and OneDrive uploads can name a local file under"
+echo "  ~/Downloads, ~/Documents or your OneDrive folder, up to 10 MB."
+echo ""
+echo "  To re-authenticate later (e.g. after a long absence), just"
+echo "  re-run this script. Sessions persist across container restarts"
+echo "  via Azure Table Storage and refresh M365 tokens silently."
+echo ""

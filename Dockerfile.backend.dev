@@ -1,0 +1,48 @@
+# Dev backend: compile TypeScript only (Vite admin served separately)
+# Mirrors the production Dockerfile: the Functions host runs as a non-root user
+# on port 8080 (privileged port 80 is unbindable non-root — F8).
+# docker-compose maps host:7071 → container:8080. Keeping dev in sync makes
+# `docker compose up` a faithful non-root boot test for the fix.
+#
+# azure-functions/node images are amd64-only; stage 1 build also runs as amd64
+# so compiled native modules match the runtime image. Keep the builder Node major
+# aligned with the node20 runtime below — Dependabot major node bumps are ignored
+# in .github/dependabot.yml so the two never desync.
+
+# ── Stage 1: build ─────────────────────────────────────────────────────────────
+FROM --platform=linux/amd64 node:20-slim AS builder
+WORKDIR /build
+
+COPY package*.json tsconfig.json ./
+RUN npm ci
+
+COPY src/ ./src/
+RUN npm run build
+
+# ── Stage 2: runtime ───────────────────────────────────────────────────────────
+# azure-functions/node images are amd64-only; runs under Rosetta on Apple Silicon.
+FROM --platform=linux/amd64 mcr.microsoft.com/azure-functions/node:4-node20
+
+ENV AzureWebJobsScriptRoot=/home/site/wwwroot \
+    AzureFunctionsJobHost__Logging__Console__IsEnabled=true \
+    FUNCTIONS_EXTENSION_VERSION=~4 \
+    WEBSITE_NODE_DEFAULT_VERSION=~20 \
+    ASPNETCORE_URLS=http://+:8080
+
+WORKDIR /home/site/wwwroot
+
+COPY package*.json host.json ./
+RUN npm ci --omit=dev
+
+# Copy all compiled output: functions import from ../../services so we need
+# dist/functions/, dist/services/, and dist/mcp/
+COPY --from=builder /build/dist/ ./dist/
+
+# Match production: run the host as a non-root user (F8).
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --home-dir /home/site --shell /usr/sbin/nologin app \
+    && chown -R app:app /home/site
+
+USER app
+
+EXPOSE 8080

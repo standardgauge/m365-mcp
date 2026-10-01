@@ -1,0 +1,85 @@
+name: IaC Security Scan
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - '.github/workflows/iac-scan.yml'
+  pull_request:
+    paths:
+      - 'infra/**'
+      - '.github/workflows/iac-scan.yml'
+  schedule:
+    # Weekly Monday 06:00 ET (10:00 UTC during EST, 11:00 UTC during EDT)
+    - cron: '0 10 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+  actions: read
+
+jobs:
+  checkov:
+    name: Checkov (Bicep / ARM)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run Checkov on infra/
+        id: checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra/
+          framework: bicep,arm
+          output_format: cli,sarif
+          output_file_path: console,checkov-results.sarif
+          # Baseline mode: report only, do not block PRs.
+          # First run on existing infra surfaces a backlog of findings
+          # (initial pass: 11 Bicep failures). Triage path is to fix
+          # genuine issues, suppress false-positives in `.checkov.yml`,
+          # then flip this back to `soft_fail: false` so the scan is
+          # blocking on new infra changes.
+          # follow-up. Until then, findings still surface in the
+          # Security tab via the SARIF upload below — visible without
+          # being a merge-blocker.
+          soft_fail: true
+          quiet: true
+
+      # Codex review (round 2 on PR #10) /: the SARIF upload
+      # step errored permanently because GitHub Advanced Security
+      # (code scanning) is not enabled on this repo, making the
+      # workflow red on every run. Two changes:
+      #   1. continue-on-error: true so the upload step doesn't fail
+      #      the job. Findings still surface in the run summary via
+      #      Checkov's CLI output.
+      #   2. Always upload the SARIF as a build artifact (even when
+      #      the code-scanning upload is skipped or fails). Reviewers
+      #      can download it from the run page until Advanced Security
+      #      is turned on in repo settings.
+      # Once code scanning is enabled, this fallback path becomes a
+      # no-op — the upload-sarif step succeeds and the artifact is
+      # redundant but harmless.
+      - name: Upload SARIF to GitHub code scanning
+        if: ${{ always() && hashFiles('checkov-results.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: checkov-results.sarif
+          category: checkov-bicep
+
+      - name: Upload SARIF as workflow artifact (fallback)
+        if: ${{ always() && hashFiles('checkov-results.sarif') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: checkov-sarif
+          path: checkov-results.sarif
+          if-no-files-found: ignore
+          retention-days: 30

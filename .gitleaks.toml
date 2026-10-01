@@ -1,0 +1,24 @@
+# gitleaks configuration for m365-mcp.
+#
+# Extends the upstream default ruleset and allowlists the single well-known
+# Azurite storage-emulator account key that appears in docker-compose.yml for
+# local development. It is a public, documented constant shipped by Microsoft
+# (the fixed devstoreaccount1 key), not a real secret, so flagging it only adds
+# noise that could mask a genuine leak (F18).
+#
+# Note: CI runs TruffleHog with --only-verified, which already excludes this key
+# because it cannot be verified against any live endpoint. This config is for
+# ad-hoc / audit gitleaks runs, which match by pattern and would otherwise
+# report the emulator key on every scan.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Well-known public Azurite emulator account key (local dev only)"
+# Match only the exact emulator key string, anywhere it appears. Scoping to the
+# literal value (rather than to a path) keeps the allowlist tight — any other
+# secret introduced into docker-compose.yml would still be flagged.
+regexes = [
+  '''Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==''',
+]
