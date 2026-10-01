@@ -1,6 +1,6 @@
 # Dependency monitoring for the M365 MCP server.
 #
-# Tracks: npm (root + mcp-bridge), Docker base images (all Dockerfiles at /),
+# Tracks: npm (root), Docker base images (all Dockerfiles at /),
 # and GitHub Actions versions. Production npm deps are grouped so security
 # patches arrive as one PR per ecosystem rather than one per package.
 #
@@ -31,18 +31,6 @@ updates:
         update-types:
           - "minor"
           - "patch"
-
-  - package-ecosystem: "npm"
-    directory: "/mcp-bridge"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
-      timezone: "America/New_York"
-    open-pull-requests-limit: 3
-    labels:
-      - "dependencies"
-      - "security"
 
   - package-ecosystem: "docker"
     directory: "/"
