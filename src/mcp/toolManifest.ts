@@ -587,7 +587,7 @@ export const TOOLS: McpTool[] = [
       {
         name: 'q',
         type: 'string',
-        description: 'Free-text query (phrase match on subject, body, sender). Optional when participant / from / to is given.',
+        description: 'Free-text query (phrase match on subject, body, sender). Optional when participant / from / to is given. KQL property syntax (received>=, from:, participants:) is rejected: use since / from / to / participant.',
         required: false,
       },
       {

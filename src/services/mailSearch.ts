@@ -22,6 +22,20 @@
  * `listMessages` is the deterministic "newest N in a folder" path. Every outcome
  * reports which fields were searched, how results are ordered, and, for a scan,
  * how far back it looked, so an empty result is never mistaken for proof of absence.
+ *
+ * closes the three silent cases left open on the mailbox-wide path:
+ *
+ *   - KQL property syntax typed into `q` (`received>=2026-01-01`, `participants:example.com`)
+ *     is phrase-searched as literal text and matches nothing. It is now rejected
+ *     with a pointer to `since` / `participant` / `from` / `to`.
+ *   - Exchange's KQL `participants:` / `from:` / `recipients:` restrictions return
+ *     an empty set for a bare domain, with HTTP 200. An empty KQL result for an
+ *     address criterion is now re-checked with the newest-first scan.
+ *   - `since` was applied client-side to one relevance-ranked page, so in-window
+ *     hits ranked below that page were dropped. The KQL path now pages until it
+ *     holds enough in-window matches, and reports when the search index stopped
+ *     returning results (measured at ~275 hits) instead of presenting the cap as
+ *     the end of the mailbox.
  */
 import { sanitizeKqlPhrase } from './kqlSearch.js';
 
@@ -88,6 +102,26 @@ const SCAN_PAGE_SIZE = 100;
 export const SCAN_BUDGET = 1000;
 const SCAN_MAX_PAGES = Math.ceil(SCAN_BUDGET / SCAN_PAGE_SIZE);
 
+/** Page size for a mailbox-wide `$search` that must page to honor `since`. */
+const KQL_PAGE_SIZE = 100;
+const KQL_MAX_PAGES = 5;
+/**
+ * Exchange's `$search` index stops returning hits at roughly 275 per query, with no
+ * `nextLink` and no error (, measured on two tenants). A
+ * result set that ends at or past this many raw hits is treated as capped, not
+ * complete. Set a little below the measured figure so a tenant capping slightly
+ * lower is still caught.
+ */
+export const KQL_RESULT_CAP = 250;
+
+/**
+ * KQL property restrictions a caller might type into `q`. `q` is always sent as a
+ * quoted phrase (F9), so these would be searched as literal text and
+ * match nothing. Matched as `name:` or `name` followed by a comparison operator.
+ */
+const KQL_PROPERTY_IN_TEXT =
+  /(?:^|[\s(])(received|sent|participants|from|to|cc|bcc|recipients|subject|body|attachment|attachments|hasattachments?|kind|size|importance|category)\s*(?::|>=|<=|<>|>|<|=)/i;
+
 const EMAIL_SHAPED = /^[^\s@"]*@[^\s@"]+$|^[^\s@"]+@$/;
 const DNS_LABEL = /^[a-z0-9-]+$/i;
 const TLD = /^[a-z]{2,}$/i;
@@ -109,6 +143,12 @@ export function isAddressShaped(q: string): boolean {
   const t = q.trim();
   if (!t || /\s/.test(t)) return false;
   return EMAIL_SHAPED.test(t) || isDomainShaped(t);
+}
+
+/** `fabrikam.com` or `@fabrikam.com`: a domain with no local part. */
+export function isBareDomain(v: string): boolean {
+  const t = v.trim().replace(/^@/, '');
+  return !t.includes('@') && isDomainShaped(t);
 }
 
 /** Normalise `since` to a UTC ISO timestamp, or throw a caller-facing error. */
@@ -135,8 +175,30 @@ interface Plan {
   since?: Date;
 }
 
+/**
+ * Throw when `q` carries KQL property syntax. Silently phrase-searching
+ * `received>=2026-01-01` returned an empty or unfiltered result that read as an
+ * answer; the explicit parameters are the supported form.
+ */
+export function assertNoKqlProperties(q: string): void {
+  const m = KQL_PROPERTY_IN_TEXT.exec(q);
+  if (!m) return;
+  const prop = m[1].toLowerCase();
+  const hint =
+    prop === 'received' || prop === 'sent'
+      ? 'pass `since` (ISO-8601) for a date bound'
+      : ['from', 'to', 'cc', 'bcc', 'recipients', 'participants'].includes(prop)
+        ? 'pass `participant`, `from` or `to` for address criteria'
+        : 'put only the words to match in `q`';
+  throw new Error(
+    `q contains KQL property syntax ("${m[0].replace(/^[\s(]+/, '')}"), which search_mail does not interpret: ` +
+    `q is matched as a literal phrase. ${hint[0].toUpperCase()}${hint.slice(1)}.`,
+  );
+}
+
 function plan(c: MailSearchCriteria): Plan {
   const text = clean(c.q);
+  if (text) assertNoKqlProperties(text);
   const p: Plan = {
     text,
     widenText: Boolean(text && isAddressShaped(text)),
@@ -368,30 +430,30 @@ export async function searchMail(graph: GraphLike, opts: SearchMailOptions): Pro
     }
   }
 
+  let kqlOutcome: MailQueryOutcome | undefined;
   let searchError = '';
   try {
-    const res = await graph.api(apiPath).search(kqlFromPlan(p)).select(MESSAGE_SELECT_FIELDS).top(want).get() as {
-      value?: GraphMessage[]; '@odata.nextLink'?: string;
-    };
-    const fields = [...KQL_TEXT_FIELDS];
-    if (p.widenText || p.participant) fields.push('participants');
-    if (p.to) fields.push('recipients');
-    // `received>=` is in the KQL, but a search index that ignored it would return
-    // older messages with HTTP 200. Re-apply the bound here so it always holds.
-    const values = (res.value ?? []).filter((m) => !p.since || receivedAt(m) >= p.since!.getTime());
-    return {
-      messages: values,
-      moreAvailable: Boolean(res['@odata.nextLink']),
-      strategy: 'kql-search',
-      ordering: 'relevance',
-      searchedFields: fields,
-      notes: [
-        'Results are relevance-ranked, not newest-first; the first N are not the most recent N. ' +
-        'Use list_messages to enumerate newest messages.',
-      ],
-    };
+    kqlOutcome = await runKqlSearch(graph, apiPath, p, want);
   } catch (err) {
     searchError = errMsg(err);
+  }
+
+  if (kqlOutcome) {
+    // Exchange's participants: / from: / recipients: restrictions return an empty
+    // set for a bare domain with HTTP 200. An empty answer to an address
+    // question is therefore not trusted: the scan matches every address field
+    // client-side and reports how far back it looked.
+    if (kqlOutcome.messages.length === 0 && hasAddressCriteria(p)) {
+      try {
+        return await runScan([
+          'KQL $search returned no matches for the address criteria. Exchange KQL does not reliably ' +
+          'match a bare domain in participants: / from: / recipients:, so a newest-first scan re-checked.',
+        ]);
+      } catch (err) {
+        throw new Error(`Mail search failed. KQL $search returned no matches and the confirming scan failed: ${errMsg(err)}`);
+      }
+    }
+    return kqlOutcome;
   }
 
   try {
@@ -402,6 +464,84 @@ export async function searchMail(graph: GraphLike, opts: SearchMailOptions): Pro
   } catch (err) {
     throw new Error(`Mail search failed. $search error: ${searchError}. fallback error: ${errMsg(err)}`);
   }
+}
+
+/**
+ * Mailbox-wide KQL `$search`. Without `since` this is one page of `maxResults`.
+ * With `since`, the bound is re-applied client-side (the index may ignore
+ * `received>=`), so it pages until it holds `maxResults + 1` in-window
+ * matches, Graph stops issuing `nextLink`, or the page budget is spent. A result
+ * set that ends at or past `KQL_RESULT_CAP` raw hits is reported as capped.
+ */
+async function runKqlSearch(graph: GraphLike, apiPath: string, p: Plan, want: number): Promise<MailQueryOutcome> {
+  type SearchPage = { value?: GraphMessage[]; '@odata.nextLink'?: string };
+  const since = p.since?.getTime();
+  let page = await graph
+    .api(apiPath)
+    .search(kqlFromPlan(p))
+    .select(MESSAGE_SELECT_FIELDS)
+    .top(since === undefined ? want : KQL_PAGE_SIZE)
+    .get() as SearchPage;
+
+  const kept: GraphMessage[] = [];
+  const visited = new Set<string>();
+  let raw = 0;
+  let dropped = 0;
+  let pages = 1;
+  let next: string | undefined;
+  let stoppedEarly = false;
+  for (;;) {
+    for (const m of page.value ?? []) {
+      raw++;
+      if (since === undefined || receivedAt(m) >= since) kept.push(m);
+      else dropped++;
+    }
+    next = page['@odata.nextLink'];
+    if (!next || since === undefined || kept.length > want) break;
+    if (pages >= KQL_MAX_PAGES || visited.has(next)) {
+      stoppedEarly = true;
+      break;
+    }
+    visited.add(next);
+    page = await graph.api(next).get() as SearchPage;
+    pages++;
+  }
+
+  const capped = !next && raw >= KQL_RESULT_CAP;
+  const fields = [...KQL_TEXT_FIELDS];
+  if (p.widenText || p.participant) fields.push('participants');
+  if (p.to) fields.push('recipients');
+  const notes = [
+    'Results are relevance-ranked, not newest-first; the first N are not the most recent N. ' +
+    'Use list_messages to enumerate newest messages.',
+  ];
+  if (capped) {
+    notes.push(
+      `The search index stopped after ${raw} hits with no continuation. That is Exchange's per-query ` +
+      'result cap, not the end of the mailbox: older matches were not returned. Narrow the query ' +
+      '(participant / from / to, a more specific q) or scope it with folderId and since.',
+    );
+  }
+  if (dropped > 0 && (stoppedEarly || capped)) {
+    notes.push(
+      `${dropped} of ${raw} hits fell before since and were dropped client-side; in-window matches ranked ` +
+      'below them may be missing. Scope with folderId to run an exact newest-first scan of the window.',
+    );
+  }
+  if (p.widenText && p.text && isBareDomain(p.text)) {
+    notes.push(
+      'Exchange KQL does not reliably match a bare domain in participants:, so mail where the domain ' +
+      'appears only in an address may be missing. Pass it as participant, or scope with folderId, for an exact match.',
+    );
+  }
+  return {
+    messages: kept,
+    moreAvailable: Boolean(next) || capped || kept.length > want,
+    strategy: 'kql-search',
+    ordering: 'relevance',
+    searchedFields: fields,
+    notes,
+  };
 }
 
 export interface ListMessagesOptions {
