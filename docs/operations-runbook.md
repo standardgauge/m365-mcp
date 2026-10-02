@@ -301,6 +301,14 @@ rolls the Container App, and then runs a post-deploy smoke that waits for
 `/health` to report the commit it just built and checks the frontend URL serves
 the admin SPA. A green deploy run means the new commit is live.
 
+Before it rolls the image, the workflow converges the Container App's ingress
+`targetPort` to the port the image binds (8080 since the non-root image). The deploy only swaps the image and never applies Bicep, so
+without this step a port change in the image strands every tenant on its old
+revision: that is what happened from 2026-09-26 until the step was added. The step is
+a no-op when the port already matches. The Dockerfile, the Bicep `targetPort`
+and each workflow's `CONTAINER_PORT` are pinned together by
+`src/__tests__/containerPortInvariant.test.ts`, so change all of them or none.
+
 For a **pinned** instance (`AUTO_UPDATE` unset), dispatch the sync and then the
 deploy by hand:
 

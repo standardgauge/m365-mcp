@@ -65,6 +65,20 @@ jobs:
           head: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.after }}
           extra_args: --only-verified
 
+  identifier-scan:
+    name: Identifier Scan
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v7
+
+      # Other organisations deploy this server into their own tenants. Nothing
+      # about any one deployment (hostnames, resource names, people or domains
+      # in fixtures, tracker ticket ids) belongs in the tree. The script has the
+      # list; extend it there.
+      - name: No deployment-specific identifiers in the tree
+        run: bash scripts/identifier-scan.sh
+
   codeql:
     name: CodeQL SAST
     runs-on: ubuntu-latest
