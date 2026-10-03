@@ -3,7 +3,8 @@ import { createHash } from 'crypto';
 import {
   hashSessionToken,
   encryptWithDek,
-  decryptWithDek,
+  decryptWithDekMigrating,
+  envelopeAad,
 } from './credentialCrypto.js';
 
 const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
@@ -64,6 +65,10 @@ function getInstallNoncesTable(): TableClient {
 //   accessTokenCiphertext    = AES-256-GCM ciphertext of the Graph access token
 //   accessTokenIv            = 12-byte IV (base64)
 //   accessTokenAuthTag       = 16-byte GCM auth tag (base64)
+//   The envelope is bound to its row via GCM AAD (sessionAccessTokenAad):
+//   copying it into another row makes it fail to decrypt. Envelopes written
+//   before row binding carry no AAD; they are still readable while
+//   MCP_ENVELOPE_REQUIRE_AAD is unset and are rewritten bound on first read.
 //
 // Backward compatibility: legacy rows use RowKey = userId. These are read
 // transparently but new sessions always use the tokenHash RowKey format.
@@ -101,6 +106,10 @@ export interface StoredSession {
   _storageKey?: string;
 }
 
+function sessionAccessTokenAad(rowKey: string): string {
+  return envelopeAad('mcpSessions', 'session', rowKey, 'accessToken');
+}
+
 /**
  * Internal helper: pull the encrypted access token off a Table Storage row
  * and decrypt it. Returns empty string if the columns are missing (which
@@ -111,7 +120,45 @@ function decryptAccessTokenFromEntity(entity: Record<string, unknown>): string {
   const iv = entity.accessTokenIv as string | undefined;
   const tag = entity.accessTokenAuthTag as string | undefined;
   if (!ct || !iv || !tag) return '';
-  return decryptWithDek({ ciphertext: ct, iv, authTag: tag });
+  const rowKey = entity.rowKey as string;
+  const { plaintext, legacy } = decryptWithDekMigrating(
+    { ciphertext: ct, iv, authTag: tag },
+    sessionAccessTokenAad(rowKey),
+  );
+  if (legacy) void rebindLegacyAccessToken(rowKey, plaintext, entity.etag as string | undefined);
+  return plaintext;
+}
+
+/**
+ * Re-encrypt a pre-binding access token envelope with its row's AAD. Merges
+ * only the three envelope columns, conditional on the ETag we read, so a
+ * concurrent refresh write wins and this becomes a no-op. Best-effort: a
+ * failure leaves the legacy envelope for the next read to retry.
+ */
+async function rebindLegacyAccessToken(
+  rowKey: string,
+  plaintext: string,
+  etag: string | undefined,
+): Promise<void> {
+  try {
+    const envelope = encryptWithDek(plaintext, sessionAccessTokenAad(rowKey));
+    await getSessionsTable().updateEntity(
+      {
+        partitionKey: 'session',
+        rowKey,
+        accessTokenCiphertext: envelope.ciphertext,
+        accessTokenIv: envelope.iv,
+        accessTokenAuthTag: envelope.authTag,
+      },
+      'Merge',
+      etag ? { etag } : undefined,
+    );
+  } catch (err) {
+    console.warn(
+      '[tableStorage] Could not rebind legacy access token envelope:',
+      err instanceof Error ? err.message : err,
+    );
+  }
 }
 
 /**
@@ -143,13 +190,13 @@ function entityToSession(
 
 export async function saveSession(session: StoredSession): Promise<void> {
   await ensureTables();
-  const accessEnvelope = encryptWithDek(session.accessToken);
 
   if (session.sessionToken) {
     // New session or re-auth — RowKey = tokenHash[:32] for multi-device support.
     // Each device/login gets its own row; no more overwriting.
     const tokenHash = hashSessionToken(session.sessionToken);
     const rowKey = tokenHash.slice(0, 32);
+    const accessEnvelope = encryptWithDek(session.accessToken, sessionAccessTokenAad(rowKey));
     await getSessionsTable().upsertEntity({
       partitionKey: 'session',
       rowKey,
@@ -170,6 +217,10 @@ export async function saveSession(session: StoredSession): Promise<void> {
   } else if (session._storageKey) {
     // Refresh path — update the specific row identified by _storageKey.
     // Merge preserves the existing sessionTokenHash.
+    const accessEnvelope = encryptWithDek(
+      session.accessToken,
+      sessionAccessTokenAad(session._storageKey),
+    );
     await getSessionsTable().upsertEntity({
       partitionKey: 'session',
       rowKey: session._storageKey,
@@ -433,16 +484,21 @@ export async function consumeInstallNonce(
 //   ciphertext   = AES-256-GCM ciphertext of the MSAL cache JSON (base64)
 //   iv           = 12-byte IV (base64)
 //   authTag      = 16-byte GCM auth tag (base64)
+//   The envelope is bound to this table/partition/row via GCM AAD, so a
+//   session access token envelope cannot be substituted for it. A pre-binding
+//   unbound envelope is read while legacy reads are allowed and rewritten
+//   bound on that read.
 //
 // Pre- rows had a `data` column with the plaintext JSON. The migration
 // script (infra/scripts/purge-credentials.sh) wipes the table to force MSAL
 // to re-issue from a clean state on first request.
 
 const MSAL_CACHE_KEY = 'msal-token-cache';
+const MSAL_CACHE_AAD = envelopeAad('mcpMsalCache', 'cache', MSAL_CACHE_KEY, 'msalCache');
 
 export async function saveMsalCache(cacheData: string): Promise<void> {
   await ensureTables();
-  const envelope = encryptWithDek(cacheData);
+  const envelope = encryptWithDek(cacheData, MSAL_CACHE_AAD);
   await getMsalCacheTable().upsertEntity({
     partitionKey: 'cache',
     rowKey: MSAL_CACHE_KEY,
@@ -465,7 +521,34 @@ export async function loadMsalCache(): Promise<string | null> {
       console.warn('[tableStorage] MSAL cache row exists but missing encrypted columns — treating as empty');
       return null;
     }
-    return decryptWithDek({ ciphertext: ct, iv, authTag: tag });
+    const { plaintext, legacy } = decryptWithDekMigrating(
+      { ciphertext: ct, iv, authTag: tag },
+      MSAL_CACHE_AAD,
+    );
+    if (legacy) {
+      // Conditional on the ETag we read, so a newer cache written by another
+      // replica in the meantime is not overwritten with this older blob.
+      try {
+        const envelope = encryptWithDek(plaintext, MSAL_CACHE_AAD);
+        await getMsalCacheTable().updateEntity(
+          {
+            partitionKey: 'cache',
+            rowKey: MSAL_CACHE_KEY,
+            ciphertext: envelope.ciphertext,
+            iv: envelope.iv,
+            authTag: envelope.authTag,
+          },
+          'Merge',
+          { etag: entity.etag },
+        );
+      } catch (err) {
+        console.warn(
+          '[tableStorage] Could not rebind legacy MSAL cache envelope:',
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+    return plaintext;
   } catch (err) {
     console.error(
       '[tableStorage] Failed to load MSAL cache:',
