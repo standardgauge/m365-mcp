@@ -384,6 +384,27 @@ az containerapp secret set -n m365-mcp -g rg-m365-mcp \
 az containerapp update -n m365-mcp -g rg-m365-mcp --revision-suffix "$(date +%Y%m%d%H%M)"
 ```
 
+### Credential envelope row binding (MCP_ENVELOPE_REQUIRE_AAD)
+
+Stored access tokens and the MSAL cache are AES-256-GCM envelopes under the
+one `MCP_DATA_ENCRYPTION_KEY`. Each envelope is bound to its table, partition,
+row and column through GCM additional authenticated data, so an envelope
+copied from one user's session row into another's fails to decrypt instead of
+handing the second session the first user's Graph token (AC-374).
+
+Envelopes written by releases before that change carry no binding. The server
+still reads them, and rewrites each one bound the first time it reads it. To
+finish the migration and close the swap window for good:
+
+  1. Deploy the release and leave it running long enough for active sessions to be read (an hour covers every active user, since access tokens refresh hourly).
+  2. Open the user list in the admin UI once. Listing reads every session row, which rebinds the dormant ones too.
+  3. Turn off legacy reads: `az containerapp update -n m365-mcp -g rg-m365-mcp --set-env-vars MCP_ENVELOPE_REQUIRE_AAD=true`
+
+After step 3 an unbound envelope is treated like a tampered one: that session
+fails authentication and the user signs in again. If you would rather not wait,
+skip to step 3 directly and accept that every user re-authenticates once, or run
+`infra/scripts/purge-credentials.sh` for the same effect.
+
 ### AZURE_CREDENTIALS (deploy service principal)
 
 ```

@@ -11,7 +11,10 @@ import { createHmac, randomBytes, createCipheriv, createDecipheriv } from 'crypt
  * 2. **AES-256-GCM envelope encryption for access tokens and MSAL cache** —
  *    values the server needs to *use* (i.e. send to Microsoft Graph), so
  *    one-way hashing isn't an option. We encrypt with a server-side data
- *    encryption key (DEK), storing the ciphertext, IV, and auth tag.
+ *    encryption key (DEK), storing the ciphertext, IV, and auth tag. Each
+ *    envelope is bound to the row it is stored in via GCM additional
+ *    authenticated data (see envelopeAad), so it cannot be moved to another
+ *    user's row and still decrypt.
  *
  * Both keys (`MCP_SESSION_HMAC_KEY` and `MCP_DATA_ENCRYPTION_KEY`) live in
  * Azure Key Vault and are bound to the Container App as secretRef env vars.
@@ -104,8 +107,40 @@ export interface EnvelopeCiphertext {
 }
 
 /**
- * Encrypt an arbitrary plaintext string under the data encryption key.
- * Returns the three pieces of state needed to decrypt: ciphertext, IV, tag.
+ * Additional authenticated data (AAD) for an envelope stored at a given Table
+ * Storage location. Every envelope is under the one DEK, so without AAD the
+ * GCM tag only proves "this was encrypted by us" — not "this was encrypted for
+ * this row". Binding the table, partition, row and column into the tag means
+ * an envelope copied from user A's row into user B's row fails to decrypt
+ * instead of handing B's session A's Graph token.
+ *
+ * The table and column are included alongside the row key so an envelope
+ * cannot be moved between tables or columns either.
+ */
+export function envelopeAad(
+  table: string,
+  partitionKey: string,
+  rowKey: string,
+  column: string,
+): string {
+  for (const [name, value] of Object.entries({ table, partitionKey, rowKey, column })) {
+    if (!value) throw new Error(`envelopeAad: ${name} must be non-empty`);
+  }
+  return `m365-mcp/v1/${table}/${partitionKey}/${rowKey}/${column}`;
+}
+
+function aadBytes(aad: string): Buffer {
+  // Empty AAD is cryptographically identical to no AAD in GCM, so an empty
+  // value would silently produce an unbound envelope.
+  if (!aad) throw new Error('AES-GCM additional authenticated data must be non-empty');
+  return Buffer.from(aad, 'utf8');
+}
+
+/**
+ * Encrypt an arbitrary plaintext string under the data encryption key, bound
+ * to `aad` (see envelopeAad). Returns the three pieces of state needed to
+ * decrypt: ciphertext, IV, tag. The AAD is not stored; the reader recomputes
+ * it from where it found the envelope.
  *
  * IV is freshly random per call (12 bytes per NIST SP 800-38D recommendation
  * for AES-GCM). Auth tag is 16 bytes (default).
@@ -115,10 +150,11 @@ export interface EnvelopeCiphertext {
  * (single concatenated string, JSON envelope) trade clarity for compactness
  * and aren't worth it at our scale.
  */
-export function encryptWithDek(plaintext: string): EnvelopeCiphertext {
+export function encryptWithDek(plaintext: string, aad: string): EnvelopeCiphertext {
   const dek = getDek();
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', dek, iv);
+  cipher.setAAD(aadBytes(aad));
   const enc = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
   return {
@@ -130,10 +166,59 @@ export function encryptWithDek(plaintext: string): EnvelopeCiphertext {
 
 /**
  * Decrypt an EnvelopeCiphertext back to its original plaintext. Throws if
- * the auth tag doesn't validate, which guards against tampering with the
- * stored ciphertext (e.g. swapping in a value from a different user).
+ * the auth tag doesn't validate against the ciphertext, IV and `aad`. That
+ * detects tampering with the stored bytes, and — because `aad` names the row
+ * the envelope was read from — an envelope moved in from a different row.
+ *
+ * The tag alone does NOT detect a swap: every envelope is under the same DEK,
+ * so an unmodified envelope from another user's row carries a perfectly valid
+ * tag. Only the AAD binding catches that, which is why `aad` is required.
  */
-export function decryptWithDek(envelope: EnvelopeCiphertext): string {
+export function decryptWithDek(envelope: EnvelopeCiphertext, aad: string): string {
+  return decryptEnvelope(envelope, aadBytes(aad));
+}
+
+/**
+ * Whether envelopes written before AAD binding (AC-374) may still be read.
+ * On by default so a deploy does not log every user out; set
+ * MCP_ENVELOPE_REQUIRE_AAD=true once existing rows have been rebound (they are
+ * rewritten with AAD on first read, see tableStorage.ts). While legacy reads
+ * are allowed, an attacker with storage write can still move an *unbound*
+ * envelope between rows, so the window should be short.
+ */
+export function isLegacyEnvelopeReadAllowed(): boolean {
+  return (process.env.MCP_ENVELOPE_REQUIRE_AAD ?? '').toLowerCase() !== 'true';
+}
+
+export interface DecryptResult {
+  plaintext: string;
+  /** True when the envelope predates AAD binding and should be rewritten. */
+  legacy: boolean;
+}
+
+/**
+ * Migration-aware decrypt. Tries the AAD-bound form first; if that fails and
+ * legacy reads are allowed, retries as an unbound pre-AC-374 envelope. A
+ * bound envelope never decrypts without its AAD, so the fallback cannot be
+ * used to read a bound envelope out of the wrong row.
+ */
+export function decryptWithDekMigrating(
+  envelope: EnvelopeCiphertext,
+  aad: string,
+): DecryptResult {
+  try {
+    return { plaintext: decryptWithDek(envelope, aad), legacy: false };
+  } catch (err) {
+    if (!isLegacyEnvelopeReadAllowed()) throw err;
+    try {
+      return { plaintext: decryptEnvelope(envelope, null), legacy: true };
+    } catch {
+      throw err;
+    }
+  }
+}
+
+function decryptEnvelope(envelope: EnvelopeCiphertext, aad: Buffer | null): string {
   const dek = getDek();
   const iv = Buffer.from(envelope.iv, 'base64');
   const ciphertext = Buffer.from(envelope.ciphertext, 'base64');
@@ -152,6 +237,7 @@ export function decryptWithDek(envelope: EnvelopeCiphertext): string {
   // authTagLength pins the expected tag size so the GCM verification cannot be
   // silently downgraded to a shorter tag.
   const decipher = createDecipheriv('aes-256-gcm', dek, iv, { authTagLength: 16 });
+  if (aad) decipher.setAAD(aad);
   decipher.setAuthTag(authTag);
   const dec = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   return dec.toString('utf8');
