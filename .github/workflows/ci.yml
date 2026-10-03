@@ -199,6 +199,26 @@ jobs:
           echo "::error::/health did not answer within 120s"
           exit 1
 
+      # A hosted deployment keeps the host's keys in blob storage, and the host
+      # pairs that with a local sentinel directory, /azure-functions-host/Secrets,
+      # which it creates on the first request that carries a function key. A
+      # `code` query parameter counts as one, even on an anonymous route. If the
+      # image's user cannot create that directory the host answers an empty 500,
+      # and since the OAuth redirect always carries `?code=`, no one can sign in
+      # while /health stays green.
+      #
+      # This boot has no storage account, so the host never opens a key store
+      # and a keyed request to it succeeds either way. Check the operation
+      # itself: the image's user must be able to create and write the directory.
+      - name: Assert the host's key-store sentinel directory is writable
+        run: |
+          if ! docker exec "$CONTAINER" sh -c \
+            'mkdir -p /azure-functions-host/Secrets && touch /azure-functions-host/Secrets/.boot-probe && rm /azure-functions-host/Secrets/.boot-probe'; then
+            echo "::error::uid $(docker exec "$CONTAINER" id -u) cannot write /azure-functions-host/Secrets; keyed requests, the OAuth callback included, will return 500"
+            exit 1
+          fi
+          echo "/azure-functions-host/Secrets is writable by uid $(docker exec "$CONTAINER" id -u)"
+
       - name: Assert nothing in the container runs as root
         run: |
           uid=$(docker exec "$CONTAINER" id -u)

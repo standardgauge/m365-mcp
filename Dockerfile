@@ -60,9 +60,19 @@ COPY host.json ./
 # dirs under during bootstrap; /tmp (extension-bundle unpack target) is already
 # world-writable. The host binaries under /azure-functions-host are
 # world-readable in the base image, so no chown there.
+#
+# The one exception is /azure-functions-host/Secrets. The host opens its key
+# store there on any request that carries a function key, which includes any
+# request with a `code` query parameter, before it routes the request and
+# whatever the function's authLevel. The OAuth redirect to /api/auth/callback
+# always carries `?code=`, so when the host cannot create that directory every
+# sign-in gets an empty 500 and the callback function never runs. Create it
+# here and hand it to the app user.
 RUN groupadd --system --gid 10001 app \
     && useradd --system --uid 10001 --gid app --home-dir /home/site --shell /usr/sbin/nologin app \
-    && chown -R app:app /home/site
+    && chown -R app:app /home/site \
+    && mkdir -p /azure-functions-host/Secrets \
+    && chown app:app /azure-functions-host/Secrets
 
 USER app
 
