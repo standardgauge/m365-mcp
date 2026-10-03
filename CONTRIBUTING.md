@@ -1,14 +1,18 @@
 # Contributing
 
-## Pull requests are not accepted right now
+## Pull requests are not accepted yet
 
-Development happens in a private repository and this repository is published as
-a snapshot of it. A pull request here cannot be merged; it would have to be
-replayed by hand upstream, and we would rather say so than leave you to find
-out after writing the patch.
+This is the development repository: every change lands here first and every
+deployment tracks it. Outside pull requests are still closed, for a different
+reason than mechanics. The copyright holder keeps the option of offering this
+server under terms other than the AGPL to organisations that need that, and
+that option only survives while every line is the holder's to license. Opening
+the door to outside patches means first choosing a contributor agreement (a DCO
+sign-off or a CLA), and that choice has not been made.
 
 This is a current constraint, not a position on outside contribution. If that
-changes, this file changes with it.
+changes, this file changes with it, and the agreement will be in this
+repository before the first outside pull request is merged.
 
 ## What is useful
 

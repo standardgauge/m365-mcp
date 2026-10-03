@@ -894,7 +894,7 @@ const tools: ToolDef[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        q: prop('string', 'Free-text query (phrase match on subject, body, sender). Optional when participant / from / to is given.'),
+        q: prop('string', 'Free-text query (phrase match on subject, body, sender). Optional when participant / from / to is given. KQL property syntax (received>=, from:, participants:) is rejected: use since / from / to / participant.'),
         participant: prop('string', 'Email address, domain or name fragment matched against the sender and every To / Cc / Bcc recipient. The right way to ask "any mail with this counterparty".'),
         from: prop('string', 'Email address, domain or name fragment the sender must match.'),
         to: prop('string', 'Email address, domain or name fragment any To / Cc / Bcc recipient must match. Use this to check Sent Items for mail to a counterparty.'),

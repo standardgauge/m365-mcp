@@ -18,7 +18,10 @@
  */
 import {
   buildMailKql,
+  assertNoKqlProperties,
   isAddressShaped,
+  isBareDomain,
+  KQL_RESULT_CAP,
   listMessages,
   messageMatches,
   parseSince,
@@ -140,7 +143,7 @@ describe('buildMailKql', () => {
   });
 
   it('strips embedded double quotes from every value so no value can inject operators', () => {
-    expect(buildMailKql({ q: 'x" OR from:"boss' })).toBe('"x  OR from: boss"');
+    expect(buildMailKql({ q: 'x" OR "boss' })).toBe('"x  OR  boss"');
     expect(buildMailKql({ to: 'a" OR subject:"secret' })).toBe('recipients:"a  OR subject: secret"');
   });
 
@@ -341,6 +344,133 @@ describe('searchMail — mailbox-wide', () => {
     const { graph, calls } = fakeGraph(() => ({ value: [] }));
     await expect(searchMail(graph, { ...BASE })).rejects.toThrow(/at least one of q, participant, from, or to/);
     expect(calls).toHaveLength(0);
+  });
+});
+
+// ──: the silent mailbox-wide cases ─────────────────────────────────────
+
+describe('assertNoKqlProperties', () => {
+  it.each([
+    ['received>=2026-01-01', /pass `since`/i],
+    ['roadmap received:2026-09', /pass `since`/i],
+    ['sent>2026-01-01', /pass `since`/i],
+    ['participants:exampleequity.com', /pass `participant`, `from` or `to`/i],
+    ['from:alice', /pass `participant`, `from` or `to`/i],
+    ['(to:bob)', /pass `participant`, `from` or `to`/i],
+    ['subject:roadmap', /only the words to match/i],
+  ])('rejects %j instead of phrase-searching it', (q, hint) => {
+    expect(() => assertNoKqlProperties(q)).toThrow(/KQL property syntax/);
+    expect(() => assertNoKqlProperties(q)).toThrow(hint);
+  });
+
+  it.each(['Q3 roadmap', 'Re budget', 'ratio 3:1', 'jdoe@fabrikam.com', 'tomorrow', 'fromage'])(
+    'accepts plain text %j',
+    (q) => expect(() => assertNoKqlProperties(q)).not.toThrow(),
+  );
+
+  it('rejects on every route before touching Graph, folder-scoped included', async () => {
+    const { graph, calls } = fakeGraph(() => ({ value: [] }));
+    await expect(searchMail(graph, { ...BASE, q: 'received>=2026-01-01' })).rejects.toThrow(/since/);
+    await expect(searchMail(graph, { ...BASE, folderId: 'sent', q: 'participants:example.com' })).rejects.toThrow(/participant/);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('isBareDomain', () => {
+  it.each(['fabrikam.com', '@fabrikam.com', ' mail.example.co.uk '])('is true for %j', (v) =>
+    expect(isBareDomain(v)).toBe(true));
+  it.each(['jdoe@fabrikam.com', 'jdoe@', 'fabrikam'])('is false for %j', (v) =>
+    expect(isBareDomain(v)).toBe(false));
+});
+
+describe('searchMail — mailbox-wide,', () => {
+  const old = (id: string) => msg(id, { receivedDateTime: '2025-01-01T00:00:00Z' });
+  const fresh = (id: string) => msg(id, { receivedDateTime: '2026-09-20T00:00:00Z' });
+  const many = (n: number, f: (id: string) => GraphMessage, prefix: string) =>
+    Array.from({ length: n }, (_, i) => f(`${prefix}${i}`));
+
+  it('re-checks an empty KQL answer to an address criterion with a scan (participants:<domain> returns [])', async () => {
+    const { graph, calls } = fakeGraph((_c, i) => (i === 0 ? { value: [] } : { value: [msg('m1')] }));
+    const out = await searchMail(graph, { ...BASE, participant: 'fabrikam.com' });
+    expect(calls).toHaveLength(2);
+    expect(calls[0].search).toBe('participants:"fabrikam.com"');
+    expect(calls[1].search).toBeUndefined();
+    expect(calls[1].orderby).toBe('receivedDateTime desc');
+    expect(out.strategy).toBe('scan');
+    expect(out.messages.map((m) => m.id)).toEqual(['m1']);
+    expect(out.scanComplete).toBe(true);
+    expect(out.notes[0]).toMatch(/KQL \$search returned no matches.*bare domain/);
+  });
+
+  it('does not re-check an empty text-only KQL result', async () => {
+    const { graph, calls } = fakeGraph(() => ({ value: [] }));
+    const out = await searchMail(graph, { ...BASE, q: 'roadmap' });
+    expect(calls).toHaveLength(1);
+    expect(out.strategy).toBe('kql-search');
+    expect(out.messages).toEqual([]);
+  });
+
+  it('a failing confirming scan is an error, not an empty result', async () => {
+    const { graph } = fakeGraph((_c, i) => (i === 0 ? { value: [] } : new Error('scan boom')));
+    await expect(searchMail(graph, { ...BASE, to: 'fabrikam.com' })).rejects.toThrow(/confirming scan failed: scan boom/);
+  });
+
+  it('with since, pages past out-of-window hits instead of returning one filtered page', async () => {
+    const { graph, calls } = fakeGraph((_c, i) =>
+      i === 0
+        ? { value: many(100, old, 'o'), '@odata.nextLink': 'https://graph/p2' }
+        : { value: [fresh('n1'), fresh('n2')] });
+    const out = await searchMail(graph, { ...BASE, q: 'roadmap', since: '2026-09-15' });
+    expect(calls).toHaveLength(2);
+    expect(calls[0].top).toBe(100);
+    expect(calls[1].path).toBe('https://graph/p2');
+    expect(out.messages.map((m) => m.id)).toEqual(['n1', 'n2']);
+    expect(out.moreAvailable).toBe(false);
+  });
+
+  it('stops paging once it holds maxResults + 1 in-window matches', async () => {
+    const { graph, calls } = fakeGraph(() => ({ value: many(30, fresh, 'n'), '@odata.nextLink': 'https://graph/more' }));
+    const out = await searchMail(graph, { ...BASE, q: 'roadmap', since: '2026-09-15' });
+    expect(calls).toHaveLength(1);
+    expect(out.moreAvailable).toBe(true);
+  });
+
+  it('reports the index cap instead of presenting it as the end of the mailbox (~275 hits, no nextLink)', async () => {
+    const { graph } = fakeGraph((_c, i) =>
+      i < 2
+        ? { value: many(100, old, `o${i}-`), '@odata.nextLink': `https://graph/p${i + 2}` }
+        : { value: [...many(73, old, 'o2-'), fresh('n1'), fresh('n2')] });
+    const out = await searchMail(graph, { ...BASE, q: 'roadmap', since: '2026-09-15' });
+    expect(out.messages.map((m) => m.id)).toEqual(['n1', 'n2']);
+    expect(275).toBeGreaterThanOrEqual(KQL_RESULT_CAP);
+    expect(out.moreAvailable).toBe(true);
+    expect(out.notes.join(' ')).toMatch(/stopped after 275 hits.*not the end of the mailbox/);
+    expect(out.notes.join(' ')).toMatch(/273 of 275 hits fell before since/);
+  });
+
+  it('stops at the page budget, reports more, and says hits were dropped by since', async () => {
+    let n = 0;
+    const { graph, calls } = fakeGraph(() => ({ value: many(100, old, `o${n}-`), '@odata.nextLink': `https://graph/p${++n}` }));
+    const out = await searchMail(graph, { ...BASE, q: 'roadmap', since: '2026-09-15' });
+    expect(calls).toHaveLength(5);
+    expect(out.messages).toEqual([]);
+    expect(out.moreAvailable).toBe(true);
+    expect(out.notes.join(' ')).toMatch(/500 of 500 hits fell before since/);
+  });
+
+  it('a short result without since is complete and carries no cap note', async () => {
+    const { graph } = fakeGraph(() => ({ value: [msg('m1')] }));
+    const out = await searchMail(graph, { ...BASE, q: 'roadmap' });
+    expect(out.moreAvailable).toBe(false);
+    expect(out.notes).toHaveLength(1);
+  });
+
+  it('warns that a domain-shaped q may miss address-only matches', async () => {
+    const { graph } = fakeGraph(() => ({ value: [msg('m1')] }));
+    const out = await searchMail(graph, { ...BASE, q: '@fabrikam.com' });
+    expect(out.notes.join(' ')).toMatch(/does not reliably match a bare domain/);
+    const full = await searchMail(fakeGraph(() => ({ value: [msg('m1')] })).graph, { ...BASE, q: 'jdoe@fabrikam.com' });
+    expect(full.notes.join(' ')).not.toMatch(/bare domain/);
   });
 });
 

@@ -121,6 +121,34 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The image listens on 8080 (it runs as a non-root user, which cannot bind
+      # ports below 1024), but this workflow only swaps the image and never
+      # applies Bicep. An app created before that change, or by hand, can still
+      # have its ingress targeting 80, and then every new revision fails its
+      # probe while the old one keeps serving. Converge the live ingress to the
+      # port the image binds. A no-op once it matches. It runs before the image
+      # update because a revision takes its default probes from the ingress
+      # port when it is created.
+      - name: Ensure ingress targets the container port
+        env:
+          CONTAINER_PORT: "8080"
+        run: |
+          set -euo pipefail
+          current=$(az containerapp show \
+            --name "${CONTAINER_APP_NAME}" \
+            --resource-group "${AZURE_RESOURCE_GROUP}" \
+            --query "properties.configuration.ingress.targetPort" -o tsv)
+          if [ "$current" = "$CONTAINER_PORT" ]; then
+            echo "ingress already targets ${CONTAINER_PORT}"
+          else
+            echo "ingress targets '${current}', moving to ${CONTAINER_PORT}"
+            az containerapp ingress update \
+              --name "${CONTAINER_APP_NAME}" \
+              --resource-group "${AZURE_RESOURCE_GROUP}" \
+              --target-port "${CONTAINER_PORT}" >/dev/null
+            echo "- **Ingress:** moved targetPort from ${current} to ${CONTAINER_PORT}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Update Container App
         env:
           DEPLOY_IMAGE: ${{ steps.meta.outputs.image }}
