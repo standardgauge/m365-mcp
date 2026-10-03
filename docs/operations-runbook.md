@@ -390,7 +390,7 @@ Stored access tokens and the MSAL cache are AES-256-GCM envelopes under the
 one `MCP_DATA_ENCRYPTION_KEY`. Each envelope is bound to its table, partition,
 row and column through GCM additional authenticated data, so an envelope
 copied from one user's session row into another's fails to decrypt instead of
-handing the second session the first user's Graph token (AC-374).
+handing the second session the first user's Graph token.
 
 Envelopes written by releases before that change carry no binding. The server
 still reads them, and rewrites each one bound the first time it reads it. To

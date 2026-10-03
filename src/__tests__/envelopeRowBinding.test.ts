@@ -1,5 +1,5 @@
 /**
- * AC-374: credential envelopes in Table Storage are bound to their row with
+ * Credential envelopes in Table Storage are bound to their row with
  * AES-GCM additional authenticated data. Exercises tableStorage.ts against an
  * in-memory table to show (1) an access-token envelope copied from user A's
  * row into user B's row no longer decrypts, and (2) envelopes written before
@@ -90,7 +90,7 @@ function sessionRow(userId: string): Entity {
   return [...tableFor('mcpSessions').values()].find((r) => r.userId === userId)!;
 }
 
-/** The pre-AC-374 envelope shape: AES-GCM under the DEK with no AAD. */
+/** The pre-binding envelope shape: AES-GCM under the DEK with no AAD. */
 function encryptUnbound(plaintext: string) {
   const iv = randomBytes(12);
   const dek = Buffer.from(process.env.MCP_DATA_ENCRYPTION_KEY!, 'hex');
@@ -110,7 +110,7 @@ beforeEach(() => {
   delete process.env.MCP_ENVELOPE_REQUIRE_AAD;
 });
 
-describe('session access token envelope binding (AC-374)', () => {
+describe('session access token envelope binding', () => {
   test('round-trips through its own row', async () => {
     await saveSession(session('userA', 'tok-A', 'graph-token-A'));
     const loaded = await loadSessionByToken('tok-A');
@@ -133,7 +133,7 @@ describe('session access token envelope binding (AC-374)', () => {
     await expect(loadSessionByToken('tok-B')).rejects.toThrow();
   });
 
-  test('a pre-AC-374 unbound envelope is read and rewritten bound', async () => {
+  test('a pre-binding unbound envelope is read and rewritten bound', async () => {
     await saveSession(session('userA', 'tok-A', 'placeholder'));
     const row = sessionRow('userA');
     const legacy = encryptUnbound('legacy-graph-token');
@@ -170,7 +170,7 @@ describe('session access token envelope binding (AC-374)', () => {
   });
 });
 
-describe('MSAL cache envelope binding (AC-374)', () => {
+describe('MSAL cache envelope binding', () => {
   test('round-trips', async () => {
     await saveMsalCache('{"cache":1}');
     expect(await loadMsalCache()).toBe('{"cache":1}');
@@ -191,7 +191,7 @@ describe('MSAL cache envelope binding (AC-374)', () => {
     expect(await loadMsalCache()).toBeNull();
   });
 
-  test('a pre-AC-374 unbound cache is read and rewritten bound', async () => {
+  test('a pre-binding unbound cache is read and rewritten bound', async () => {
     const legacy = encryptUnbound('{"legacy":true}');
     tableFor('mcpMsalCache').set('cache|msal-token-cache', {
       partitionKey: 'cache', rowKey: 'msal-token-cache', ...legacy, etag: 'e0',

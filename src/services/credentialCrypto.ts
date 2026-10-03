@@ -179,7 +179,7 @@ export function decryptWithDek(envelope: EnvelopeCiphertext, aad: string): strin
 }
 
 /**
- * Whether envelopes written before AAD binding (AC-374) may still be read.
+ * Whether envelopes written before AAD binding may still be read.
  * On by default so a deploy does not log every user out; set
  * MCP_ENVELOPE_REQUIRE_AAD=true once existing rows have been rebound (they are
  * rewritten with AAD on first read, see tableStorage.ts). While legacy reads
@@ -198,7 +198,7 @@ export interface DecryptResult {
 
 /**
  * Migration-aware decrypt. Tries the AAD-bound form first; if that fails and
- * legacy reads are allowed, retries as an unbound pre-AC-374 envelope. A
+ * legacy reads are allowed, retries as an unbound pre-binding envelope. A
  * bound envelope never decrypts without its AAD, so the fallback cannot be
  * used to read a bound envelope out of the wrong row.
  */

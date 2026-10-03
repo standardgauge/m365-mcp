@@ -31,7 +31,7 @@ const crypto = { hashSessionToken, encryptWithDek, decryptWithDek, isCryptoConfi
 
 const AAD = envelopeAad('mcpSessions', 'session', 'row-a', 'accessToken');
 
-/** Build an envelope the way encryptWithDek did before AC-374: no AAD. */
+/** Build an envelope the way encryptWithDek did before row binding: no AAD. */
 function encryptUnbound(plaintext: string) {
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', Buffer.from(TEST_DEK, 'hex'), iv);
@@ -164,7 +164,7 @@ describe('credentialCrypto', () => {
     });
   });
 
-  // AC-374: every envelope is under one DEK, so only AAD stops an unmodified
+  // Every envelope is under one DEK, so only AAD stops an unmodified
   // envelope from another row decrypting cleanly.
   describe('AAD row binding', () => {
     const rowB = envelopeAad('mcpSessions', 'session', 'row-b', 'accessToken');
@@ -209,7 +209,7 @@ describe('credentialCrypto', () => {
       expect(decryptWithDekMigrating(envelope, AAD)).toEqual({ plaintext: 'bound', legacy: false });
     });
 
-    test('reads a pre-AC-374 unbound envelope and flags it for rebinding', () => {
+    test('reads a pre-binding unbound envelope and flags it for rebinding', () => {
       const unbound = encryptUnbound('legacy-token');
       expect(decryptWithDekMigrating(unbound, AAD)).toEqual({ plaintext: 'legacy-token', legacy: true });
     });

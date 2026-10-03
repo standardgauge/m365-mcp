@@ -67,7 +67,7 @@ function getInstallNoncesTable(): TableClient {
 //   accessTokenAuthTag       = 16-byte GCM auth tag (base64)
 //   The envelope is bound to its row via GCM AAD (sessionAccessTokenAad):
 //   copying it into another row makes it fail to decrypt. Envelopes written
-//   before AC-374 carry no AAD; they are still readable while
+//   before row binding carry no AAD; they are still readable while
 //   MCP_ENVELOPE_REQUIRE_AAD is unset and are rewritten bound on first read.
 //
 // Backward compatibility: legacy rows use RowKey = userId. These are read
@@ -130,7 +130,7 @@ function decryptAccessTokenFromEntity(entity: Record<string, unknown>): string {
 }
 
 /**
- * Re-encrypt a pre-AC-374 access token envelope with its row's AAD. Merges
+ * Re-encrypt a pre-binding access token envelope with its row's AAD. Merges
  * only the three envelope columns, conditional on the ETag we read, so a
  * concurrent refresh write wins and this becomes a no-op. Best-effort: a
  * failure leaves the legacy envelope for the next read to retry.
@@ -485,7 +485,7 @@ export async function consumeInstallNonce(
 //   iv           = 12-byte IV (base64)
 //   authTag      = 16-byte GCM auth tag (base64)
 //   The envelope is bound to this table/partition/row via GCM AAD, so a
-//   session access token envelope cannot be substituted for it. A pre-AC-374
+//   session access token envelope cannot be substituted for it. A pre-binding
 //   unbound envelope is read while legacy reads are allowed and rewritten
 //   bound on that read.
 //
