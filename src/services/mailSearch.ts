@@ -37,7 +37,7 @@
  *     returning results (measured at ~275 hits) instead of presenting the cap as
  *     the end of the mailbox.
  */
-import { sanitizeKqlPhrase } from './kqlSearch.js';
+import { graphSearchParam, sanitizeKqlPhrase } from './kqlSearch.js';
 
 /** Minimal Graph client surface this module needs (the real client satisfies it). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -478,7 +478,7 @@ async function runKqlSearch(graph: GraphLike, apiPath: string, p: Plan, want: nu
   const since = p.since?.getTime();
   let page = await graph
     .api(apiPath)
-    .search(kqlFromPlan(p))
+    .search(graphSearchParam(kqlFromPlan(p)))
     .select(MESSAGE_SELECT_FIELDS)
     .top(since === undefined ? want : KQL_PAGE_SIZE)
     .get() as SearchPage;
