@@ -36,6 +36,10 @@ describe('sanitizeKqlPhrase', () => {
     expect(sanitizeKqlPhrase('from:a@b.com (budget)')).toBe('from:a@b.com (budget)');
   });
 
+  test('strips a backslash, which would escape the closing quote of the $search string', () => {
+    expect(sanitizeKqlPhrase('alice\\')).not.toContain('\\');
+  });
+
   test('empty string stays empty', () => {
     expect(sanitizeKqlPhrase('')).toBe('');
   });

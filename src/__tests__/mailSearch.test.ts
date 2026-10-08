@@ -15,7 +15,12 @@
  *   4. A scan reports how far it looked, and stops on budget / nextLink loops.
  *   5. listMessages is $orderby-driven and deterministic.
  *   6. Every value the caller supplies is sanitised before reaching KQL / OData.
+ *   7. The `$search` value on the wire is the whole KQL expression as one quoted,
+ *      escaped, percent-encoded string. Graph rejects a bare property restriction
+ *      (`from:"x"`) with "character ':' is not valid", and the search silently
+ *      degraded to a scan.
  */
+import { graphSearchParam } from '../services/kqlSearch.js';
 import {
   buildMailKql,
   assertNoKqlProperties,
@@ -112,6 +117,55 @@ describe('parseSince', () => {
 
   it.each(['yesterday', '15/09/2026', '2026-13-45', 'now'])('rejects %s', (v) => {
     expect(() => parseSince(v)).toThrow(/ISO-8601/);
+  });
+});
+
+/**
+ * Undo `graphSearchParam`: percent-decode, require one outer quoted string, and
+ * unescape it. Throws on anything Graph would read as more than one term.
+ */
+function kqlOf(search: string | undefined): string {
+  if (search === undefined) throw new Error('no $search was sent');
+  const wire = decodeURIComponent(search);
+  expect(wire).toMatch(/^"(?:[^"\\]|\\")*"$/);
+  return JSON.parse(wire) as string;
+}
+
+// ── graphSearchParam: the $search value Graph actually receives ──────────────
+
+describe('graphSearchParam', () => {
+  it('sends a property restriction as one quoted string with escaped inner quotes', () => {
+    expect(decodeURIComponent(graphSearchParam(buildMailKql({ from: 'orders.example.com' })))).toBe(
+      '"from:\\"orders.example.com\\""',
+    );
+  });
+
+  it.each([
+    [{ from: 'orders.example.com' }, 'from:"orders.example.com"'],
+    [{ q: 'orders.example.com' }, '("orders.example.com" OR participants:"orders.example.com")'],
+    [
+      { q: 'quarterly report', from: 'example.com', since: '2026-02-01' },
+      '"quarterly report" AND from:"example.com" AND received>=2026-02-01',
+    ],
+    [{ participant: 'fabrikam.com', to: 'bob@example.com' }, 'participants:"fabrikam.com" AND recipients:"bob@example.com"'],
+  ])('round-trips %j with no unescaped quote inside the outer pair', (criteria, kql) => {
+    expect(kqlOf(graphSearchParam(buildMailKql(criteria)))).toBe(kql);
+  });
+
+  it('wraps a plain phrase too, so every $search has the same shape', () => {
+    expect(decodeURIComponent(graphSearchParam(buildMailKql({ q: 'budget' })))).toBe('"\\"budget\\""');
+  });
+
+  it('percent-encodes the value so & # + in a caller value cannot split the query string', () => {
+    const wire = graphSearchParam(buildMailKql({ q: 'R&D #1 +plan' }));
+    expect(wire).not.toMatch(/[&#+ "]/);
+    expect(kqlOf(wire)).toBe('"R&D #1 +plan"');
+  });
+
+  it('a trailing backslash in a value cannot escape the closing quote', () => {
+    const kql = buildMailKql({ from: 'alice\\' });
+    expect(kql).not.toContain('\\');
+    expect(kqlOf(graphSearchParam(kql))).toBe(kql);
   });
 });
 
@@ -300,7 +354,7 @@ describe('searchMail — mailbox-wide', () => {
     const out = await searchMail(graph, { ...BASE, q: 'roadmap', to: 'fabrikam.com' });
     expect(calls).toHaveLength(1);
     expect(calls[0].path).toBe('/me/messages');
-    expect(calls[0].search).toBe('"roadmap" AND recipients:"fabrikam.com"');
+    expect(kqlOf(calls[0].search)).toBe('"roadmap" AND recipients:"fabrikam.com"');
     expect(calls[0].top).toBe(25);
     expect(out.strategy).toBe('kql-search');
     expect(out.ordering).toBe('relevance');
@@ -393,7 +447,7 @@ describe('searchMail — mailbox-wide,', () => {
     const { graph, calls } = fakeGraph((_c, i) => (i === 0 ? { value: [] } : { value: [msg('m1')] }));
     const out = await searchMail(graph, { ...BASE, participant: 'fabrikam.com' });
     expect(calls).toHaveLength(2);
-    expect(calls[0].search).toBe('participants:"fabrikam.com"');
+    expect(kqlOf(calls[0].search)).toBe('participants:"fabrikam.com"');
     expect(calls[1].search).toBeUndefined();
     expect(calls[1].orderby).toBe('receivedDateTime desc');
     expect(out.strategy).toBe('scan');

@@ -285,7 +285,7 @@ describe('searchMail', () => {
     const res = await wrappedHandler(makeRequest({ participant: 'fabrikam.com' }), fakeContext);
 
     expect(res.status).toBe(200);
-    expect(lastGraphCall.searchQuery).toBe('participants:"fabrikam.com"');
+    expect(decodeURIComponent(lastGraphCall.searchQuery!)).toBe('"participants:\\"fabrikam.com\\""');
     const body = res.jsonBody as { strategy: string; ordering: string; limit: number; notes: string[] };
     expect(body.strategy).toBe('kql-search');
     expect(body.ordering).toBe('relevance');
@@ -316,7 +316,7 @@ describe('searchMail', () => {
     );
 
     expect(res.status).toBe(200);
-    expect(lastGraphCall.searchQuery).toBe('"amazon"');
+    expect(decodeURIComponent(lastGraphCall.searchQuery!)).toBe('"\\"amazon\\""');
     expect(lastGraphCall.filterExpr).toBeNull();
     expect((res.jsonBody as { count: number }).count).toBe(1);
   });

@@ -219,7 +219,7 @@ describe('search_mail', () => {
     respond = () => ({ value: [msg('m1')], '@odata.nextLink': 'https://graph/next' });
     const { parsed } = toolResult(await callTool('search_mail', { q: 'roadmap', participant: 'fabrikam.com', maxResults: 5 }));
     const graph = calls.find((c) => c.path === '/me/messages')!;
-    expect(graph.search).toBe('"roadmap" AND participants:"fabrikam.com"');
+    expect(decodeURIComponent(graph.search!)).toBe('"\\"roadmap\\" AND participants:\\"fabrikam.com\\""');
     expect(graph.top).toBe(5);
     expect(parsed).toMatchObject({ count: 1, limit: 5, truncated: true, strategy: 'kql-search', ordering: 'relevance' });
     expect(parsed.notes[0]).toMatch(/relevance-ranked/);
