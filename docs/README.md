@@ -6,6 +6,8 @@
   secret, and the delegated permissions to consent, in order
 - [Operations runbook](operations-runbook.md) — day-two operations: rotating
   secrets and keys, reading logs, the reserved-path trap, containment
+- [Incident response](incident-response.md) — detection sources, triage, the
+  kill switch, evidence to preserve, who to notify, post-incident rotation
 - [Calendar access controls](calendar-access-controls.md) — how calendar reads
   and writes are gated
 - [SharePoint search access controls](sharepoint-search-access-controls.md) —

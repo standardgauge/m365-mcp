@@ -22,6 +22,13 @@ We ask that you give us a reasonable opportunity to fix an issue before
 disclosing it publicly, and we will credit you when a fix ships unless you
 prefer otherwise.
 
+## If you run an instance
+
+A report about the code reaches us; an incident on your instance is yours to
+handle, since we have no access to it. [`docs/incident-response.md`](docs/incident-response.md)
+is the playbook: detection sources, the kill switch, evidence to preserve, who
+to notify, and what to rotate afterwards.
+
 ## Scope
 
 In scope: this source, the container it builds, and the Bicep templates under

@@ -87,33 +87,6 @@ months — it could not have failed even with the API completely dead. Unmatched
 `.sha` is the deployed commit, so the same call answers "is it up" and "is it
 running what I think it is".
 
-The platform checks the same route on its own:
-
-- **Container Apps** runs startup, readiness and liveness probes, `GET /health`
-  on port 8080, defined once in `infra/probes.json`. Both Bicep templates load
-  that file, and the deploy workflow converges a live app's probes to it before
-  each image update (the "Ensure container probes target /health" step), so an
-  app that was never deployed from Bicep picks them up on its next deploy.
-  Startup allows about 160s for the Functions host to come up, readiness pulls a
-  replica out of rotation after 3 misses 10s apart, and liveness restarts it
-  after 3 misses 30s apart. These probes see the status code only, which is
-  safe here because `/health` is a literal route and wins over the SPA
-  catch-all.
-- **Docker** runs the image's `HEALTHCHECK`, which also asserts the body.
-  Container Apps ignores it; it is there for `docker run`, compose and scanners.
-
-To see why a revision is failing its probes:
-
-```
-az containerapp revision list -n <app> -g <rg> \
-  --query "[].{name:name,health:properties.healthState,running:properties.runningState}" -o table
-az containerapp logs show -n <app> -g <rg> --type system --tail 50
-```
-
-To change a probe, edit `infra/probes.json`. The next deploy rolls it out
-everywhere; `src/__tests__/healthProbeInvariant.test.ts` holds its path and
-port to the route and the image.
-
 There is no external probe unless you add one. Run these same conditions from it.
 
 ### Session table check
@@ -873,8 +846,9 @@ depends on what was exposed.
   copies already taken. In this order:
   1. Rotate both keys in one revision and purge (procedure above). The
      server's own hold on every token ends.
-  2. **Revoke sessions in Entra for every user** of the app (Kill switch,
-     step 2). This is what invalidates the stolen refresh tokens.
+  2. **Revoke sessions in Entra for every user** of the app ([kill
+     switch](incident-response.md#kill-switch-ordered-by-speed), step 2).
+     This is what invalidates the stolen refresh tokens.
   3. Rotate `AZURE_CLIENT_SECRET` and delete the old one. Refresh tokens issued
      to this app can only be redeemed with its client credentials, which sit in
      the same Container App as the keys, so assume they went together.
@@ -918,20 +892,10 @@ user's own logout deletes their sessions. Remove access in Entra:
 
 ## Kill switch and incident response
 
-Ordered by speed. Each step stands alone; in an incident, do 1 and 3 first.
-
-  1. **Disable the enterprise application** in Entra (Enterprise applications → the app → Properties → "Enabled for users to sign in?" → No). New sign-ins and refresh-token redemptions stop at once. Existing access tokens keep working until they expire, roughly an hour.
-  2. **Revoke sessions** in Entra for the affected users, or for all users. Refresh tokens are invalidated; combined with step 1 no new Graph access is possible after current access tokens expire.
-  3. **Rotate both application keys** ([Application keys](#application-keys)). Every stored session and the MSAL cache become undecryptable in one revision roll; the server's own hold on tokens is gone regardless of what Entra does.
-  4. **Purge the credential tables:** `infra/scripts/purge-credentials.sh --resource-group rg-m365-mcp --app-name m365-mcp` (add `--dry-run` first). Same effect as 3, slower, no key change. Replicas stop honouring the deleted sessions within 30 seconds.
-  5. **Delete the client secret** on the app registration. The server can no longer redeem authorization codes or refresh tokens.
-  6. **Stop traffic:** `az containerapp ingress disable -n m365-mcp -g rg-m365-mcp`, or scale to zero, or delete the app. Storage and keys survive unless deleted.
-
-Then: pull the audit trail for the window from `M365McpAudit_CL` (or export the
-admin copy, `/api/manage/audit-log?startDate=…&format=csv`),
-pull Entra sign-in logs for the app registration, and read the container logs
-for the same window. Users get back in by re-authenticating once you re-enable
-the application.
+The kill switch, ordered by speed, and what to do around it (detection sources,
+triage, evidence to preserve before the kill switch destroys it, who to notify,
+and the post-incident rotation list) are in
+[`incident-response.md`](incident-response.md). In an incident, start there.
 
 * * *
 
