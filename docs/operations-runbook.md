@@ -550,7 +550,11 @@ az containerapp update \
 ### Normal update path (CI/CD)
 
 Push to `main` on `your-org/your-deploy-fork` (which the fork sync does for
-you when `AUTO_UPDATE=true`). GitHub Actions builds, tags (`sha-<short>` \+ `latest`),
+you). With `AUTO_UPDATE=true`, the deploy starts when the fork's CI run on that
+commit succeeds, not on the push itself; a red CI run deploys nothing and the
+instance keeps serving what it had. If `main` has moved on by the time CI
+finishes, the run skips and leaves the newer commit to its own CI run, so a slow
+CI run cannot roll an instance backwards. GitHub Actions builds, tags (`sha-<short>` \+ `latest`),
 rolls the Container App, and then runs a post-deploy smoke that waits for
 `/health` to report the commit it just built and checks the frontend URL serves
 the admin SPA. A green deploy run means the new commit is live.
@@ -564,7 +568,9 @@ and each workflow's `CONTAINER_PORT` are pinned together by
 `src/__tests__/containerPortInvariant.test.ts`, so change all of them or none.
 
 For a **pinned** instance (`AUTO_UPDATE` unset), dispatch the sync and then the
-deploy by hand:
+deploy by hand. A manual dispatch does not wait for CI, which is what makes it
+the rollback path while `main` is red; check the CI run on the commit first when
+you are rolling forward:
 
 ```
 gh workflow run "Sync from canonical" -R your-org/your-deploy-fork

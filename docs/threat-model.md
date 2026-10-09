@@ -352,12 +352,12 @@ shim's local-file limits.
 ## 11. Supply chain and deployment
 
 Deploy forks track this repository's `main` exactly and, with `AUTO_UPDATE`
-set, deploy on every push. Anything merged here reaches every tracking instance
+set, deploy each new `main` commit once CI has passed on it. Anything merged here reaches every tracking instance
 and, through the extension's auto-update (4.3), every user's desktop.
 
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
-| 11.1 | T, E | Malicious or compromised change lands on `main`. | Protected branch: pull request, required CI (type check, lint, tests, identifier scan, dependency audit, secrets scan, CodeQL, non-root container boot test), squash only, no force push. | Tenant deploys are not gated on upstream CI having passed for that commit; Actions are pinned by tag rather than SHA; deploy forks authenticate with a long-lived principal secret. All tracked separately. |
+| 11.1 | T, E | Malicious or compromised change lands on `main`. | Protected branch: pull request, required CI (type check, lint, tests, identifier scan, dependency audit, secrets scan, CodeQL, non-root container boot test), squash only, no force push. Tenant deploys start only from a successful CI run on the exact commit being deployed (`deploy.yml`, `workflow_run`), so a `main` that goes red after merge ships nowhere. | Actions are pinned by tag rather than SHA; deploy forks authenticate with a long-lived principal secret. All tracked separately. |
 | 11.2 | T | Dependency compromise. | `npm audit` gate, Dependabot. | Dependabot cooldown tracked separately. SBOM and image provenance tracked separately. |
 | 11.3 | E | Container escape or host-level foothold. | Image runs as a non-root user; CI fails a build that runs anything as root. | None in this model's scope. |
 | 11.4 | R | Cannot tell what is running. | `/health` reports the deployed commit. | None. |

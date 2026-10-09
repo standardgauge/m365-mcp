@@ -5,8 +5,9 @@ name: Deploy
 #
 # This workflow is inert until you turn it on. Set these repository VARIABLES:
 #   DEPLOY_ENABLED         'true' to allow this workflow to run at all
-#   AUTO_UPDATE            'true' to deploy on every push to main.
-#                          Unset means pinned: only a manual dispatch deploys.
+#   AUTO_UPDATE            'true' to deploy each new main commit once CI has
+#                          passed on it. Unset means pinned: only a manual
+#                          dispatch deploys.
 #   AZURE_RESOURCE_GROUP   e.g. rg-m365-mcp
 #   CONTAINER_APP_NAME     e.g. m365-mcp
 #   ACR_NAME               e.g. m365mcpacr  (no hyphens)
@@ -20,14 +21,24 @@ name: Deploy
 #                       App secret.
 #   AZURE_TENANT_ID     your Microsoft 365 tenant ID. Same dual purpose.
 
+# An automatic deploy starts when CI finishes on main, not when main moves. On
+# a push trigger this workflow raced CI on the same commit, so a red main
+# shipped to every tracking instance anyway. CI is the same workflow in every
+# fork and runs on the same commit, so "CI passed here" means "CI passed on
+# exactly what is about to be built".
+#
+# There is no path filter. workflow_run cannot take one, and it would be wrong
+# here anyway: an instance that skips a docs-only commit never reports that sha
+# on /health, and anything that waits on /health for a sha (a canary gate in
+# front of other instances, say) then waits forever.
+#
+# A manual dispatch is not gated on CI. It is the break-glass and rollback path:
+# redeploying a known-good image tag has to work while main is red.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.github/dependabot.yml'
-      - '.github/pull_request_template.md'
   workflow_dispatch:
     inputs:
       tag:
@@ -46,16 +57,65 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # The commit to build and prove. On workflow_run, github.sha is whatever main
+  # points at when this run starts, which need not be the commit CI passed on.
+  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
   AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
   CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}
   ACR_NAME: ${{ vars.ACR_NAME }}
 
 jobs:
-  build-push-deploy:
-    name: Build, push to ACR, deploy to Container App
+  # Decides whether this run deploys. Every clause of the workflow_run condition
+  # matters: conclusion is the CI gate itself; event and head_repository stop a
+  # pull request from another fork, whose branch happens to be called main, from
+  # starting a deploy (the branches: filter matches the head branch name only).
+  gate:
+    name: Gate on CI
     if: >-
       vars.DEPLOY_ENABLED == 'true' &&
-      (github.event_name == 'workflow_dispatch' || vars.AUTO_UPDATE == 'true')
+      (github.event_name == 'workflow_dispatch' ||
+       (vars.AUTO_UPDATE == 'true' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      deploy: ${{ steps.tip.outputs.deploy }}
+    steps:
+      # CI runs finish in any order. If main has moved on since the commit CI
+      # passed on, deploying it now would roll the instance back behind a newer
+      # commit that is already live or about to be. The newer commit's own CI
+      # run deploys it; if that run fails, the instance stays where it is.
+      - name: Commit is still the tip of main
+        id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "manual dispatch: deploying ${DEPLOY_SHA} without the CI gate"
+            echo "- **Gate:** manual dispatch, CI not consulted" >> "$GITHUB_STEP_SUMMARY"
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tip=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)
+          if [ "$tip" != "$DEPLOY_SHA" ]; then
+            echo "::notice::CI passed on ${DEPLOY_SHA} but main is now ${tip}; leaving that commit to its own CI run"
+            echo "- **Gate:** skipped, main moved on to ${tip}" >> "$GITHUB_STEP_SUMMARY"
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "- **Gate:** CI passed on ${DEPLOY_SHA}, the tip of main" >> "$GITHUB_STEP_SUMMARY"
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+
+  build-push-deploy:
+    name: Build, push to ACR, deploy to Container App
+    needs: gate
+    if: needs.gate.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -63,6 +123,8 @@ jobs:
       actions: write  # docker/build-push-action GHA cache backend
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
 
       - name: Check required configuration
         run: |
@@ -84,7 +146,7 @@ jobs:
           if [ -n "$INPUT_TAG" ]; then
             TAG="$INPUT_TAG"
           else
-            TAG="sha-$(echo "${GITHUB_SHA}" | cut -c1-7)"
+            TAG="sha-$(echo "${DEPLOY_SHA}" | cut -c1-7)"
           fi
           if ! echo "$TAG" | grep -qE '^[a-zA-Z0-9._-]+$'; then
             echo "::error::Invalid tag: '$TAG' — only [a-zA-Z0-9._-] allowed"
@@ -119,7 +181,7 @@ jobs:
           build-args: |
             AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}
             AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}
-            GIT_SHA=${{ github.sha }}
+            GIT_SHA=${{ env.DEPLOY_SHA }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -166,7 +228,7 @@ jobs:
       # pointing at a path the Functions host reserves.
       - name: Post-deploy smoke
         env:
-          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ env.DEPLOY_SHA }}
         run: |
           set -euo pipefail
 
