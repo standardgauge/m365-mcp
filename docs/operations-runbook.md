@@ -896,7 +896,7 @@ Ordered by speed. Each step stands alone; in an incident, do 1 and 3 first.
   1. **Disable the enterprise application** in Entra (Enterprise applications → the app → Properties → "Enabled for users to sign in?" → No). New sign-ins and refresh-token redemptions stop at once. Existing access tokens keep working until they expire, roughly an hour.
   2. **Revoke sessions** in Entra for the affected users, or for all users. Refresh tokens are invalidated; combined with step 1 no new Graph access is possible after current access tokens expire.
   3. **Rotate both application keys** ([Application keys](#application-keys)). Every stored session and the MSAL cache become undecryptable in one revision roll; the server's own hold on tokens is gone regardless of what Entra does.
-  4. **Purge the credential tables:** `infra/scripts/purge-credentials.sh --resource-group rg-m365-mcp --app-name m365-mcp` (add `--dry-run` first). Same effect as 3, slower, no key change.
+  4. **Purge the credential tables:** `infra/scripts/purge-credentials.sh --resource-group rg-m365-mcp --app-name m365-mcp` (add `--dry-run` first). Same effect as 3, slower, no key change. Replicas stop honouring the deleted sessions within 30 seconds.
   5. **Delete the client secret** on the app registration. The server can no longer redeem authorization codes or refresh tokens.
   6. **Stop traffic:** `az containerapp ingress disable -n m365-mcp -g rg-m365-mcp`, or scale to zero, or delete the app. Storage and keys survive unless deleted.
 
