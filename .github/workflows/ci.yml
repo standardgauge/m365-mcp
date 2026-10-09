@@ -5,15 +5,19 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only by default. A job that needs more asks for it itself (codeql).
+permissions:
+  contents: read
+
 jobs:
   lint-and-type-check:
     name: Lint & Type Check
     runs-on: ubuntu-latest
     continue-on-error: false
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: 'npm'
@@ -32,9 +36,9 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: false
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: 'npm'
@@ -50,14 +54,14 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: false
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # full history required for git-log scanning
 
       - name: TruffleHog secrets scan
         # Pinned to a commit SHA (v3.95.8) rather than a mutable @main ref so a
         # compromised upstream tag/branch can't silently run in CI (F15).
-        uses: trufflesecurity/trufflehog@00155c9dc586f34d189adc83d3ac2698c2ec551f
+        uses: trufflesecurity/trufflehog@00155c9dc586f34d189adc83d3ac2698c2ec551f # v3.95.8
         with:
           path: ./
           # Use event SHAs so push-to-main (where branch name == HEAD) doesn't fail
@@ -70,7 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: false
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Other organisations deploy this server into their own tenants. Nothing
       # about any one deployment (hostnames, resource names, people or domains
@@ -88,19 +92,19 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           languages: javascript-typescript
           source-root: src
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v4
+        uses: github/codeql-action/autobuild@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           category: '/language:javascript-typescript'
           output: codeql-results
@@ -125,9 +129,9 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: false
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: 'npm'
@@ -170,7 +174,7 @@ jobs:
       IMAGE: m365-mcp:pr-boot
       CONTAINER: m365-mcp-boot
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build image (local daemon only, never pushed)
         run: docker build --build-arg GIT_SHA="$GITHUB_SHA" -t "$IMAGE" .
@@ -271,7 +275,7 @@ jobs:
     # PRs still build and boot the image in container-boot above.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build Docker image
         run: docker build -t m365-mcp:${{ github.sha }} .
@@ -284,7 +288,7 @@ jobs:
       # so it is caught here and suppressed via .trivyignore.
       - name: Scan image with Trivy — app layer (gate)
         # Pinned to a commit SHA (v0.36.0) rather than the mutable @master ref (F15).
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: m365-mcp:${{ github.sha }}
           format: table
@@ -316,7 +320,7 @@ jobs:
       # a blanket HIGH ignore — the app-layer gate above still fails the build on
       # anything we ship. See docs/trivy-suppressions.md.
       - name: Scan image with Trivy — base OS (report-only)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: m365-mcp:${{ github.sha }}
           format: table
