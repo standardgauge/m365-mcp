@@ -13,6 +13,8 @@
  * anticipate fails the test rather than being answered with something vague.
  */
 
+import { createHash } from 'crypto';
+
 export const FAKE_TENANT_ID = '72f988bf-0000-4000-8000-00000000c0de';
 export const FAKE_CLIENT_ID = '11111111-2222-4333-8444-555555555555';
 export const FAKE_USER_OID = '99999999-8888-4777-8666-555555555555';
@@ -42,8 +44,9 @@ function b64url(value: string): string {
 }
 
 /** An unsigned id token for the fake user. Built at run time, never committed:
- *  a JWT-shaped string in the tree trips secret scanning. */
-export function idToken(): string {
+ *  a JWT-shaped string in the tree trips secret scanning. `nonce`, when given,
+ *  is the claim Entra echoes from the authorize request. */
+export function idToken(nonce?: string): string {
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: 'none', typ: 'JWT' }));
   const claims = b64url(
@@ -59,6 +62,7 @@ export function idToken(): string {
       sub: 'fake-subject',
       tid: FAKE_TENANT_ID,
       ver: '2.0',
+      ...(nonce === undefined ? {} : { nonce }),
     })
   );
   return `${header}.${claims}.fake-signature`;
@@ -81,6 +85,14 @@ export class FakeEntra {
 
   /** Tokens issued so far; the next pair is numbered one higher. */
   issued = 0;
+
+  /** The S256 code_challenge from the authorize request this code came from.
+   *  When set, the authorization_code grant answers `invalid_grant` unless the
+   *  request's code_verifier hashes to it, as Entra does. */
+  codeChallenge: string | null = null;
+  /** The nonce from the authorize request, echoed into the id token issued
+   *  for the authorization_code grant. */
+  authorizeNonce: string | null = null;
 
   async sendGetRequestAsync<T>(url: string, _options?: NetworkRequestOptions): Promise<NetworkResponse<T>> {
     const u = new URL(url);
@@ -140,6 +152,20 @@ export class FakeEntra {
           400
         ) as NetworkResponse<T>;
       }
+      if (grant === 'authorization_code' && this.codeChallenge !== null) {
+        const verifier = form.get('code_verifier');
+        const hashed = verifier === null ? null : createHash('sha256').update(verifier).digest('base64url');
+        if (hashed !== this.codeChallenge) {
+          return json(
+            {
+              error: 'invalid_grant',
+              error_description: 'AADSTS50148: The code_verifier does not match the code_challenge.',
+              error_codes: [50148],
+            },
+            400
+          ) as NetworkResponse<T>;
+        }
+      }
       if (!['authorization_code', 'device_code', 'refresh_token'].includes(grant ?? '')) {
         throw new Error(`FakeEntra: unexpected grant_type ${grant}`);
       }
@@ -152,7 +178,7 @@ export class FakeEntra {
         ext_expires_in: this.accessTokenLifetimeSeconds,
         access_token: `fake-access-token-${this.issued}`,
         refresh_token: `fake-refresh-token-${this.issued}`,
-        id_token: idToken(),
+        id_token: idToken(grant === 'authorization_code' ? this.authorizeNonce ?? undefined : undefined),
         client_info: b64url(JSON.stringify({ uid: FAKE_USER_OID, utid: FAKE_TENANT_ID })),
       }) as NetworkResponse<T>;
     }

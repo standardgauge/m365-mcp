@@ -1,6 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getAuthCodeUrl } from '../../services/graphClient.js';
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { withRateLimit } from '../../services/rateLimit.js';
 
@@ -15,9 +15,12 @@ const DEVICE_LABEL_FORMAT = /^[a-zA-Z0-9._\- ]{1,64}$/;
 /**
  * GET /api/auth/login[?install_nonce=XXX]
  *
- * Initiates the MSAL authorization-code flow. Generates a random `state` value
- * (stored as a short-lived HttpOnly cookie), then redirects the browser to the
- * Microsoft identity platform login page.
+ * Initiates the MSAL authorization-code flow. Generates a random `state`, a
+ * PKCE code verifier and an OpenID Connect `nonce`, stores each in a
+ * short-lived HttpOnly cookie, then redirects the browser to the Microsoft
+ * identity platform login page with `state`, the S256 code challenge and the
+ * nonce. The callback checks `state` and hands the verifier and nonce to MSAL
+ * for the code redemption (see AuthCodeUrlBinding in graphClient.ts).
  *
  * If `install_nonce` is provided (SHA256(verifier) from install-mcp.sh),
  * stores the PKCE code_challenge in a short-lived HttpOnly cookie so the OAuth
@@ -35,10 +38,16 @@ async function login(
 ): Promise<HttpResponseInit> {
   try {
     const state = randomBytes(16).toString('hex');
-    const authUrl = await getAuthCodeUrl(state);
+    // RFC 7636: 32 random bytes give a 43-character base64url verifier.
+    const codeVerifier = randomBytes(32).toString('base64url');
+    const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url');
+    const nonce = randomBytes(16).toString('hex');
+    const authUrl = await getAuthCodeUrl(state, { codeChallenge, nonce });
 
     const cookies: string[] = [
       `oauth_state=${state}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600`,
+      `oauth_pkce=${codeVerifier}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600`,
+      `oauth_nonce=${nonce}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600`,
     ];
 
     const installNonce = request.query.get('install_nonce');
@@ -69,9 +78,10 @@ async function login(
       cookies: cookies.map((c) => parseSetCookie(c)),
     };
   } catch (err: unknown) {
+    // The exception text stays in the log; the response says nothing about why.
     const message = err instanceof Error ? err.message : 'Unknown error';
     context.error('login error:', message);
-    return { status: 500, jsonBody: { error: 'Failed to initiate login flow', detail: message } };
+    return { status: 500, jsonBody: { error: 'Failed to initiate login flow' } };
   }
 }
 
