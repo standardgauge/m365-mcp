@@ -300,7 +300,23 @@ export interface OutboundCheck {
  * may proceed; throws OutboundPolicyError otherwise.
  */
 export async function enforceOutboundPolicy(check: OutboundCheck): Promise<void> {
-  const { effective } = await getOutboundEnforcement(check.tenantId, check.userId);
+  // Every fail-closed read below is rethrown as an OutboundPolicyError, so the
+  // REST routes answer 403 and the MCP dispatcher audits it as denied, rather
+  // than a raw error surfacing as a 500.
+  const refuse = (what: string, err: unknown): OutboundPolicyError => {
+    if (err instanceof OutboundPolicyError) return err;
+    const detail = err instanceof Error ? err.message : String(err);
+    return new OutboundPolicyError(
+      `${OUTBOUND_POLICY_MARKER}: ${what} could not be read (${detail}), so the call was refused.`,
+    );
+  };
+
+  let effective: Record<OutboundChannel, EffectiveOutboundMode>;
+  try {
+    ({ effective } = await getOutboundEnforcement(check.tenantId, check.userId));
+  } catch (err: unknown) {
+    throw refuse('the outbound policy', err);
+  }
   const { mode, enforcedBy } = effective[check.channel];
   if (mode === 'allow') return;
   const scope = enforcedBy === 'user' ? 'for your account' : 'for this organization';
@@ -314,17 +330,18 @@ export async function enforceOutboundPolicy(check: OutboundCheck): Promise<void>
   try {
     recipients = await check.recipients();
   } catch (err: unknown) {
-    if (err instanceof OutboundPolicyError) throw err;
-    const detail = err instanceof Error ? err.message : String(err);
-    throw new OutboundPolicyError(
-      `${OUTBOUND_POLICY_MARKER}: the recipients of these ${CHANNEL_LABEL[check.channel]} could not be read (${detail}), so the call was refused.`,
-    );
+    throw refuse(`the recipients of these ${CHANNEL_LABEL[check.channel]}`, err);
   }
   if (recipients.length === 0) return;
 
   if (mode === 'block') throw blocked();
 
-  const domains = await getTenantDomains(check.graph, check.tenantId);
+  let domains: Set<string>;
+  try {
+    domains = await getTenantDomains(check.graph, check.tenantId);
+  } catch (err: unknown) {
+    throw refuse("the organization's domains", err);
+  }
   const external = recipients
     .filter((r) => !isInternalRecipient(r, check.tenantId, domains))
     .map((r) => r.address || (r.tenantId ? `a member of tenant ${r.tenantId}` : 'an unidentified member'));
@@ -394,7 +411,10 @@ export async function enforceEventUpdatePolicy(
 const MAX_MEMBER_PAGES = 20;
 
 /**
- * Read every member of a chat or channel as recipients. Reading members needs
+ * Read every member of a chat or channel as recipients. For a channel, pass the
+ * `/allMembers` path: `/members` lists direct members only, and a shared channel
+ * also delivers to the indirect members of every team it is shared with.
+ * Reading members needs
  * a permission the Teams send tools do not (ChatMember.Read for a chat,
  * ChannelMember.Read.All for a channel); `permission` is named in the error so
  * an administrator who set 'internal' without granting it sees why every send

@@ -9,7 +9,9 @@
  *   - move_event: force=true does not get past a block
  *   - respond_to_event: a comment is refused under block; a bare RSVP is not
  *   - send_chat_message: internal refuses a chat with a member from another tenant
- *   - send_channel_message: block refuses without reading the member list
+ *   - send_channel_message: block refuses without reading the member list;
+ *     internal checks /allMembers, catching an indirect shared-channel member
+ *   - an unreadable policy row or domain list refuses with 403 / denied audit
  *   - REST POST /api/calendar/events: 403 under block, nothing written
  */
 
@@ -19,10 +21,12 @@ import type { HttpRequest, InvocationContext } from '@azure/functions';
 // ── Policy rows (OutboundPolicy table) ───────────────────────────────────────
 
 let tenantRow: Record<string, unknown> | undefined;
+let storageDown = false;
 jest.mock('@azure/data-tables', () => ({
   TableClient: {
     fromConnectionString: () => ({
       getEntity: async (_pk: string, rk: string) => {
+        if (storageDown) throw { statusCode: 503, message: 'storage unavailable' };
         if (rk === '__tenant__' && tenantRow) return tenantRow;
         throw { statusCode: 404 };
       },
@@ -135,6 +139,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   clearTenantDomainCache();
   tenantRow = undefined;
+  storageDown = false;
   getResponses = { '/organization': ORG };
   graphWrites.length = 0;
   graphGets.length = 0;
@@ -246,6 +251,25 @@ describe('Teams sends', () => {
     expect(graphWrites).toEqual([expect.objectContaining({ path: '/chats/chat1/messages' })]);
   });
 
+  it('send_channel_message under internal checks allMembers, so an indirect shared-channel member refuses', async () => {
+    tenantRow = { teamsMessages: 'internal' };
+    // Direct members are all internal; the external tenant reaches the channel
+    // only through a team it is shared with, which `/members` would not list.
+    getResponses['/teams/team1/channels/chan1/members'] = { value: [{ email: 'me@contoso.com', tenantId: TENANT }] };
+    getResponses['/teams/team1/channels/chan1/allMembers'] = {
+      value: [
+        { email: 'me@contoso.com', tenantId: TENANT },
+        { email: 'pat@fabrikam.com', tenantId: 'other-tenant' },
+      ],
+    };
+    const r = await callTool('send_channel_message', { teamId: 'team1', channelId: 'chan1', content: 'hi' });
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain('pat@fabrikam.com');
+    expect(graphGets).toContain('/teams/team1/channels/chan1/allMembers');
+    expect(graphWrites).toEqual([]);
+    expectDeniedAudit('send_channel_message');
+  });
+
   it('send_channel_message under block refuses without reading members', async () => {
     tenantRow = { teamsMessages: 'block' };
     const r = await callTool('send_channel_message', { teamId: 'team1', channelId: 'chan1', content: 'hi' });
@@ -269,5 +293,46 @@ describe('REST POST /api/calendar/events', () => {
     expect((res.jsonBody as { error: string }).error).toContain(OUTBOUND_POLICY_MARKER);
     expect(graphWrites).toEqual([]);
     expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ operation: 'calendar.post', result: 'denied' }));
+  });
+
+  it('returns 403 and audits a denial when the policy cannot be read', async () => {
+    storageDown = true;
+    const req = {
+      method: 'POST',
+      headers: new Map<string, string>(),
+      query: new URLSearchParams(),
+      json: async () => ({ subject: 's', start: START, end: END, attendees: ['pat@contoso.com'] }),
+    } as unknown as HttpRequest;
+    const res = await restCreateEvent(req, ctx);
+    expect(res.status).toBe(403);
+    expect((res.jsonBody as { error: string }).error).toContain(OUTBOUND_POLICY_MARKER);
+    expect(graphWrites).toEqual([]);
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ operation: 'calendar.post', result: 'denied' }));
+  });
+
+  it('returns 403 and audits a denial when the domain list cannot be read', async () => {
+    tenantRow = { calendarInvites: 'internal' };
+    getResponses['/organization'] = { value: [] };
+    const req = {
+      method: 'POST',
+      headers: new Map<string, string>(),
+      query: new URLSearchParams(),
+      json: async () => ({ subject: 's', start: START, end: END, attendees: ['pat@contoso.com'] }),
+    } as unknown as HttpRequest;
+    const res = await restCreateEvent(req, ctx);
+    expect(res.status).toBe(403);
+    expect(graphWrites).toEqual([]);
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ operation: 'calendar.post', result: 'denied' }));
+  });
+});
+
+describe('fail closed through the MCP dispatcher', () => {
+  it('an unreadable policy refuses create_event and is audited as denied', async () => {
+    storageDown = true;
+    const r = await callTool('create_event', { subject: 's', start: START, end: END, attendees: ['pat@contoso.com'] });
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain(OUTBOUND_POLICY_MARKER);
+    expect(graphWrites).toEqual([]);
+    expectDeniedAudit('create_event');
   });
 });

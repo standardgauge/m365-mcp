@@ -2580,11 +2580,13 @@ const tools: ToolDef[] = [
       if (await isPathDenied(tenantId, session.userId, 'teams', args.teamId)) throw new Error('Access restricted by deny list');
       if (await isPathDenied(tenantId, session.userId, 'teams', args.channelId)) throw new Error('Access restricted by deny list');
       // Channel members include guests and, on a shared channel, people from other tenants.
+      // `/allMembers`, not `/members`: a shared channel also reaches the indirect
+      // members of every team it is shared with, and only `/allMembers` lists them.
       await enforceOutboundPolicy({
         graph, tenantId, userId: session.userId, channel: 'teamsMessages', alwaysNotifies: true,
         recipients: () => teamsMemberRecipients(
           graph,
-          `/teams/${encodeGraphId(args.teamId, 'teamId')}/channels/${encodeGraphId(args.channelId, 'channelId')}/members`,
+          `/teams/${encodeGraphId(args.teamId, 'teamId')}/channels/${encodeGraphId(args.channelId, 'channelId')}/allMembers`,
           'ChannelMember.Read.All',
         ),
       });

@@ -4,7 +4,8 @@
  * Covers:
  *   - effective mode is the stricter of the tenant and user rows, per channel
  *   - a missing row reads as 'allow'; an unknown stored value reads as 'block'
- *   - a policy read that fails for anything but 404 propagates (fail closed)
+ *   - a policy read that fails for anything but 404 propagates (fail closed),
+ *     and enforceOutboundPolicy turns it into a marked OutboundPolicyError
  *   - setOutboundPolicy merges with the stored row and stamps the audit fields
  *   - enforceOutboundPolicy: allow never reads recipients; block refuses when
  *     anyone is notified and passes when nobody is; internal compares against the
@@ -220,7 +221,10 @@ describe('enforceOutboundPolicy', () => {
       graph, tenantId: TENANT, userId: USER, channel: 'calendarInvites', recipients: async () => [{ address: 'a@contoso.com' }],
     });
     await expect(check(fakeGraph({ '/organization': { value: [] } }).graph)).rejects.toThrow(OUTBOUND_POLICY_MARKER);
-    await expect(check(fakeGraph({ '/organization': new Error('403 Forbidden') }).graph)).rejects.toThrow('403 Forbidden');
+    const unreadable = check(fakeGraph({ '/organization': new Error('403 Forbidden') }).graph);
+    await expect(unreadable).rejects.toBeInstanceOf(OutboundPolicyError);
+    await expect(unreadable).rejects.toThrow(OUTBOUND_POLICY_MARKER);
+    await expect(unreadable).rejects.toThrow(/domains could not be read \(403 Forbidden\)/);
   });
 
   it('refuses when the recipients cannot be read', async () => {
@@ -237,9 +241,12 @@ describe('enforceOutboundPolicy', () => {
   it('fails closed when the policy cannot be read', async () => {
     mockGetEntity.mockRejectedValue(new Error('storage down'));
     const { graph } = fakeGraph({});
-    await expect(enforceOutboundPolicy({
+    const p = enforceOutboundPolicy({
       graph, tenantId: TENANT, userId: USER, channel: 'calendarInvites', recipients: async () => [],
-    })).rejects.toThrow('storage down');
+    });
+    await expect(p).rejects.toBeInstanceOf(OutboundPolicyError);
+    await expect(p).rejects.toThrow(OUTBOUND_POLICY_MARKER);
+    await expect(p).rejects.toThrow(/outbound policy could not be read \(storage down\)/);
   });
 });
 
