@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getValidAccessTokenForSession, getTenantId } from '../../services/tokenCache.js';
 import { createGraphClient } from '../../services/graphClient.js';
+import { resolveDenySubject } from '../../services/mailboxOwner.js';
 import { isPathDenied } from '../../services/denyList.js';
 import { withPolicyEnforcement } from '../../services/policyEnforcement.js';
 import { resolveMailFolderName } from '../../services/containerResolver.js';
@@ -26,6 +27,7 @@ async function readMessageHandler(
 
   const accessToken = await getValidAccessTokenForSession(auth.session);
   const graph = createGraphClient(accessToken);
+  const denySubject = await resolveDenySubject(graph, userId, mailboxId);
 
   const base = mailboxId === 'me' ? '/me' : `/users/${mailboxId}`;
 
@@ -40,7 +42,7 @@ async function readMessageHandler(
   // Deny-list check: resolve folder display name (deny list stores names, not IDs)
   if (message.parentFolderId) {
     const folderName = await resolveMailFolderName(graph, message.parentFolderId, base);
-    if (folderName && await isPathDenied(await getTenantId(userId), userId, 'mail', folderName)) {
+    if (folderName && await isPathDenied(await getTenantId(userId), denySubject, 'mail', folderName)) {
       return {
         status: 403,
         jsonBody: { error: 'Access to this mail folder is restricted by the deny list' },

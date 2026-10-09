@@ -77,7 +77,7 @@ Every tool call passes through the deny list before it reaches Graph, and the sa
 
 ## Access controls
 
-**Two-tier deny list.** Tier 1 is global and administrator-managed: folders, paths, and calendars blocked for everyone. Tier 2 is per-user and self-managed, so an individual can hide their own folders from AI without asking an administrator. Calendar entries match by calendar ID *or* display name, so a shared calendar such as "HR" or "Executive" can be blocked by name across every calendar tool.
+**Two-tier deny list.** Tier 1 is global and administrator-managed: folders, paths, and calendars blocked for everyone. Tier 2 is per-user and self-managed, so an individual can hide their own folders from AI without asking an administrator. A user's tier 2 entries also apply when a delegate's agent opens that user's mailbox through `mailboxId`. They do not apply to a calendar the user has shared into someone else's calendar list, which that person reaches under their own calendar ID and name. To hide a shared calendar from every agent, use a tier 1 entry. Calendar entries match by calendar ID *or* display name, so a shared calendar such as "HR" or "Executive" can be blocked by name across every calendar tool.
 
 **Per-service read-only mode.** The `readOnlyServices` setting keeps a service readable while refusing all of its write tools. Those write tools are also hidden from the MCP tool list, so a read-only service advertises only what it will actually do. The use case it was built for: let an agent read a calendar for scheduling context without letting it create, modify, or delete events.
 

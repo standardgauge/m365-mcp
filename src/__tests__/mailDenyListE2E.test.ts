@@ -139,12 +139,14 @@ jest.mock('../services/containerResolver.js', () => ({
 jest.mock('../services/opaqueId.js', () => ({
   assertOpaqueId: jest.fn(),
   assertOpaqueIds: jest.fn(),
+  encodeGraphId: (value: string) => encodeURIComponent(value),
   ValidationError: class ValidationError extends Error {},
 }));
 
 jest.mock('@azure/functions', () => ({ app: { http: jest.fn() } }));
 
 import { app } from '@azure/functions';
+import { clearMailboxOwnerCache } from '../services/mailboxOwner.js';
 // Import all four handlers so their app.http registrations are captured.
 import '../functions/mail/listFoldersMail.js';
 import '../functions/mail/searchMail.js';
@@ -190,6 +192,7 @@ function reset() {
   userEntries.length = 0;
   graphCalls.length = 0;
   folderNames.clear();
+  clearMailboxOwnerCache();
   jest.clearAllMocks();
   delete process.env.DEFAULT_MAIL_DENY_FOLDERS;
 }
@@ -333,5 +336,112 @@ describe('E2E: move_message enforces deny list on the destination', () => {
 
     expect(res.status).toBe(200);
     expect(graphCalls.some((c) => c.op === 'post' && c.path.endsWith('/move'))).toBe(true);
+  });
+});
+
+// ── Delegated mailbox: the owner's per-user list applies (threat model §9.5) ───
+
+describe("E2E: delegated access is checked against the mailbox owner's per-user list", () => {
+  const OWNER = 'owner-oid';
+  const OWNER_UPN = 'owner@example.com';
+
+  function pushUserMail(userId: string, path: string) {
+    userEntries.push({ partitionKey: `${userId}:mail`, rowKey: Buffer.from(path).toString('base64'), path });
+  }
+
+  // `/users/{mailboxId}` answers the owner lookup; everything else is the message.
+  function graphServesMailbox(message: Record<string, unknown>) {
+    mockGraphGet.mockImplementation((path: string) =>
+      Promise.resolve(path === `/users/${encodeURIComponent(OWNER_UPN)}` ? { id: OWNER } : message),
+    );
+  }
+
+  it("read_message: 403 when the owner hid the folder, though the delegate's own list is empty", async () => {
+    pushUserMail(OWNER, 'Payroll');
+    folderNames.set('f-pay', 'Payroll');
+    graphServesMailbox({ id: 'm20', parentFolderId: 'f-pay', body: { content: 'salaries' } });
+
+    const res = await readHandler(
+      makeRequest({ params: { messageId: 'm20' }, query: { mailboxId: OWNER_UPN } }),
+      ctx,
+    );
+
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.jsonBody)).not.toContain('salaries');
+  });
+
+  it("read_message: the delegate's own list still applies in the owner's mailbox", async () => {
+    pushUserMail(USER, 'Payroll');
+    folderNames.set('f-pay', 'Payroll');
+    graphServesMailbox({ id: 'm21', parentFolderId: 'f-pay' });
+
+    const res = await readHandler(
+      makeRequest({ params: { messageId: 'm21' }, query: { mailboxId: OWNER_UPN } }),
+      ctx,
+    );
+
+    expect(res.status).toBe(403);
+  });
+
+  it("read_message: another user's list does not reach the caller's own mailbox", async () => {
+    pushUserMail(OWNER, 'Payroll');
+    folderNames.set('f-pay', 'Payroll');
+    mockGraphGet.mockResolvedValue({ id: 'm22', parentFolderId: 'f-pay' });
+
+    const res = await readHandler(makeRequest({ params: { messageId: 'm22' } }), ctx);
+
+    expect(res.status).toBe(200);
+    expect(graphCalls.some((c) => c.path.startsWith('/users/'))).toBe(false);
+  });
+
+  it('read_message: refuses before reading the message when the owner cannot be identified', async () => {
+    mockGraphGet.mockImplementation((path: string) =>
+      path.startsWith('/users/') && !path.includes('/messages/')
+        ? Promise.reject(new Error('Resource not found'))
+        : Promise.resolve({ id: 'm23', parentFolderId: 'f-inbox' }),
+    );
+
+    const res = await readHandler(
+      makeRequest({ params: { messageId: 'm23' }, query: { mailboxId: OWNER_UPN } }),
+      ctx,
+    );
+
+    expect(res.status).toBe(500);
+    expect(graphCalls.some((c) => c.path.includes('/messages/'))).toBe(false);
+  });
+
+  it("list_folders_mail: strips the owner's hidden folder from the delegated listing", async () => {
+    pushUserMail(OWNER, 'Payroll');
+    mockGraphGet.mockImplementation((path: string) =>
+      Promise.resolve(
+        path === `/users/${encodeURIComponent(OWNER_UPN)}`
+          ? { id: OWNER }
+          : {
+              value: ['Inbox', 'Payroll'].map((displayName, i) => ({
+                id: `folder-${i}`, displayName, totalItemCount: 0, unreadItemCount: 0, childFolderCount: 0,
+              })),
+            },
+      ),
+    );
+
+    const res = await listFoldersHandler(makeRequest({ query: { mailboxId: OWNER_UPN } }), ctx);
+
+    const body = res.jsonBody as { folders: Array<{ name: string }> };
+    expect(body.folders.map((f) => f.name)).toEqual(['Inbox']);
+  });
+
+  it("move_message: the owner's hidden folder is not a valid destination", async () => {
+    pushUserMail(OWNER, 'Payroll');
+    folderNames.set('f-inbox', 'Inbox');
+    folderNames.set('f-pay', 'Payroll');
+    graphServesMailbox({ parentFolderId: 'f-inbox' });
+
+    const res = await moveHandler(
+      makeRequest({ params: { messageId: 'm24' }, query: { mailboxId: OWNER_UPN }, json: { destinationFolderId: 'f-pay' } }),
+      ctx,
+    );
+
+    expect(res.status).toBe(403);
+    expect(graphCalls.some((c) => c.op === 'post')).toBe(false);
   });
 });

@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getValidAccessTokenForSession, getTenantId } from '../../services/tokenCache.js';
 import { createGraphClient } from '../../services/graphClient.js';
+import { resolveDenySubject } from '../../services/mailboxOwner.js';
 import { filterDeniedPaths } from '../../services/denyList.js';
 import { withPolicyEnforcement } from '../../services/policyEnforcement.js';
 import { assertOpaqueId } from '../../services/opaqueId.js';
@@ -34,6 +35,7 @@ async function listFoldersMailHandler(
   if (parentFolderId) assertOpaqueId(parentFolderId, 'parentFolderId');
 
   const graph = createGraphClient(accessToken);
+  const denySubject = await resolveDenySubject(graph, userId, mailboxId);
 
   const base = mailboxId === 'me' ? '/me' : `/users/${mailboxId}`;
   const apiPath = parentFolderId
@@ -64,7 +66,7 @@ async function listFoldersMailHandler(
     })
   );
 
-  const allowed = await filterDeniedPaths(await getTenantId(userId), userId, 'mail', folders);
+  const allowed = await filterDeniedPaths(await getTenantId(userId), denySubject, 'mail', folders);
 
   return { status: 200, jsonBody: { folders: allowed, count: allowed.length } };
 }

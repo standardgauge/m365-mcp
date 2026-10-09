@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getValidAccessTokenForSession, getTenantId } from '../../services/tokenCache.js';
 import { createGraphClient } from '../../services/graphClient.js';
+import { resolveDenySubject } from '../../services/mailboxOwner.js';
 import { isPathDenied } from '../../services/denyList.js';
 import { withPolicyEnforcement } from '../../services/policyEnforcement.js';
 import { resolveMailFolderName } from '../../services/containerResolver.js';
@@ -44,6 +45,7 @@ async function searchMailHandler(
 
   const accessToken = await getValidAccessTokenForSession(auth.session);
   const graph = createGraphClient(accessToken);
+  const denySubject = await resolveDenySubject(graph, userId, mailboxId);
 
   const base = mailboxId === 'me' ? '/me' : `/users/${mailboxId}`;
 
@@ -51,7 +53,7 @@ async function searchMailHandler(
   if (folderId) {
     const tenantId = await getTenantId(userId);
     const folderName = await resolveMailFolderName(graph, folderId, base);
-    if (folderName && await isPathDenied(tenantId, userId, 'mail', folderName)) {
+    if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) {
       return { status: 403, jsonBody: { error: 'Access to this mail folder is restricted by the deny list' } };
     }
   }
@@ -88,7 +90,7 @@ async function searchMailHandler(
     for (const msg of allMessages) {
       if (msg.folderId) {
         const folderName = await resolveMailFolderName(graph, msg.folderId, base);
-        if (folderName && await isPathDenied(tenantId, userId, 'mail', folderName)) continue;
+        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) continue;
       }
       filtered.push(msg);
     }

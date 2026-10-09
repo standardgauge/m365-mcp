@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getValidAccessTokenForSession } from '../../services/tokenCache.js';
 import { createGraphClient } from '../../services/graphClient.js';
+import { resolveDenySubject } from '../../services/mailboxOwner.js';
 import { withPolicyEnforcement, checkDenyList } from '../../services/policyEnforcement.js';
 import { resolveMailFolderName } from '../../services/containerResolver.js';
 import { assertOpaqueId } from '../../services/opaqueId.js';
@@ -33,6 +34,7 @@ async function renameMailFolderHandler(
 
   const accessToken = await getValidAccessTokenForSession(auth.session);
   const graph = createGraphClient(accessToken);
+  const denySubject = await resolveDenySubject(graph, userId, body.mailboxId);
 
   const mailboxBase = body.mailboxId && body.mailboxId !== 'me'
     ? `/users/${body.mailboxId}`
@@ -42,7 +44,7 @@ async function renameMailFolderHandler(
   // otherwise a rename could un-hide a folder the deny list intends to keep out of reach.
   const currentName = await resolveMailFolderName(graph, folderId, mailboxBase);
   if (currentName) {
-    const sourceViolation = await checkDenyList(userId, 'mail', currentName);
+    const sourceViolation = await checkDenyList(userId, 'mail', currentName, undefined, denySubject);
     if (sourceViolation) {
       return { status: sourceViolation.status, jsonBody: { error: sourceViolation.error } };
     }
@@ -50,7 +52,7 @@ async function renameMailFolderHandler(
 
   // Block renaming TO a deny-listed name (parity with createMailFolder) — otherwise a
   // rename could shadow a denied name and route mail past the deny list.
-  const targetViolation = await checkDenyList(userId, 'mail', body.displayName);
+  const targetViolation = await checkDenyList(userId, 'mail', body.displayName, undefined, denySubject);
   if (targetViolation) {
     return { status: targetViolation.status, jsonBody: { error: targetViolation.error } };
   }

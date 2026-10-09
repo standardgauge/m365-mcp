@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getValidAccessTokenForSession } from '../../services/tokenCache.js';
 import { createGraphClient } from '../../services/graphClient.js';
+import { resolveDenySubject } from '../../services/mailboxOwner.js';
 import { withPolicyEnforcement, checkDenyList } from '../../services/policyEnforcement.js';
 import { resolveMailFolderName } from '../../services/containerResolver.js';
 import { assertOpaqueId } from '../../services/opaqueId.js';
@@ -42,6 +43,7 @@ async function deleteMailFolderHandler(
 
   const accessToken = await getValidAccessTokenForSession(auth.session);
   const graph = createGraphClient(accessToken);
+  const denySubject = await resolveDenySubject(graph, userId, mailboxId);
 
   const mailboxBase = mailboxId && mailboxId !== 'me'
     ? `/users/${mailboxId}`
@@ -50,7 +52,7 @@ async function deleteMailFolderHandler(
   // Deny-list check on the folder being deleted (resolve its display name).
   const folderName = await resolveMailFolderName(graph, folderId, mailboxBase);
   if (folderName) {
-    const violation = await checkDenyList(userId, 'mail', folderName);
+    const violation = await checkDenyList(userId, 'mail', folderName, undefined, denySubject);
     if (violation) {
       return { status: violation.status, jsonBody: { error: violation.error } };
     }

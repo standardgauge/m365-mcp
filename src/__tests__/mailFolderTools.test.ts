@@ -56,6 +56,12 @@ const mockCreateGraphClient = jest.fn(() => ({
 }));
 
 // telemetry.js has import-time side effects (patches console) — stub it out
+// Routing tests: the delegated-mailbox owner lookup (its own Graph call) is
+// covered by mailboxOwner.test.ts and delegatedDenyList.test.ts.
+jest.mock('../services/mailboxOwner.js', () => ({
+  resolveDenySubject: (_g: unknown, callerId: string) => Promise.resolve(callerId),
+}));
+
 jest.mock('../services/telemetry.js', () => ({}));
 
 jest.mock('../services/authMiddleware.js', () => ({
