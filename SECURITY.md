@@ -48,6 +48,8 @@ Also out of scope: Microsoft Graph and Entra ID themselves. Report those to
   HMAC.
 - Deny-list checks **fail closed** when the policy store is unreachable.
 
-Known limitations are in the README and the operations runbook rather than
-hidden here. Two worth naming: the container currently runs as root, and there
-is no rate limiting on the public authentication endpoints.
+The [threat model](docs/threat-model.md) covers assets, trust boundaries,
+threats per area with their current mitigations, the open gaps, and the scope a
+penetration test should start from. Known limitations are there and in the
+operations runbook rather than hidden here. One worth naming: there is no rate
+limiting on the public authentication endpoints.

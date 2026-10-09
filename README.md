@@ -30,7 +30,7 @@ The server is a single HTTP service. Clients speak MCP to it over JSON-RPC at `/
 
 ```
 MCP client (Claude Desktop, Claude Code, any MCP client)
-      │  JSON-RPC over Streamable HTTP, with an x-user-id header
+      │  JSON-RPC over Streamable HTTP, with a session token
       ▼
 Azure Container App
 ├── /api/mcp                → MCP protocol endpoint (tools/list, tools/call)
@@ -65,7 +65,9 @@ Each user authenticates once through the standard Microsoft sign-in page. The re
 
 Because every token is **delegated**, the server's reach is bounded by the user's own permissions. A user who cannot open a SharePoint site cannot reach it through this server either. There are no application (app-only) Graph permissions anywhere in the registration, which is what rules out a back-door service account with tenant-wide access.
 
-Calls are identified by an `x-user-id` header, which maps to a stored session. A request with no valid session gets no Graph access.
+Calls carry a random session token issued at sign-in (`Authorization: Bearer`, or the `mcp_session` cookie in the browser). The server stores only a keyed HMAC of it and looks the session up by that hash; a client-supplied user ID is never trusted. A request with no valid session gets no Graph access.
+
+What the server protects, its trust boundaries, and the known gaps are in the [threat model](docs/threat-model.md).
 
 ### Deny lists are enforced on both surfaces
 
