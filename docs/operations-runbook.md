@@ -159,14 +159,66 @@ curl -H "Cookie: mcp_session=<admin session>" \
   "https://your-mcp-host.example.com/api/manage/audit-log?format=csv" -o audit-log.csv
 ```
 
-Retention: the table has **no automatic purge** today; it grows until someone
-truncates it. Log Analytics (console logs, telemetry) is set to 90 days in the
-Bicep; confirm on the workspace, since the setting only applies
-on provisioning:
+#### Audit log retention
+
+Rows older than `AUDIT_LOG_RETENTION_DAYS` (default **365**) are deleted
+automatically. The purge runs at most once a day per replica, started by the
+first audited call after the last run, so it runs whenever the server is in use.
+It is not a Functions timer trigger: those need `AzureWebJobsStorage`, which the
+Container App runs without. Every run logs one line, including runs that delete
+nothing, so you can confirm it is alive:
+
+```
+ContainerAppConsoleLogs_CL
+| where ContainerAppName_s == "m365-mcp"
+| where Log_s contains "Retention purge"
+| order by TimeGenerated desc
+| take 10
+```
+
+No line in the last two days on a server that is taking calls means the purge
+has stopped. A `Retention purge failed` line carries the storage error.
+
+To change the window, or set `0` to keep every row:
+
+```
+az containerapp update -n m365-mcp -g rg-m365-mcp --set-env-vars AUDIT_LOG_RETENTION_DAYS=730
+```
+
+An invalid value (negative, fractional, not a number) logs an error and falls
+back to 365. It never turns retention off; only an explicit `0` does.
+
+Before shortening the window, or when a client asks for a record the window
+would drop, export first. The export is the archive; the purge does not keep a
+copy:
+
+```
+# Everything older than the new cutoff, as CSV
+curl -H "Cookie: mcp_session=<admin session>" \
+  "https://your-mcp-host.example.com/api/manage/audit-log?endDate=2026-01-01T00:00:00Z&limit=1000&format=csv" \
+  -o audit-log-before-2026.csv
+```
+
+The endpoint returns at most 1000 rows per call, newest first. For a larger
+range, page backwards by setting `endDate` to the oldest `timestamp` in the
+previous file until a call returns no rows.
+
+#### Log Analytics retention
+
+Container console logs and telemetry go to the Log Analytics workspace, which
+the Bicep provisions with `retentionInDays: 90`. That is the value at
+provisioning time; a change in the portal survives until the next Bicep
+deployment. Check what each live workspace actually holds:
 
 ```
 az monitor log-analytics workspace show -g rg-m365-mcp -n m365-mcp-logs --query retentionInDays
 ```
+
+Change it with
+`az monitor log-analytics workspace update -g rg-m365-mcp -n m365-mcp-logs --retention-time <days>`,
+and change `retentionInDays` in the Bicep to match so the next deployment does
+not put it back. Record the verified value with the rest of the deployment's
+own notes, outside this repository.
 
 ### Revision history
 ```

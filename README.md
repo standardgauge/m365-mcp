@@ -233,6 +233,7 @@ Copy `.env.example` to `.env` for local work, or set these as Container App secr
 | `OAUTH_REDIRECT_URI` | Yes | Must match a registered redirect URI exactly |
 | `FRONTEND_URL` | Yes | Base URL of the admin UI, used for post-login redirects |
 | `AZURE_STORAGE_CONNECTION_STRING` | Production | Table Storage account. Unset locally falls back to the Azurite emulator |
+| `AUDIT_LOG_RETENTION_DAYS` | No | Days of `auditLog` rows to keep. Older rows are purged about once a day while the server is in use. Defaults to `365`; `0` keeps every row. See the operations runbook |
 | `DEFAULT_MAIL_DENY_FOLDERS` | No | Comma-separated mail folder names always denied, matched by display name, case-insensitively |
 | `DEFAULT_SHAREPOINT_DENY_PATHS` | No | Comma-separated SharePoint path prefixes always denied |
 | `MCP_INSTANCE_NAME` | No | Display name shown in the admin UI, the `initialize` response, and the generated extension bundle (also derives the bundle's slug and keychain service name). Defaults to `M365 MCP` |

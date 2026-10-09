@@ -71,6 +71,135 @@ export function logAccess(entry: AuditEntry): void {
   }).catch((err: unknown) => {
     console.error('[auditLog] Failed to write audit entry:', err instanceof Error ? err.message : err);
   });
+
+  maybePurgeAuditLog();
+}
+
+// ── Retention ────────────────────────────────────────────────────────────────
+//
+// Rows older than AUDIT_LOG_RETENTION_DAYS are deleted by a purge that runs at
+// most once per PURGE_INTERVAL_MS per process, started from logAccess. This is
+// not a Functions timer trigger on purpose: timer triggers need
+// AzureWebJobsStorage for their schedule monitor and singleton lock, and the
+// Container App deliberately runs without it (see infra/container-app.bicep and
+// the boot test in ci.yml). The trade-off is that the purge only runs while the
+// server is serving calls, which is also the only time new rows are written.
+
+export const DEFAULT_AUDIT_RETENTION_DAYS = 365;
+const PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+// Bounds one run. A backlog larger than this is finished by later runs.
+const PURGE_MAX_ROWS_PER_RUN = 50_000;
+// Table Storage entity group transactions take at most 100 operations.
+const PURGE_BATCH_SIZE = 100;
+
+let lastPurgeStartedAt = 0;
+let purgeInFlight = false;
+
+/**
+ * Retention in days from AUDIT_LOG_RETENTION_DAYS. `0` disables the purge and
+ * keeps every row. Unset, empty, negative or non-integer values fall back to
+ * DEFAULT_AUDIT_RETENTION_DAYS, so a typo never turns retention off.
+ */
+export function auditRetentionDays(): number {
+  const raw = (process.env.AUDIT_LOG_RETENTION_DAYS ?? '').trim();
+  if (raw === '') return DEFAULT_AUDIT_RETENTION_DAYS;
+  if (!/^\d+$/.test(raw)) {
+    console.error(`[auditLog] Ignoring invalid AUDIT_LOG_RETENTION_DAYS=${JSON.stringify(raw)}; using ${DEFAULT_AUDIT_RETENTION_DAYS}`);
+    return DEFAULT_AUDIT_RETENTION_DAYS;
+  }
+  return Number(raw);
+}
+
+function isNotFound(err: unknown): boolean {
+  return (err as { statusCode?: number } | null)?.statusCode === 404;
+}
+
+async function deleteBatch(table: TableClient, partitionKey: string, rowKeys: string[]): Promise<number> {
+  try {
+    await table.submitTransaction(rowKeys.map((rowKey) => ['delete', { partitionKey, rowKey }]));
+    return rowKeys.length;
+  } catch {
+    // A transaction fails whole if any row is already gone (another replica
+    // purging the same window). Fall back to single deletes that tolerate 404.
+    let deleted = 0;
+    for (const rowKey of rowKeys) {
+      try {
+        await table.deleteEntity(partitionKey, rowKey);
+        deleted++;
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+    }
+    return deleted;
+  }
+}
+
+/**
+ * Delete audit rows whose `timestamp` is older than `retentionDays` before
+ * `nowMs`, across every tenant partition. Returns the number of rows deleted.
+ *
+ * Filters on the `timestamp` property rather than the reverse RowKey so rows
+ * written under any earlier key format are covered too.
+ */
+export async function purgeAuditLog(retentionDays: number, nowMs: number = Date.now()): Promise<number> {
+  if (retentionDays <= 0) return 0;
+  await ensureAuditTable();
+  const table = getAuditTable();
+
+  const cutoff = new Date(nowMs - retentionDays * DAY_MS).toISOString();
+  const iterator = table.listEntities<{ partitionKey: string; rowKey: string }>({
+    queryOptions: { filter: `timestamp lt '${cutoff}'`, select: ['partitionKey', 'rowKey'] },
+  });
+
+  const pending = new Map<string, string[]>();
+  let deleted = 0;
+  let seen = 0;
+
+  for await (const entity of iterator) {
+    const partitionKey = entity.partitionKey as string;
+    const rowKeys = pending.get(partitionKey) ?? [];
+    rowKeys.push(entity.rowKey as string);
+    pending.set(partitionKey, rowKeys);
+    if (rowKeys.length >= PURGE_BATCH_SIZE) {
+      deleted += await deleteBatch(table, partitionKey, rowKeys);
+      pending.delete(partitionKey);
+    }
+    if (++seen >= PURGE_MAX_ROWS_PER_RUN) break;
+  }
+  for (const [partitionKey, rowKeys] of pending) {
+    deleted += await deleteBatch(table, partitionKey, rowKeys);
+  }
+
+  // Logged on every run, including zero, so Log Analytics shows the purge is alive.
+  console.log(`[auditLog] Retention purge deleted ${deleted} row(s) older than ${cutoff} (retention ${retentionDays} days)`);
+  return deleted;
+}
+
+/**
+ * Start a purge if retention is enabled, none is running in this process, and
+ * the last one started more than PURGE_INTERVAL_MS ago. Fire-and-forget; never
+ * throws.
+ */
+export function maybePurgeAuditLog(nowMs: number = Date.now()): void {
+  if (!connectionString || purgeInFlight) return;
+  if (nowMs - lastPurgeStartedAt < PURGE_INTERVAL_MS) return;
+  const retentionDays = auditRetentionDays();
+  if (retentionDays === 0) return;
+
+  lastPurgeStartedAt = nowMs;
+  purgeInFlight = true;
+  purgeAuditLog(retentionDays, nowMs).catch((err: unknown) => {
+    console.error('[auditLog] Retention purge failed:', err instanceof Error ? err.message : err);
+  }).finally(() => {
+    purgeInFlight = false;
+  });
+}
+
+/** Test hook: forget the last purge so the next maybePurgeAuditLog runs. */
+export function resetAuditPurgeStateForTests(): void {
+  lastPurgeStartedAt = 0;
+  purgeInFlight = false;
 }
 
 /**
