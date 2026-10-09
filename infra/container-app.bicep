@@ -36,8 +36,14 @@ var acrName = replace('${appName}acr', '-', '')          // ACR names: alphanume
 var environmentName = '${appName}-env'
 var containerAppName = appName
 
+var auditDcrName = '${appName}-audit-dcr'
+
 // AcrPull built-in role
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+
+// Monitoring Metrics Publisher: the only role the Logs Ingestion API needs to
+// accept an upload, and it is granted on the audit DCR alone.
+var monitoringMetricsPublisherRoleId = '3913510d-42f4-4e42-8a64-420c390055eb'
 
 // ── Azure Container Registry ──────────────────────────────────────────────────
 resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
@@ -86,6 +92,19 @@ resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2022-10
     sku: {
       name: 'PerGB2018'
     }
+  }
+}
+
+// ── Audit trail: custom table + data collection rule (Logs Ingestion API) ─────
+// The authoritative audit record. Every logAccess event lands in
+// M365McpAudit_CL in this workspace; see infra/audit-ingestion.bicep and
+// docs/operations-runbook.md (Audit trail in Log Analytics).
+module auditIngestion 'audit-ingestion.bicep' = {
+  name: '${appName}-audit-ingestion'
+  params: {
+    location: location
+    workspaceName: logAnalyticsWorkspace.name
+    dataCollectionRuleName: auditDcrName
   }
 }
 
@@ -205,6 +224,11 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             { name: 'MCP_SESSION_HMAC_KEY',             secretRef: 'mcp-session-hmac-key' }
             { name: 'MCP_DATA_ENCRYPTION_KEY',          secretRef: 'mcp-data-encryption-key' }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-connection-string' }
+            // Audit trail → Log Analytics. Not secrets: the endpoint and rule id
+            // only work for a caller holding the publisher role on the rule.
+            { name: 'AUDIT_LOGS_INGESTION_ENDPOINT',    value: auditIngestion.outputs.logsIngestionEndpoint }
+            { name: 'AUDIT_DCR_IMMUTABLE_ID',           value: auditIngestion.outputs.dataCollectionRuleImmutableId }
+            { name: 'AUDIT_DCR_STREAM_NAME',            value: auditIngestion.outputs.streamName }
             { name: 'FUNCTIONS_EXTENSION_VERSION',      value: '~4' }
             { name: 'WEBSITE_NODE_DEFAULT_VERSION',     value: '~20' }
           ]
@@ -228,6 +252,24 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
   }
 }
 
+// ── Let the Container App's system-assigned identity send audit rows ──────────
+// Scoped to the audit DCR only, not the resource group or the workspace: the
+// identity can upload to this one stream and read nothing.
+resource auditDcrRef 'Microsoft.Insights/dataCollectionRules@2023-03-11' existing = {
+  name: auditDcrName
+}
+
+resource auditPublisherRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: auditDcrRef
+  name: guid(resourceGroup().id, auditDcrName, containerApp.id, monitoringMetricsPublisherRoleId)
+  // Ordered after the DCR through containerApp, whose env reads the module's outputs.
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', monitoringMetricsPublisherRoleId)
+    principalId: containerApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
 // ── Outputs ────────────────────────────────────────────────────────────────────
 output acrLoginServer string = acr.properties.loginServer
 output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
@@ -235,3 +277,5 @@ output containerAppPrincipalId string = containerApp.identity.principalId
 output acrPullIdentityId string = acrPullIdentity.id
 output logAnalyticsWorkspaceName string = logAnalyticsWorkspace.name
 output applicationInsightsName string = applicationInsights.name
+output auditTableName string = auditIngestion.outputs.tableName
+output auditDataCollectionRuleName string = auditIngestion.outputs.dataCollectionRuleName
