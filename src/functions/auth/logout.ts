@@ -2,23 +2,34 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/fu
 import { authenticateRequest } from '../../services/authMiddleware.js';
 import { deleteAllUserSessions } from '../../services/tokenCache.js';
 import { withSecurity } from '../../services/securityHeaders.js';
+import { checkBrowserOrigin, expiredConsoleCookie } from '../../services/consoleSession.js';
 
 /**
- * GET /api/auth/logout
+ * POST /api/auth/logout
  *
  * Ends the server session: deletes the stored session(s) for the user and
- * expires the browser cookies (`mcp_session`, `user_id`, `user_name`), then
+ * expires the browser cookies (`mcp_session`, `mcp_console`, `user_id`,
+ * `user_name`), then
  * redirects to the Microsoft identity-platform logout so the upstream SSO
  * session is cleared too. Post-logout the user lands back on the admin app,
  * where /api/auth/me will 401 and trigger a fresh sign-in.
  *
  * Replaces the SPA's old MSAL `logoutRedirect()` — sign-out now clears the
  * server session that actually authorizes API calls, not just client cache.
+ *
+ * POST with an Origin check, not GET: a GET logout let any page, or a link,
+ * sign the user out cross-site (threat model 3.4). The SPA submits a form.
  */
 async function logout(
   request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
+  const origin = checkBrowserOrigin(request);
+  if (!origin.ok) {
+    context.warn(`[logout] refused: ${origin.reason}`);
+    return { status: 403, jsonBody: { error: 'Forbidden' } };
+  }
+
   // Best-effort: drop the server-side session if we can identify it.
   try {
     const auth = await authenticateRequest(request);
@@ -43,11 +54,13 @@ async function logout(
   const location = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/logout` +
     `?post_logout_redirect_uri=${encodeURIComponent(postLogoutRedirect)}`;
 
+  // 303: the browser follows a POST's redirect with a GET.
   return {
-    status: 302,
+    status: 303,
     headers: { Location: location },
     cookies: [
       { name: 'mcp_session', value: '', ...expired },
+      expiredConsoleCookie(),
       // user_id / user_name are not HttpOnly (the SPA could read them), so expire them without httpOnly
       { name: 'user_id', value: '', secure: true, sameSite: 'Lax' as const, path: '/', maxAge: 0 },
       { name: 'user_name', value: '', secure: true, sameSite: 'Lax' as const, path: '/', maxAge: 0 },
@@ -56,7 +69,7 @@ async function logout(
 }
 
 app.http('authLogout', {
-  methods: ['GET'],
+  methods: ['POST'],
   authLevel: 'anonymous',
   route: 'api/auth/logout',
   handler: withSecurity(logout),

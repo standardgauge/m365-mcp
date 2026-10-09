@@ -30,7 +30,7 @@ const mockSetMailConfig = jest.fn<
 // ── Wire up mocks ────────────────────────────────────────────────────────────
 
 jest.mock('../services/authMiddleware.js', () => ({
-  authenticateRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
+  authenticateConsoleRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
   checkGlobalAdmin: (userId: unknown) => mockCheckGlobalAdmin(userId as string),
 }));
 

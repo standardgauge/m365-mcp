@@ -1,6 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { listActiveSessions } from '../../services/tokenCache.js';
-import { authenticateRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 
 async function getSessions(
@@ -8,7 +8,7 @@ async function getSessions(
   _context: InvocationContext
 ): Promise<HttpResponseInit> {
   // Require authentication
-  const auth = await authenticateRequest(request);
+  const auth = await authenticateConsoleRequest(request);
   if (!auth) {
     return { status: 401, jsonBody: { error: 'Authentication required' } };
   }

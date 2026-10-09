@@ -9,17 +9,26 @@
  *   - No session → 401 with a loginUrl for the SPA to redirect to
  *   - Authenticated non-admin → 200 with identity + isGlobalAdmin:false
  *   - Authenticated global admin → isGlobalAdmin:true
+ *   - Console session present → consoleSession:true and the console cookie is
+ *     re-issued with its idle expiry pushed out, issuedAt kept
+ *   - Session without a console session → consoleSession:false, no cookie
  */
 
 import { jest } from '@jest/globals';
 import type { HttpRequest, InvocationContext } from '@azure/functions';
-import type { AuthResult } from '../services/authMiddleware.js';
+import { randomBytes } from 'crypto';
+import type { AuthResult, ConsoleAuthResult } from '../services/authMiddleware.js';
+import { CONSOLE_IDLE_MS, verifyConsoleToken } from '../services/consoleSession.js';
+
+process.env.MCP_SESSION_HMAC_KEY = randomBytes(32).toString('hex');
 
 const mockAuthenticateRequest = jest.fn<(req: HttpRequest) => Promise<AuthResult | null>>();
+const mockAuthenticateConsoleRequest = jest.fn<(req: HttpRequest) => Promise<ConsoleAuthResult | null>>();
 const mockCheckGlobalAdmin = jest.fn<(userId: string) => Promise<boolean>>();
 
 jest.mock('../services/authMiddleware.js', () => ({
   authenticateRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
+  authenticateConsoleRequest: (req: unknown) => mockAuthenticateConsoleRequest(req as HttpRequest),
   checkGlobalAdmin: (userId: unknown) => mockCheckGlobalAdmin(userId as string),
 }));
 
@@ -29,7 +38,10 @@ import { app } from '@azure/functions';
 import '../functions/auth/me.js';
 
 interface HttpRegistration {
-  handler: (req: HttpRequest, context: InvocationContext) => Promise<{ status: number; jsonBody?: unknown }>;
+  handler: (
+    req: HttpRequest,
+    context: InvocationContext,
+  ) => Promise<{ status: number; jsonBody?: unknown; cookies?: Array<{ name: string; value: string; maxAge?: number }> }>;
 }
 const httpMock = app.http as unknown as jest.Mock<(name: string, opts: HttpRegistration) => void>;
 const reg = httpMock.mock.calls.find((c) => c[0] === 'authMe');
@@ -49,6 +61,7 @@ function req(): HttpRequest {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockAuthenticateConsoleRequest.mockResolvedValue(null);
 });
 
 describe('authMe — /api/auth/me', () => {
@@ -71,7 +84,9 @@ describe('authMe — /api/auth/me', () => {
       displayName: 'Test User',
       email: 'nate@example.com',
       isGlobalAdmin: false,
+      consoleSession: false,
     });
+    expect(res.cookies).toBeUndefined();
   });
 
   it('reports isGlobalAdmin:true for a global admin session', async () => {
@@ -81,5 +96,28 @@ describe('authMe — /api/auth/me', () => {
     expect(res.status).toBe(200);
     expect((res.jsonBody as { isGlobalAdmin: boolean }).isGlobalAdmin).toBe(true);
     expect(mockCheckGlobalAdmin).toHaveBeenCalledWith(USER);
+  });
+
+  it('renews the console cookie, keeping issuedAt, when a console session is present', async () => {
+    const sessionToken = 'a'.repeat(64);
+    const issuedAt = Date.now() - 60 * 60 * 1000; // signed in an hour ago
+    mockAuthenticateConsoleRequest.mockResolvedValue({
+      ...AUTH,
+      sessionToken,
+      console: { issuedAt, expiresAt: Date.now() + 60_000 },
+    } as ConsoleAuthResult);
+    mockCheckGlobalAdmin.mockResolvedValue(true);
+
+    const before = Date.now();
+    const res = await handler(req(), ctx);
+    expect(res.status).toBe(200);
+    const body = res.jsonBody as { consoleSession: boolean; consoleExpiresAt: number };
+    expect(body.consoleSession).toBe(true);
+    expect(body.consoleExpiresAt).toBeGreaterThanOrEqual(before + CONSOLE_IDLE_MS);
+
+    const cookie = res.cookies?.find((c) => c.name === 'mcp_console');
+    const claims = verifyConsoleToken(cookie?.value, sessionToken);
+    expect(claims).toEqual({ issuedAt, expiresAt: body.consoleExpiresAt });
+    expect(mockAuthenticateRequest).not.toHaveBeenCalled();
   });
 });

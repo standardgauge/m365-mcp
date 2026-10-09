@@ -58,7 +58,7 @@ usable at all, and read-only further restricts an enabled service to reads. It
 is per-service, so making calendar read-only does not affect mail, SharePoint,
 etc. Default is empty, so existing tenants are unaffected until an admin opts in.
 
-Manage it through the `/api/manage/services` endpoint (Global Admin only):
+Manage it through the `/api/manage/services` endpoint (Global Admin only; the admin API takes the admin UI's browser session, not an MCP client token, see [Admin API sessions](operations-runbook.md#admin-api-sessions)):
 
 ```bash
 # Read current config

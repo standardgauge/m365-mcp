@@ -1,5 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
-import { authenticateRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
 import { queryAuditLog } from '../../services/auditLog.js';
 import { getTenantIdFromSession } from '../../services/tokenCache.js';
 import { withSecurity } from '../../services/securityHeaders.js';
@@ -8,7 +8,7 @@ async function getAuditLog(
   request: HttpRequest,
   _context: InvocationContext
 ): Promise<HttpResponseInit> {
-  const auth = await authenticateRequest(request);
+  const auth = await authenticateConsoleRequest(request);
   if (!auth) {
     return { status: 401, jsonBody: { error: 'Authentication required' } };
   }

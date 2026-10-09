@@ -32,9 +32,10 @@ export const installLandingHeaders = {
 // CSP for the admin React SPA. Overrides the API-focused default above when
 // returned in the handler's own headers object (handler headers win over secureHeaders).
 //
-// 'unsafe-inline' for script-src covers the runtime config injection in serveAdmin
-// (window.__MSAL_RUNTIME_CLIENT_ID__ etc.). Nonce-based CSP would be tighter but
-// requires plumbing a nonce through injectRuntimeConfig and the CSP header together.
+// script-src is 'self' only: the page carries no inline script. serveAdmin injects
+// its runtime config as a non-executable JSON data block, which script-src does not
+// govern and the SPA reads with JSON.parse (threat model 7.4). style-src keeps
+// 'unsafe-inline' for React style attributes.
 //
 // connect-src covers same-origin API calls plus MSAL's token endpoints and Microsoft
 // Graph. form-action 'self' restricts form submissions; MSAL redirect flows target
@@ -42,7 +43,7 @@ export const installLandingHeaders = {
 export const adminSpaHeaders = {
   'Content-Security-Policy': [
     "default-src 'none'",
-    "script-src 'self' 'unsafe-inline'",
+    "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
     "font-src 'self'",

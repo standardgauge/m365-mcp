@@ -23,7 +23,7 @@ const mockGetReadOnlyServices = jest.fn<(t: string) => Promise<string[]>>();
 const mockSetReadOnlyServices = jest.fn<(t: string, s: string[]) => Promise<void>>();
 
 jest.mock('../services/authMiddleware.js', () => ({
-  authenticateRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
+  authenticateConsoleRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
   checkGlobalAdmin: (userId: unknown) => mockCheckGlobalAdmin(userId as string),
 }));
 

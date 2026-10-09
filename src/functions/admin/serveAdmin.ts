@@ -27,16 +27,21 @@ const MIME_TYPES: Record<string, string> = {
 };
 
 /**
- * Injects MSAL runtime configuration into index.html so that env vars set on
- * the container at runtime take effect without requiring a rebuild.  The
- * variables are exposed on `window` before the React bundle loads; App.tsx
- * reads them via `(window as any).__MSAL_RUNTIME_CLIENT_ID__` etc.
+ * Injects runtime configuration into index.html so that env vars set on the
+ * container at runtime take effect without requiring a rebuild.
+ *
+ * The config travels as a JSON data block, `<script type="application/json">`,
+ * which the browser never executes and CSP's script-src does not govern. The
+ * SPA reads it with JSON.parse (src/admin/runtimeConfig.ts). That is what lets
+ * the admin CSP drop 'unsafe-inline' from script-src: the page has no inline
+ * script left to allow (threat model 7.4). jsonForScript still escapes `<` so
+ * a value cannot close the element early.
  */
-function injectRuntimeConfig(html: string): string {
-  const clientId = process.env.AZURE_CLIENT_ID ?? '';
-  const tenantId = process.env.AZURE_TENANT_ID ?? '';
-  const instanceName = process.env.MCP_INSTANCE_NAME ?? 'M365 MCP';
-  const injection = `<script>window.__MSAL_RUNTIME_CLIENT_ID__=${jsonForScript(clientId)};window.__MSAL_RUNTIME_TENANT_ID__=${jsonForScript(tenantId)};window.__MCP_INSTANCE_NAME__=${jsonForScript(instanceName)};</script>`;
+export function injectRuntimeConfig(html: string): string {
+  const config = {
+    instanceName: process.env.MCP_INSTANCE_NAME ?? 'M365 MCP',
+  };
+  const injection = `<script type="application/json" id="runtime-config">${jsonForScript(config)}</script>`;
   return html.replace('</head>', `${injection}</head>`);
 }
 

@@ -52,6 +52,33 @@ A bare 404 with `content-length: 0` and none of those headers came from the host
 
 * * *
 
+## Admin API sessions
+
+The admin API, `/api/manage/*`, does not accept the session token an MCP client
+uses. A request must come from the admin UI in a browser, and carry both:
+
+  * the `mcp_session` cookie, and
+  * the `mcp_console` cookie, which only an interactive sign-in at `/api/auth/login` sets. It is HttpOnly, `SameSite=Strict`, scoped to `/api`, and bound by MAC to that exact `mcp_session` value.
+
+It must also pass an Origin check: the `Origin` header, when present, must be
+the instance's own origin (or `FRONTEND_URL`'s, for local development), and
+`Sec-Fetch-Site` must be `same-origin`. A typed or bookmarked GET (`none`) is
+allowed, so an admin can open an `/api/manage/...` URL in the signed-in browser.
+A bearer token, `x-session-token`, or a copied `mcp_session` cookie gets a 401.
+
+The console session lasts 30 minutes idle and never more than 8 hours from the
+sign-in that started it. The admin UI renews it through `/api/auth/me` every
+five minutes while its tab is visible, and sends the user back through sign-in
+once it has lapsed; with a live Microsoft session that is a redirect, not a
+prompt. Logout is a `POST` to `/api/auth/logout` and also checks Origin. It
+ends the console session along with every session row for the user.
+
+Nothing is stored for it: the cookie is checked against `MCP_SESSION_HMAC_KEY`,
+so rotating that key ends every console session along with every other session.
+Code: `src/services/consoleSession.ts`. Threat model: [section 7](threat-model.md#7-admin-surface).
+
+* * *
+
 ## Monitoring
 
 ### Azure Monitor — Container App metrics
@@ -151,16 +178,20 @@ instance's Log Analytics workspace (next section), which is where a security
 team or SIEM should read it. A working copy goes to the `auditLog` table in the
 tenant's storage account: tenant, user, device label, operation, resource,
 result, reason, source, client IP, timestamp. That copy backs the admin screen;
-a Global Administrator reads it in the admin UI (Audit Log) or exports it:
+a Global Administrator reads it in the admin UI (Audit Log), which also exports
+the filtered view as CSV. The same endpoint answers a URL typed into the address
+bar of the browser that is signed in to the admin UI:
 
 ```
 # JSON, newest first, filters are optional
-curl -H "Cookie: mcp_session=<admin session>" \
-  "https://your-mcp-host.example.com/api/manage/audit-log?result=denied&limit=500"
+https://your-mcp-host.example.com/api/manage/audit-log?result=denied&limit=500
 # CSV
-curl -H "Cookie: mcp_session=<admin session>" \
-  "https://your-mcp-host.example.com/api/manage/audit-log?format=csv" -o audit-log.csv
+https://your-mcp-host.example.com/api/manage/audit-log?format=csv
 ```
+
+`/api/manage/*` accepts only the admin UI's browser session, never the session
+token an MCP client holds, so `curl` with a bearer token or a copied
+`mcp_session` cookie gets a 401. See [Admin API sessions](#admin-api-sessions).
 
 #### Audit log retention
 
@@ -196,10 +227,8 @@ would drop, export first. The export is the archive; the purge does not keep a
 copy:
 
 ```
-# Everything older than the new cutoff, as CSV
-curl -H "Cookie: mcp_session=<admin session>" \
-  "https://your-mcp-host.example.com/api/manage/audit-log?endDate=2026-01-01T00:00:00Z&limit=1000&format=csv" \
-  -o audit-log-before-2026.csv
+# Everything older than the new cutoff, as CSV, from the signed-in browser
+https://your-mcp-host.example.com/api/manage/audit-log?endDate=2026-01-01T00:00:00Z&limit=1000&format=csv
 ```
 
 The endpoint returns at most 1000 rows per call, newest first. For a larger

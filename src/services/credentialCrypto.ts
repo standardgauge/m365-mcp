@@ -125,6 +125,16 @@ export function hashSessionToken(token: string): string {
   return createHmac('sha256', getHmacKey()).update(token, 'utf8').digest('hex');
 }
 
+/**
+ * HMAC-SHA256 under the session key, domain-separated by `purpose` so a MAC
+ * minted for one use can never stand in for another, or for a session-token
+ * hash. Session tokens are hex, so they can never contain the newline that
+ * separates the purpose from the data.
+ */
+export function macWithSessionKey(purpose: string, data: string): string {
+  return createHmac('sha256', getHmacKey()).update(`${purpose}\n${data}`, 'utf8').digest('hex');
+}
+
 // ── AES-256-GCM envelope encryption for sensitive blobs ───────────────────────
 
 export interface EnvelopeCiphertext {

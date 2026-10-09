@@ -7,6 +7,7 @@ import { attachSessionToInstallNonce } from '../../services/tableStorage.js';
 import { randomBytes } from 'crypto';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { resolveFrontendUrl } from '../../services/frontendUrl.js';
+import { consoleCookie, mintConsoleToken } from '../../services/consoleSession.js';
 
 const NONCE_TTL_MS = 5 * 60 * 1000;
 
@@ -148,6 +149,13 @@ async function callback(
     const frontendUrl = resolveFrontendUrl(process.env.FRONTEND_URL, (m) =>
       context.error(m)
     );
+
+    // The console session is what the admin API accepts. It is minted only
+    // here, at an interactive sign-in, and only ever leaves as an HttpOnly
+    // cookie, so the session token the install flow hands to the MCP client
+    // is never enough on its own (services/consoleSession.ts).
+    const issuedAt = Date.now();
+    const consoleSession = consoleCookie(mintConsoleToken(sessionToken, issuedAt), issuedAt);
     return {
       status: 302,
       headers: {
@@ -168,6 +176,7 @@ async function callback(
           path: '/',
           maxAge: SESSION_TTL_MS / 1000,
         },
+        consoleSession,
         {
           name: 'user_id',
           value: session.userId,

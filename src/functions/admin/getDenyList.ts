@@ -10,7 +10,7 @@ import {
   type DenyListType,
 } from '../../services/denyList.js';
 import { getTenantId } from '../../services/tokenCache.js';
-import { authenticateRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 
 async function denyListGlobal(
@@ -19,7 +19,7 @@ async function denyListGlobal(
 ): Promise<HttpResponseInit> {
   try {
     const type = (request.query.get('type') ?? 'sharepoint') as DenyListType;
-    const auth = await authenticateRequest(request);
+    const auth = await authenticateConsoleRequest(request);
     if (!auth) {
       return { status: 401, jsonBody: { error: 'Authentication required' } };
     }
@@ -61,7 +61,7 @@ async function denyListUser(
 ): Promise<HttpResponseInit> {
   try {
     const type = (request.query.get('type') ?? 'sharepoint') as DenyListType;
-    const auth = await authenticateRequest(request);
+    const auth = await authenticateConsoleRequest(request);
     if (!auth) {
       return { status: 401, jsonBody: { error: 'Authentication required' } };
     }
@@ -114,7 +114,7 @@ async function denyListUserClear(
   context: InvocationContext
 ): Promise<HttpResponseInit> {
   try {
-    const auth = await authenticateRequest(request);
+    const auth = await authenticateConsoleRequest(request);
     if (!auth) {
       return { status: 401, jsonBody: { error: 'Authentication required' } };
     }
@@ -146,7 +146,7 @@ async function isGlobalAdmin(
   request: HttpRequest,
   _context: InvocationContext
 ): Promise<HttpResponseInit> {
-  const auth = await authenticateRequest(request);
+  const auth = await authenticateConsoleRequest(request);
   if (!auth) return { status: 200, jsonBody: { isAdmin: false } };
   const isAdmin = await checkGlobalAdmin(auth.userId);
   return { status: 200, jsonBody: { isAdmin } };
