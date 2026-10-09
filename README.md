@@ -53,7 +53,8 @@ Azure Table Storage
 ├── serviceSettings         → Service enablement and read-only flags
 ├── allowedSites            → SharePoint site allowlist
 ├── UserEmailSettings       → Per-user email output mode (draft or send)
-└── EmailOutputModePolicy   → Admin-enforced draft mode, tenant-wide or per user
+├── EmailOutputModePolicy   → Admin-enforced draft mode, tenant-wide or per user
+└── OutboundPolicy          → Admin limits on invitations, response comments and Teams sends
       │
       ▼
 Microsoft Graph
@@ -82,6 +83,14 @@ Every tool call passes through the deny list before it reaches Graph, and the sa
 **Per-service read-only mode.** The `readOnlyServices` setting keeps a service readable while refusing all of its write tools. Those write tools are also hidden from the MCP tool list, so a read-only service advertises only what it will actually do. The use case it was built for: let an agent read a calendar for scheduling context without letting it create, modify, or delete events.
 
 **Enforced draft mode.** Every user starts in draft mode, where AI-composed email lands in Drafts for a person to send. The mode is self-service, and that includes the agent: `set_email_output_mode` is a tool, so an injected prompt could switch to send mode and then send. A Global Admin can enforce draft mode for the tenant or for one user. While enforced, the effective mode is draft whatever the user chose, `send_draft` refuses, and both mode-change paths (the MCP tool and `POST /api/mail/settings`) refuse and log the attempt as denied. Only the admin UI lifts it.
+
+**Outbound policy.** Draft mode holds email only. Calendar invitations, comments on meeting responses and Teams messages are delivered the moment the tool runs, and Graph has no draft state to hold them in. A Global Admin can set each of these three channels, tenant-wide or for one user, to *allow* (the default), *internal only*, or *block*:
+
+- **Calendar invitations**: `create_event` with attendees, `update_event` on a meeting the user organizes (anything but a free/busy change notifies the attendees), and `move_event`, which re-sends the invitations. `force=true` on `move_event` does not get past the policy.
+- **Comments on meeting responses**: `respond_to_event` with a `comment` that is sent to the organizer. A plain accept, tentative or decline, or a response with `sendResponse: false`, is not affected.
+- **Teams messages**: `send_chat_message` and `send_channel_message`.
+
+*Internal only* refuses the call when any recipient is outside the organization: an address whose domain is not one of the tenant's verified domains (read from `/organization`, exact match), or a Teams member whose home tenant is another tenant. *Block* refuses whenever anyone would be notified. Either way the agent is told to have the user act in Outlook or Teams, and the refusal is logged as denied. A per-user setting can tighten the tenant-wide one but not loosen it, and the policy fails closed: if the policy, the domain list or the recipient list cannot be read, the call is refused. Set it under **Outbound Policy** in the admin UI, per user under **User Management**, or through `GET`/`POST /api/manage/outbound-policy`. *Internal only* for Teams needs the two member-read permissions marked optional in the [permission table](#delegated-graph-permissions); without them every Teams send is refused under that setting.
 
 **SharePoint site allowlist.** Once the list has any entry, sites must be explicitly allowed rather than blocked, so a newly created site is not reachable by default. An empty list allows every site, so add at least one site before users sign in if you want a closed posture.
 
@@ -192,10 +201,12 @@ Add these under **API permissions → Add a permission → Microsoft Graph → D
 | `ChannelMessage.Read.All` | Reading channel messages |
 | `ChannelMessage.Send` | Posting to a channel |
 | `ChatMessage.Send` | Sending 1:1 and group chat |
+| `ChatMember.Read` | Optional: checking chat members when the outbound policy limits Teams messages to internal recipients |
+| `ChannelMember.Read.All` | Optional: checking channel members for the same setting |
 
-`Place.Read.All`, `Team.ReadBasic.All`, `Channel.ReadBasic.All`, and `Directory.Read.All` require administrator consent. Granting consent once for the tenant covers the rest, so individual users see no consent prompt on first sign-in.
+`Place.Read.All`, `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMember.Read.All`, and `Directory.Read.All` require administrator consent. Granting consent once for the tenant covers the rest, so individual users see no consent prompt on first sign-in.
 
-Trim this list to the services you actually intend to enable. If you are not deploying the Teams tools, leave the four Teams permissions off the registration entirely; a permission not granted is one that cannot be misused.
+Trim this list to the services you actually intend to enable. If you are not deploying the Teams tools, leave the Teams permissions off the registration entirely; a permission not granted is one that cannot be misused.
 
 ### The part that catches people: requested scopes are a subset of granted scopes
 
@@ -334,6 +345,8 @@ The shim also accepts `"--header", "Authorization:Bearer <session-token>"` in pl
 | `move_event` | Write | Move an event between calendars by copy-then-delete. Not atomic; refuses attendee events without `force`, and refuses non-organizer and single-occurrence events |
 | `respond_to_event` | Write | Accept, tentatively accept, or decline an invite |
 
+Writes that notify other people (`create_event` and `update_event` on a meeting with attendees, `move_event`, and `respond_to_event` with a comment) are subject to the [outbound policy](#access-controls).
+
 Scheduling helpers `get_schedule`, `find_meeting_times`, and `list_rooms` round out the calendar surface.
 
 ### SharePoint (9 tools)
@@ -387,7 +400,7 @@ Notes, categories, and postal addresses round-trip: anything written reads back 
 
 ### Teams
 
-`list_teams`, `list_channels`, `send_channel_message`, and `send_chat_message`. These need the four Teams permissions on the registration; leave them ungranted to disable the surface.
+`list_teams`, `list_channels`, `send_channel_message`, and `send_chat_message`. These need the four Teams permissions on the registration; leave them ungranted to disable the surface. The two send tools are subject to the [outbound policy](#access-controls).
 
 ---
 

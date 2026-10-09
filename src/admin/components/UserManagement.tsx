@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import OutboundPolicy from './OutboundPolicy';
 
 const ALL_SERVICES: { key: string; label: string }[] = [
   { key: 'mail', label: 'Mail' },
@@ -306,6 +307,11 @@ export default function UserManagement({ userId, enabledServices }: Props) {
                 <p className={`status-msg status-msg--${draftPolicyMsg.kind}`}>{draftPolicyMsg.text}</p>
               )}
             </div>
+          )}
+
+          {/* Outbound policy for this user (can only tighten the tenant-wide one) */}
+          {(enabledServices.includes('calendar') || enabledServices.includes('teams')) && (
+            <OutboundPolicy key={selectedUser} userId={userId} enabledServices={enabledServices} targetUserId={selectedUser} />
           )}
         </>
       )}

@@ -53,6 +53,13 @@ const mockCreateGraphClient = jest.fn(() => ({
 }));
 
 // telemetry.js has import-time side effects (patches console) — stub it out
+// The outbound policy is covered in outboundPolicy.test.ts; here it allows everything.
+jest.mock('../services/outboundPolicy.js', () => ({
+  ...jest.requireActual<typeof import('../services/outboundPolicy.js')>('../services/outboundPolicy.js'),
+  enforceOutboundPolicy: () => Promise.resolve(),
+  enforceEventUpdatePolicy: () => Promise.resolve(),
+}));
+
 jest.mock('../services/telemetry.js', () => ({}));
 
 jest.mock('../services/authMiddleware.js', () => ({

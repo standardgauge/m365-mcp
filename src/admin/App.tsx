@@ -8,6 +8,7 @@ import AllowedSites from './components/AllowedSites';
 import CollapsibleSection from './components/CollapsibleSection';
 import UserManagement from './components/UserManagement';
 import EmailOutputPolicy from './components/EmailOutputPolicy';
+import OutboundPolicy from './components/OutboundPolicy';
 import AuditLog from './components/AuditLog';
 
 // Instance display name is injected by the Azure Function serving index.html.
@@ -150,6 +151,9 @@ function AppContent() {
             </CollapsibleSection>
             <CollapsibleSection storageKey="email-output-policy" title="Email Output Policy">
               <EmailOutputPolicy userId={userId} />
+            </CollapsibleSection>
+            <CollapsibleSection storageKey="outbound-policy" title="Outbound Policy">
+              <OutboundPolicy userId={userId} enabledServices={enabledServices} />
             </CollapsibleSection>
             <CollapsibleSection storageKey="user-management" title="User Management">
               <UserManagement

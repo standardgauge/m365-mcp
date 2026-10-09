@@ -58,6 +58,13 @@ const mockCreateGraphClient = jest.fn(() => ({
 
 // ── Wire mocks ───────────────────────────────────────────────────────────────
 
+// The outbound policy is covered in outboundPolicy.test.ts; here it allows everything.
+jest.mock('../services/outboundPolicy.js', () => ({
+  ...jest.requireActual<typeof import('../services/outboundPolicy.js')>('../services/outboundPolicy.js'),
+  enforceOutboundPolicy: () => Promise.resolve(),
+  enforceEventUpdatePolicy: () => Promise.resolve(),
+}));
+
 jest.mock('../services/authMiddleware.js', () => ({
   authenticateRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
 }));
