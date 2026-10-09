@@ -20,8 +20,14 @@ runbook](operations-runbook.md): Container App `m365-mcp`, resource group
 Write these down now, with your deployment's own notes, not in this repository:
 
 - Who can act in **Entra**: disabling the enterprise application and deleting a
-  client secret need Cloud Application Administrator or higher; revoking a
-  user's sessions needs User Administrator or higher.
+  client secret need Cloud Application Administrator or higher. Revoking
+  sessions depends on who the user is: User Administrator is enough for a
+  non-admin user, but a user who holds any Entra admin role needs Privileged
+  Authentication Administrator or Global Administrator. Operators of this
+  instance are usually in the second group, so the operator-compromise case
+  below needs one of those two roles on call, not only User Administrator
+  ([revoke access](https://learn.microsoft.com/en-us/entra/identity/users/users-revoke-access),
+  [privileged roles](https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/privileged-roles-permissions)).
 - Who can act in **Azure** (Container App secrets and revisions, the storage
   account, Key Vault). Contributor on the resource group or higher.
 - The instance's application (client) ID, its Container App outbound IP
@@ -96,6 +102,9 @@ Entra side and the server's own hold on tokens.
    app. This invalidates their refresh tokens, including copies taken from
    storage. With step 1, nobody obtains new Graph access once current access
    tokens expire.
+   If an affected user holds an Entra admin role, this step needs Privileged
+   Authentication Administrator or Global Administrator ([Before you need
+   it](#before-you-need-it)).
 3. **Rotate both application keys** in one new revision ([Application
    keys](operations-runbook.md#rotation)). Every stored session and the MSAL
    cache become undecryptable, every client is signed out, and the new replicas
