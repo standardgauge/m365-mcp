@@ -38,6 +38,12 @@ var containerAppName = appName
 
 var auditDcrName = '${appName}-audit-dcr'
 
+// Startup, readiness and liveness probes against GET /health on the container
+// port. Kept in probes.json rather than inline because the deploy workflow
+// converges the same definition onto apps that were never deployed from Bicep;
+// src/__tests__/containerPortInvariant.test.ts holds its port to the image's.
+var probes = loadJsonContent('probes.json')
+
 // AcrPull built-in role
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 
@@ -214,6 +220,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             cpu: json('0.5')
             memory: '1Gi'
           }
+          probes: probes
           env: [
             { name: 'AZURE_CLIENT_ID',                 secretRef: 'azure-client-id' }
             { name: 'AZURE_CLIENT_SECRET',              secretRef: 'azure-client-secret' }

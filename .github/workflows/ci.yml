@@ -162,8 +162,10 @@ jobs:
   #   0. without application keys the container exits instead of serving,
   #   1. GET /health returns the JSON body for this exact build (sha matches),
   #   2. no process in the container runs as uid 0, and
-  #   3. trivy's DS-0002 ("image user should not be root") ran against the
-  #      Dockerfile and passed, so a regression fails here, not at release.
+  #   3. Docker reports the image's own HEALTHCHECK healthy, and
+  #   4. trivy's DS-0002 ("image user should not be root") and DS-0026 ("no
+  #      HEALTHCHECK defined") ran against the Dockerfile and passed, so a
+  #      regression fails here, not at release.
   container-boot:
     name: Container Boot (PR)
     runs-on: ubuntu-latest
@@ -245,6 +247,27 @@ jobs:
           fi
           echo "/azure-functions-host/Secrets is writable by uid $(docker exec "$CONTAINER" id -u)"
 
+      # The image's HEALTHCHECK is what Docker and Trivy DS-0026 read; Container
+      # Apps runs infra/probes.json instead. Docker runs the first check one
+      # interval (30s) after start, so allow for that plus the retries.
+      - name: Assert Docker reports the HEALTHCHECK healthy
+        run: |
+          for i in $(seq 1 60); do
+            status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER")
+            case "$status" in
+              healthy) echo "HEALTHCHECK healthy after ~$((i * 2))s"; exit 0 ;;
+              none) echo "::error::the image defines no HEALTHCHECK"; exit 1 ;;
+              unhealthy)
+                docker inspect -f '{{json .State.Health.Log}}' "$CONTAINER"
+                echo "::error::HEALTHCHECK reports unhealthy while /health answers"
+                exit 1 ;;
+            esac
+            sleep 2
+          done
+          docker inspect -f '{{json .State.Health}}' "$CONTAINER"
+          echo "::error::HEALTHCHECK still '${status}' after 120s"
+          exit 1
+
       - name: Assert nothing in the container runs as root
         run: |
           uid=$(docker exec "$CONTAINER" id -u)
@@ -274,7 +297,7 @@ jobs:
       # Dockerfile.*.dev files docker-compose uses. --include-non-failures lists
       # passing checks too, so the gate can require DS-0002 to have run and
       # passed rather than merely be absent from the failures.
-      - name: "trivy config: DS-0002 must pass on the Dockerfile"
+      - name: "trivy config: DS-0002 and DS-0026 must pass on the Dockerfile"
         run: |
           trivy config --include-non-failures --format json --output trivy-config.json .
           jq -r '.Results[]? | select(.Type == "dockerfile")
@@ -288,6 +311,12 @@ jobs:
           ' trivy-config.json > /dev/null \
             || { echo "::error::trivy DS-0002 did not run and pass on Dockerfile"; exit 1; }
           echo "DS-0002 (image user should not be root): PASS on Dockerfile"
+          jq -e '
+            def ds0026: select((.ID // "" | test("DS-?0*26$")) or (.AVDID // "" | test("DS-?0*26$")));
+            [.Results[]? | select(.Target == "Dockerfile") | .Misconfigurations[]? | ds0026 | select(.Status == "PASS")] | length > 0
+          ' trivy-config.json > /dev/null \
+            || { echo "::error::trivy DS-0026 (no HEALTHCHECK) did not run and pass on Dockerfile"; exit 1; }
+          echo "DS-0026 (HEALTHCHECK defined): PASS on Dockerfile"
 
   container-scan:
     name: Container Scan (Trivy)
