@@ -66,13 +66,13 @@ defence in depth, accuracy of a documented claim, or bounded nuisance.
  │ Browser ─────────────────────┼──────────────▶│  /install*, /api/extension-*         │
  │   mcp_session cookie         │  cookie       │      │ in-memory session cache       │
  └──────────────────────────────┘               │      │                               │
-            ▲  TB7 installers, shim and         │  TB5 │ account-key connection string │
+            ▲  TB7 installers, shim and         │  TB5 │ Entra token, runtime identity │
             │  extension code served by the     │      ▼                               │
             │  instance                         │  Table Storage: sessions, MSAL cache,│
             └───────────────────────────────────┤  install nonces, policy, audit       │
                                                 │                                      │
-   TB6 Azure control plane: RG roles, secrets,  │  Secrets: client secret, HMAC key,   │
-       deploy principal, fork sync  ───────────▶│  DEK, storage connection string      │
+   TB6 Azure control plane: RG roles, secrets,  │  Key Vault, by reference: client     │
+       deploy principal, fork sync  ───────────▶│  secret, HMAC key, DEK               │
                                                 └──────┬──────────────────────┬────────┘
                                                   TB3  │ OAuth (confidential) │ TB4 delegated
                                                        ▼                      ▼ access token
@@ -103,9 +103,9 @@ content; it stores credentials, policy and audit rows.
 | A1 | Refresh tokens for every signed-in user | `mcpMsalCache`, one AES-GCM envelope ([`tableStorage.ts`](../src/services/tableStorage.ts) `saveMsalCache`) | Delegated Graph access to everything each user can reach, for up to 90 days, independent of this server's session lifetime. The highest-value thing the server holds. |
 | A2 | Graph access tokens | `mcpSessions` per-session envelope; replica memory | Roughly an hour of the user's delegated access. |
 | A3 | Session tokens | Client keychain, DPAPI blob or libsecret (a 0600 file where none is available); HMAC only in `mcpSessions`; for up to 5 minutes during install, an envelope in `mcpInstallNonces` | Bearer credential for the server, valid up to 30 days. Whoever holds it acts as the user through every tool. |
-| A4 | Entra client secret | Container App secret | With a refresh token, redeems new access tokens; with an authorization code, completes sign-in. |
-| A5 | `MCP_SESSION_HMAC_KEY`, `MCP_DATA_ENCRYPTION_KEY` | Container App secrets | Turn a storage copy into usable credentials (DEK), or let an attacker mint a row that matches a token they chose (HMAC key). |
-| A6 | Storage account key | Container App secret (`AZURE_STORAGE_CONNECTION_STRING`) | Full read and write on every table, including policy and audit. |
+| A4 | Entra client secret | Key Vault; the Container App holds a reference | With a refresh token, redeems new access tokens; with an authorization code, completes sign-in. |
+| A5 | `MCP_SESSION_HMAC_KEY`, `MCP_DATA_ENCRYPTION_KEY` | Key Vault; the Container App holds references | Turn a storage copy into usable credentials (DEK), or let an attacker mint a row that matches a token they chose (HMAC key). |
+| A6 | Storage data access | The app's runtime identity (Storage Table Data Contributor). Account keys exist but shared-key auth is off | Full read and write on every table, including policy and audit. |
 | A7 | Policy state | `GlobalDenyList`, `UserDenyList`, `serviceSettings`, `allowedSites`, `EmailOutputModePolicy`, user overrides | What AI is allowed to touch. Tampering silently widens access. |
 | A8 | Audit log | `auditLog` table | The record of what each user's agent did and what was refused. |
 | A9 | Tenant content in transit | Graph responses, tool results, model context | Not stored by the server, but passes through it and into a third-party model. |
@@ -125,7 +125,7 @@ content; it stores credentials, policy and audit rows.
 | Tenant insider | A signed-in member of the tenant using their own session for more than they should. |
 | Token thief | Holds a copied session token (A3) from a laptop, backup, log, or config file. |
 | Storage-only attacker | Read or write on the storage account without the app secrets: a leaked SAS, a backup copy, a storage-scoped role. |
-| Azure operator | Contributor or Owner on the resource group. Can read every Container App secret. |
+| Azure operator | Contributor or Owner on the resource group. Controls the Container App and what it runs; reading a Key Vault value directly takes a data-plane role on the vault. |
 | Upstream contributor | Can land code on this repository's `main`, which deploy forks track. |
 
 ---
@@ -138,8 +138,8 @@ content; it stores credentials, policy and audit rows.
 | TB2 | Browser to server | OAuth redirects and the admin SPA, authenticated by the `mcp_session` cookie. |
 | TB3 | Server to Entra ID | Confidential-client authorization code and refresh-token redemption. |
 | TB4 | Server to Microsoft Graph | Delegated access tokens. Graph enforces the user's own permissions. |
-| TB5 | Server to Table Storage | Account-key connection string. Everything at rest is here. |
-| TB6 | Azure control plane to runtime | Resource-group roles, Container App secrets, the deploy principal. |
+| TB5 | Server to Table Storage | Entra token for the app's runtime identity; the account refuses shared-key auth. Everything at rest is here. |
+| TB6 | Azure control plane to runtime | Resource-group roles, Key Vault and storage data roles, the Container App's Key Vault references, the deploy principal. |
 | TB7 | Server to user device, as a code source | Installers, the shim and the desktop extension's auto-update are fetched from the instance and executed locally. |
 | TB8 | Tenant content to model | Untrusted text from mail, files and events enters model context and can steer tool calls. This is a boundary in data, not in network. |
 
@@ -192,7 +192,7 @@ until the operator sets `MCP_ENVELOPE_REQUIRE_AAD=true`
 
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
-| 2.1 | I | Storage-only attacker reads refresh and access tokens. | Both are AES-256-GCM ciphertext under a key that is not in storage. Session tokens are stored only as a keyed HMAC. | Holds against a storage-only attacker. Does **not** hold against anyone who can read Container App secrets, because the DEK sits beside the storage key (section 6, **G11**). |
+| 2.1 | I | Storage-only attacker reads refresh and access tokens. | Both are AES-256-GCM ciphertext under a key that is not in storage. Session tokens are stored only as a keyed HMAC. | Holds against a storage-only attacker: the DEK is in Key Vault, and no storage credential sits beside it. Who can still reach the DEK is row 6.2. |
 | 2.2 | T, E | Storage writer moves user A's access-token envelope into user B's row, so B's session acts as A. | AAD binds each envelope to its row; a moved envelope fails authentication. 16-byte tag enforced. | Until `MCP_ENVELOPE_REQUIRE_AAD=true` is set, an unbound legacy envelope still moves. Operator action, documented. |
 | 2.3 | T, E | Storage writer edits the plaintext columns next to the envelope instead of the envelope. | None. `userId`, `homeAccountId` and `tenantId` are plaintext and outside the AAD. | A writer holding any valid session can repoint that session's `homeAccountId` at another user's MSAL account; the next silent refresh returns the other user's access token into the attacker's session. Editing `userId` changes whose deny lists and settings apply and whose name the audit records. **G3** |
 | 2.4 | I, D | One MSAL cache row for all users. | Encrypted and AAD-bound like everything else. | Every user's refresh token is in one blob, so any code path that loads the cache holds all of them. Writes are an unconditional replace, so two replicas refreshing at once can drop a user's newly rotated refresh token. One Table property is capped at 64 KiB, which puts a ceiling on how many users the cache can hold before writes start failing; the failure is logged, not surfaced. **G4** |
@@ -259,17 +259,23 @@ infrastructure between deployments.
 
 ## 6. Table Storage
 
-The server reaches Storage with the account-key connection string. Tables are
-created by the Bicep templates or on first use: `mcpSessions`, `mcpMsalCache`, `mcpInstallNonces`, the
+The server reaches Storage with an Entra token for its user-assigned runtime
+identity, which holds Storage Table Data Contributor on the account and Key Vault
+Secrets User on the vault ([`storageClient.ts`](../src/services/storageClient.ts),
+[`infra/key-vault.bicep`](../infra/key-vault.bicep)). The account created by
+[`infra/main.bicep`](../infra/main.bicep) has shared-key access off, so neither
+an account key nor a SAS signed with one is accepted. The client secret and both
+application keys are Key Vault secrets; the Container App holds versioned
+references to them. Tables are created by the Bicep templates or on first use: `mcpSessions`, `mcpMsalCache`, `mcpInstallNonces`, the
 policy tables, and `auditLog` ([`infra/main.bicep`](../infra/main.bicep),
 [`tableStorage.ts`](../src/services/tableStorage.ts)).
 
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
-| 6.1 | I | Storage copy (backup, leaked SAS) yields credentials. | Envelopes and HMAC, section 2, including the install-handoff token in `mcpInstallNonces` (4.2). HTTPS only, TLS 1.2 minimum, no public blob access. | None. |
-| 6.2 | E | Azure operator reads everything. | None in code. | The storage key, DEK, HMAC key and client secret are all Container App secrets in one resource group, so anyone who can read them holds every user's refresh token. Shared-key access is on, the account is reachable from public networks, and the keys are not in Key Vault (a code comment says they are). The control that actually matters is who holds Contributor on the resource group. **G11** |
-| 6.3 | T | Storage writer widens policy (removes deny entries, empties the allow-list, lifts draft enforcement). | None at rest. Policy rows are plain entities. | Covered by **G11** (who can write) and **G8** (no record when policy changes through the API). |
-| 6.4 | T, R | Storage writer edits or deletes audit rows. | None. The audit table is writable with the same key the app uses. | **G8**, and audit export to an append-only store is tracked separately. |
+| 6.1 | I | Storage copy (backup, leaked SAS) yields credentials. | Envelopes and HMAC, section 2, including the install-handoff token in `mcpInstallNonces` (4.2). Shared-key access off, so a leaked account key or key-signed SAS is refused. HTTPS only, TLS 1.2 minimum, no public blob access. | None. |
+| 6.2 | E | Azure operator reads everything. | The DEK, HMAC key and client secret are in an RBAC-mode Key Vault with purge protection; the Container App holds references, so reading its secrets yields URIs, not values. Reading a value directly takes a data-plane role on the vault, which Contributor does not include and only Owner or User Access Administrator can grant, and every read is logged to the instance's Log Analytics workspace. Storage takes an Entra token, so there is no storage key in the app or in deployment history. | Residual, not closed: Contributor on the resource group still controls the runtime. It can exec into a replica or roll a revision running its own image and read the resolved keys from the environment, and it can change the vault's and the storage account's settings, including turning shared-key access back on. Those are deliberate, logged control-plane writes rather than a passive read, so the Activity Log is the record; who holds Contributor remains the control that matters. Both the account and the vault are reachable from public networks, because the Consumption profile has no VNet integration; private endpoints are tracked separately. |
+| 6.3 | T | Storage writer widens policy (removes deny entries, empties the allow-list, lifts draft enforcement). | None at rest. Policy rows are plain entities. | Covered by 6.2 (who can write) and **G8** (no record when policy changes through the API). |
+| 6.4 | T, R | Storage writer edits or deletes audit rows. | None. The audit table is writable by the app's runtime identity and by anyone holding a data role on the account. | **G8**, and audit export to an append-only store is tracked separately. |
 | 6.5 | D | Storage unavailable. | Deny-list checks fail closed. Service, read-only, override and draft-policy reads propagate the error, so the call fails. | Audit writes fail open (6.4, section 8). |
 
 ---
@@ -379,7 +385,6 @@ separately" in the tables and are not repeated here.
 | G8 | Medium | 7, 8 Audit | Auth events and admin policy changes are not audited; MCP rows have no client address; REST rows trust the leftmost forwarded address. |
 | G9 | Medium | 7 Admin | The MCP client's session token is also an admin-API credential for Global Administrators; admin CSP allows inline script; CSRF defence is SameSite alone. |
 | G10 | Medium | 4 Client update | Extension auto-update is unsigned, writes payload paths without containment, and bakes in an origin from forwarded headers. |
-| G11 | Medium | 6 Storage | Account-key storage access with public network reach; app keys are Container App secrets beside the storage key, not Key Vault; code comment says otherwise. |
 | G13 | Low | 3 Session | The 7-day idle window renews silently instead of ending the session; sessions with no timestamps skip the 30-day cap; runbook overstates the idle timeout. |
 | G14 | Low | 10 Availability | An unknown bearer token triggers full-partition scans (up to three per request); JSON-RPC batch size is unbounded. |
 

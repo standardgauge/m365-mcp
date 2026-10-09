@@ -1,4 +1,5 @@
 import { TableClient, TableEntity, odata } from '@azure/data-tables';
+import { getTableClient as getStorageTableClient } from './storageClient.js';
 
 const GLOBAL_TABLE = 'GlobalDenyList';
 const USER_TABLE = 'UserDenyList';
@@ -15,14 +16,8 @@ export interface DenyListEntry {
   addedAt: string;
 }
 
-const AZURITE_CONNECTION_STRING = 'UseDevelopmentStorage=true';
-
 function getTableClient(tableName: string): TableClient {
-  const conn = process.env.AZURE_STORAGE_CONNECTION_STRING ?? AZURITE_CONNECTION_STRING;
-  // Azurite uses HTTP; the SDK rejects plain-HTTP endpoints unless this flag is set.
-  const allowInsecureConnection =
-    conn === 'UseDevelopmentStorage=true' || conn.includes('DefaultEndpointsProtocol=http;');
-  return TableClient.fromConnectionString(conn, tableName, { allowInsecureConnection });
+  return getStorageTableClient(tableName);
 }
 
 /** Creates the table if it doesn't already exist (409 = already exists, safe to ignore). */

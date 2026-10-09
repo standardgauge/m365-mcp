@@ -1,15 +1,16 @@
-import { TableClient, TableServiceClient } from '@azure/data-tables';
+import { TableClient } from '@azure/data-tables';
+import { getTableClient, getTableServiceClient, isStorageConfigured } from './storageClient.js';
 import { sendToLogAnalytics, toLogAnalyticsRecord } from './auditLogAnalytics.js';
 
-const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+const storageConfigured = isStorageConfigured();
 let auditTable: TableClient | null = null;
 let auditTableInit = false;
 
 async function ensureAuditTable(): Promise<void> {
-  if (auditTableInit || !connectionString) return;
-  const svc = TableServiceClient.fromConnectionString(connectionString);
+  if (auditTableInit || !storageConfigured) return;
+  const svc = getTableServiceClient();
   try { await svc.createTable('auditLog'); } catch { /* already exists */ }
-  auditTable = TableClient.fromConnectionString(connectionString, 'auditLog');
+  auditTable = getTableClient('auditLog');
   auditTableInit = true;
 }
 
@@ -199,7 +200,7 @@ export async function purgeAuditLog(retentionDays: number, nowMs: number = Date.
  * throws.
  */
 export function maybePurgeAuditLog(nowMs: number = Date.now()): void {
-  if (!connectionString || purgeInFlight) return;
+  if (!storageConfigured || purgeInFlight) return;
   if (nowMs - lastPurgeStartedAt < PURGE_INTERVAL_MS) return;
   const retentionDays = auditRetentionDays();
   if (retentionDays === 0) return;

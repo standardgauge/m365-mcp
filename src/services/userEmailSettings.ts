@@ -36,11 +36,10 @@
  */
 
 import { TableClient, TableEntity } from '@azure/data-tables';
+import { getTableClient as getStorageTableClient } from './storageClient.js';
 
 const TABLE = 'UserEmailSettings';
 const POLICY_TABLE = 'EmailOutputModePolicy';
-const AZURITE_CONNECTION_STRING = 'UseDevelopmentStorage=true';
-
 /**
  * RowKey of the tenant-wide policy row. Entra user IDs are GUIDs, so this
  * can never collide with a per-user row in the same partition.
@@ -87,10 +86,7 @@ export type EmailOutputModePolicyScope =
   | { scope: 'user'; userId: string };
 
 function getTableClient(table: string = TABLE): TableClient {
-  const conn = process.env.AZURE_STORAGE_CONNECTION_STRING ?? AZURITE_CONNECTION_STRING;
-  const allowInsecureConnection =
-    conn === 'UseDevelopmentStorage=true' || conn.includes('DefaultEndpointsProtocol=http;');
-  return TableClient.fromConnectionString(conn, table, { allowInsecureConnection });
+  return getStorageTableClient(table);
 }
 
 async function ensureTable(table: string = TABLE): Promise<void> {

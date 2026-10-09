@@ -18,8 +18,10 @@
  * tooling's job (see docs/operations-runbook.md, Audit trail in Log Analytics).
  */
 import { LogsIngestionClient } from '@azure/monitor-ingestion';
-import type { AccessToken, TokenCredential } from '@azure/core-auth';
+import { ContainerAppManagedIdentityCredential } from './managedIdentity.js';
 import type { AuditEntry } from './auditLog.js';
+
+export { ContainerAppManagedIdentityCredential };
 
 export const DEFAULT_AUDIT_STREAM = 'Custom-M365McpAudit';
 
@@ -75,36 +77,6 @@ export function toLogAnalyticsRecord(
   if (entry.reason) record.Reason = entry.reason;
   if (entry.ip) record.ClientIp = entry.ip;
   return record;
-}
-
-/**
- * Token source for the Container App's system-assigned managed identity, read
- * from the endpoint Container Apps injects (IDENTITY_ENDPOINT and
- * IDENTITY_HEADER). Kept to this instead of @azure/identity, which would pull a
- * second, older @azure/msal-node into the image. The client's pipeline caches
- * the token until shortly before it expires.
- */
-export class ContainerAppManagedIdentityCredential implements TokenCredential {
-  async getToken(scopes: string | string[]): Promise<AccessToken> {
-    const endpoint = process.env.IDENTITY_ENDPOINT;
-    const header = process.env.IDENTITY_HEADER;
-    if (!endpoint || !header) {
-      throw new Error('IDENTITY_ENDPOINT / IDENTITY_HEADER not set: no managed identity available');
-    }
-    const scope = Array.isArray(scopes) ? scopes[0] : scopes;
-    const url = new URL(endpoint);
-    url.searchParams.set('resource', scope.replace(/\/\.default$/, ''));
-    url.searchParams.set('api-version', '2019-08-01');
-    const res = await fetch(url, { headers: { 'X-IDENTITY-HEADER': header } });
-    if (!res.ok) {
-      throw new Error(`managed identity token request failed: HTTP ${res.status}`);
-    }
-    const body = (await res.json()) as { access_token?: string; expires_on?: string | number };
-    if (!body.access_token || body.expires_on === undefined) {
-      throw new Error('managed identity token response missing access_token or expires_on');
-    }
-    return { token: body.access_token, expiresOnTimestamp: Number(body.expires_on) * 1000 };
-  }
 }
 
 interface SinkConfig {

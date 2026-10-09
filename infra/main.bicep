@@ -1,7 +1,12 @@
 // main.bicep — Full-stack deployment for M365 MCP server.
-// Creates: Storage Account + Container Registry + Log Analytics (with the audit
-// table and its data collection rule) + Application Insights + Container App +
-// Custom Domain binding.
+// Creates: Storage Account + Key Vault + Container Registry + Log Analytics
+// (with the audit table and its data collection rule) + Application Insights +
+// Container App + Custom Domain binding.
+//
+// No storage key exists anywhere in the deployment: the account has shared-key
+// access disabled and the app reaches it with its runtime identity. The client
+// secret and both credential-at-rest keys live in Key Vault (key-vault.bicep);
+// the Container App holds references to them, not values.
 //
 // Usage:
 //   az deployment group create \
@@ -21,6 +26,9 @@ param imageTag string = 'latest'
 @description('Custom domain for the Container App (e.g. your-mcp-host.example.com). Leave empty to skip.')
 param customDomain string = ''
 
+@description('Key Vault name, globally unique. The default is derived from the resource group.')
+param keyVaultName string = 'kv-${uniqueString(resourceGroup().id)}'
+
 // ── Secrets (passed in at deploy time — never hard-code) ──────────────────────
 @secure()
 param azureClientId string
@@ -31,7 +39,8 @@ param azureTenantId string
 
 // — credential-at-rest hardening keys.
 // Generate fresh values per environment with `openssl rand -hex 32` and pass
-// them in at deploy time. NEVER reuse across tenants or environments.
+// them in at deploy time. NEVER reuse across tenants or environments. They,
+// and azureClientSecret, are written to Key Vault, not to the Container App.
 @secure()
 @description('64-hex-char HMAC-SHA256 key for hashing session tokens at rest.')
 param mcpSessionHmacKey string
@@ -53,6 +62,10 @@ var auditDcrName = '${appName}-audit-dcr'
 // src/__tests__/containerPortInvariant.test.ts holds its port to the image's.
 var probes = loadJsonContent('probes.json')
 
+// Storage Table Data Contributor: read and write entities and create tables.
+// The runtime identity's only role on the storage account.
+var storageTableDataContributorRoleId = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
+
 // AcrPull built-in role
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 
@@ -64,7 +77,7 @@ var monitoringMetricsPublisherRoleId = '3913510d-42f4-4e42-8a64-420c390055eb'
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   // checkov:skip=CKV_AZURE_43: storage account name is derived from appName param; naming convention is compliant (lowercase alphanumeric, 3-24 chars) but Checkov cannot statically evaluate the var expression
   // checkov:skip=CKV_AZURE_206: ZRS provides zone redundancy within the region; cross-region (GRS) replication is unnecessary for ephemeral MCP session and MSAL cache data that can be repopulated on re-auth
-  // checkov:skip=CKV_AZURE_35: Container App on Consumption workload profile accesses storage via connection string; Azure Container Apps is not on the Storage trusted-services bypass list, so defaultAction:Deny would break runtime table storage access. Network restriction requires VNet injection with private endpoint — separate architectural enhancement.
+  // checkov:skip=CKV_AZURE_35: Container App on Consumption workload profile reaches storage over its public endpoint; Azure Container Apps is not on the Storage trusted-services bypass list, so defaultAction:Deny would break runtime table storage access. Every request needs an Entra token with a data role (shared-key access is off). Network restriction requires VNet injection with private endpoint — separate architectural enhancement.
   name: storageAccountName
   location: location
   sku: {
@@ -75,6 +88,10 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
     supportsHttpsTrafficOnly: true
     minimumTlsVersion: 'TLS1_2'
     allowBlobPublicAccess: false
+    // Entra authorization only: no account key, connection string or SAS
+    // signed with one is accepted. The app uses runtimeIdentity below.
+    allowSharedKeyAccess: false
+    defaultToOAuthAuthentication: true
   }
 }
 
@@ -112,6 +129,39 @@ resource serviceSettingsTable 'Microsoft.Storage/storageAccounts/tableServices/t
 resource allowedSitesTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-01-01' = {
   parent: tableService
   name: 'allowedSites'
+}
+
+// ── Runtime identity: reads Key Vault and Table Storage ───────────────────────
+// User-assigned for the same ordering reason as acrPullIdentity: the Container
+// App resolves its Key Vault references while it is being created, so the
+// identity and its vault role have to exist first.
+resource runtimeIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: '${appName}-runtime'
+  location: location
+}
+
+resource storageDataRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(storageAccount.id, runtimeIdentity.id, storageTableDataContributorRoleId)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageTableDataContributorRoleId)
+    principalId: runtimeIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// ── Key Vault: client secret and credential-at-rest keys ──────────────────────
+module keyVault 'key-vault.bicep' = {
+  name: '${appName}-key-vault'
+  params: {
+    location: location
+    vaultName: keyVaultName
+    readerPrincipalId: runtimeIdentity.properties.principalId
+    logAnalyticsWorkspaceId: logAnalyticsWorkspace.id
+    azureClientSecret: azureClientSecret
+    mcpSessionHmacKey: mcpSessionHmacKey
+    mcpDataEncryptionKey: mcpDataEncryptionKey
+  }
 }
 
 // ── Azure Container Registry ──────────────────────────────────────────────────
@@ -209,20 +259,19 @@ var effectiveDomain = !empty(customDomain) ? customDomain : '${containerAppName}
 var oauthRedirectUri = 'https://${effectiveDomain}/api/auth/callback'
 var frontendUrl = 'https://${effectiveDomain}/admin'
 
-// ── Storage connection string ──────────────────────────────────────────────────
-var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};AccountKey=${storageAccount.listKeys().keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
-
 // ── Container App ──────────────────────────────────────────────────────────────
 resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
   name: containerAppName
   location: location
   dependsOn: [
-    acrPullRoleAssignment  // ensure AcrPull RBAC is assigned before Container App pulls from ACR
+    acrPullRoleAssignment      // ensure AcrPull RBAC is assigned before Container App pulls from ACR
+    storageDataRoleAssignment  // and the runtime identity can reach storage before the first request
   ]
   identity: {
     type: 'SystemAssigned, UserAssigned'
     userAssignedIdentities: {
       '${acrPullIdentity.id}': {}
+      '${runtimeIdentity.id}': {}
     }
   }
   properties: {
@@ -248,9 +297,13 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           name: 'azure-client-id'
           value: azureClientId
         }
+        // Key Vault references: the Container App stores the URI, the runtime
+        // identity resolves the value. Versioned URIs, so a new version in the
+        // vault does not rotate a key until a deployment points here.
         {
           name: 'azure-client-secret'
-          value: azureClientSecret
+          keyVaultUrl: keyVault.outputs.clientSecretUri
+          identity: runtimeIdentity.id
         }
         {
           name: 'azure-tenant-id'
@@ -265,16 +318,14 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           value: frontendUrl
         }
         {
-          name: 'azure-storage-connection-string'
-          value: storageConnectionString
-        }
-        {
           name: 'mcp-session-hmac-key'
-          value: mcpSessionHmacKey
+          keyVaultUrl: keyVault.outputs.sessionHmacKeyUri
+          identity: runtimeIdentity.id
         }
         {
           name: 'mcp-data-encryption-key'
-          value: mcpDataEncryptionKey
+          keyVaultUrl: keyVault.outputs.dataEncryptionKeyUri
+          identity: runtimeIdentity.id
         }
         {
           name: 'appinsights-connection-string'
@@ -298,10 +349,14 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             { name: 'AZURE_TENANT_ID',                  secretRef: 'azure-tenant-id' }
             { name: 'OAUTH_REDIRECT_URI',               secretRef: 'oauth-redirect-uri' }
             { name: 'FRONTEND_URL',                     secretRef: 'frontend-url' }
-            { name: 'AZURE_STORAGE_CONNECTION_STRING',  secretRef: 'azure-storage-connection-string' }
             { name: 'MCP_SESSION_HMAC_KEY',             secretRef: 'mcp-session-hmac-key' }
             { name: 'MCP_DATA_ENCRYPTION_KEY',          secretRef: 'mcp-data-encryption-key' }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-connection-string' }
+            // Table Storage over Entra auth (src/services/storageClient.ts). Not
+            // secrets: the endpoint is public and the client id names an identity
+            // only this app can obtain tokens for.
+            { name: 'AZURE_STORAGE_TABLE_ENDPOINT',     value: storageAccount.properties.primaryEndpoints.table }
+            { name: 'AZURE_STORAGE_IDENTITY_CLIENT_ID', value: runtimeIdentity.properties.clientId }
             // Audit trail → Log Analytics. Not secrets: the endpoint and rule id
             // only work for a caller holding the publisher role on the rule.
             { name: 'AUDIT_LOGS_INGESTION_ENDPOINT',    value: auditIngestion.outputs.logsIngestionEndpoint }
@@ -360,6 +415,8 @@ output acrLoginServer string = acr.properties.loginServer
 output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
 output containerAppPrincipalId string = containerApp.identity.principalId
 output acrPullIdentityId string = acrPullIdentity.id
+output runtimeIdentityId string = runtimeIdentity.id
+output keyVaultName string = keyVault.outputs.vaultName
 output oauthRedirectUri string = oauthRedirectUri
 output frontendUrl string = frontendUrl
 output logAnalyticsWorkspaceName string = logAnalyticsWorkspace.name

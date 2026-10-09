@@ -18,10 +18,9 @@
  */
 
 import { TableClient, TableEntity } from '@azure/data-tables';
+import { getTableClient as getStorageTableClient } from './storageClient.js';
 
 const TABLE = 'UserMailConfig';
-const AZURITE_CONNECTION_STRING = 'UseDevelopmentStorage=true';
-
 export interface UserMailConfig {
   disable_mail_indexing: boolean;
   /** ISO-8601 timestamp when the flag was last set/cleared */
@@ -31,10 +30,7 @@ export interface UserMailConfig {
 }
 
 function getTableClient(): TableClient {
-  const conn = process.env.AZURE_STORAGE_CONNECTION_STRING ?? AZURITE_CONNECTION_STRING;
-  const allowInsecureConnection =
-    conn === 'UseDevelopmentStorage=true' || conn.includes('DefaultEndpointsProtocol=http;');
-  return TableClient.fromConnectionString(conn, TABLE, { allowInsecureConnection });
+  return getStorageTableClient(TABLE);
 }
 
 async function ensureTable(): Promise<void> {
