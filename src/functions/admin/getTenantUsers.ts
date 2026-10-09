@@ -95,7 +95,7 @@ async function getTenantUsers(
       listActiveSessions(),
     ]);
 
-    // Only count sessions whose idle TTL hasn't expired — otherwise the badge
+    // Only count sessions used inside the renewal window — otherwise the badge
     // marks users as "installed" based on stale storage rows from past installs.
     const now = Date.now();
     const installedUserIds = new Set(

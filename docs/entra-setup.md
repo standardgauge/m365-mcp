@@ -63,8 +63,11 @@ authorization code. So:
   flow, or ask for the route to be removed (it creates sessions that are never
   returned to the caller and has no consumer in the current install paths).
 - Refresh tokens are subject to the tenant's token lifetime and revocation
-  policy. The application caps a session at 30 days absolute and 7 days idle
-  regardless (`src/services/tokenCache.ts:11,18`).
+  policy. The application caps a session at 30 days absolute regardless
+  (`src/services/tokenCache.ts`). It has no idle timeout of its own: a
+  session unused for more than 7 days is renewed through the refresh token on
+  its next request, so an Entra sign-in frequency or revocation is what ends
+  an idle session sooner.
 
 ---
 
