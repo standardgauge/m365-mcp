@@ -10,7 +10,13 @@ import {
   type DenyListType,
 } from '../../services/denyList.js';
 import { getTenantId } from '../../services/tokenCache.js';
-import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, authorizeAdmin, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { auditActor, auditSnapshot, logAccess } from '../../services/auditLog.js';
+
+/** The fields of a deny entry worth recording, or null when there is none. */
+function entrySnapshot(entry: { path: string; description?: string } | undefined): string {
+  return auditSnapshot(entry ? { path: entry.path, description: entry.description ?? '' } : null);
+}
 import { withSecurity } from '../../services/securityHeaders.js';
 
 async function denyListGlobal(
@@ -32,7 +38,8 @@ async function denyListGlobal(
     }
 
     // POST and DELETE require Global Admin
-    const isAdmin = await checkGlobalAdmin(addedBy);
+    const operation = request.method === 'POST' ? 'policy.deny_list.global.add' : 'policy.deny_list.global.remove';
+    const isAdmin = await authorizeAdmin(auth, operation);
     if (!isAdmin) {
       return { status: 403, jsonBody: { error: 'Global Administrator role required' } };
     }
@@ -42,11 +49,21 @@ async function denyListGlobal(
     const path = body.path;
     if (!path) return { status: 400, jsonBody: { error: 'Missing path' } };
 
+    const before = (await listGlobalDenyEntries(tenantId, entryType)).find((e) => e.path === path);
     if (request.method === 'POST') {
       await addGlobalDenyEntry(tenantId, entryType, path, addedBy, body.description ?? '', body.addedByName);
     } else {
       await removeGlobalDenyEntry(tenantId, entryType, path);
     }
+    logAccess({
+      ...auditActor(auth.session),
+      operation,
+      resource: `${entryType}:${path}`,
+      result: 'allowed',
+      source: 'http',
+      before: entrySnapshot(before),
+      after: entrySnapshot(request.method === 'POST' ? { path, description: body.description } : undefined),
+    });
     return { status: 200, jsonBody: { ok: true } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -72,7 +89,7 @@ async function denyListUser(
       if (!targetUserId) return { status: 400, jsonBody: { error: 'Missing targetUserId or x-user-id' } };
       // IDOR protection: non-admins can only read their own deny list
       if (targetUserId !== requesterId) {
-        const isAdmin = await checkGlobalAdmin(requesterId);
+        const isAdmin = await authorizeAdmin(auth, 'admin.deny_list.user.read', `user:${targetUserId}`);
         if (!isAdmin) {
           return { status: 403, jsonBody: { error: 'You can only view your own deny list' } };
         }
@@ -88,19 +105,32 @@ async function denyListUser(
     if (!path) return { status: 400, jsonBody: { error: 'Missing path' } };
     if (!targetUserId) return { status: 400, jsonBody: { error: 'Missing targetUserId' } };
 
+    const operation = request.method === 'POST' ? 'policy.deny_list.user.add' : 'policy.deny_list.user.remove';
+    const resource = `user:${targetUserId}/${entryType}:${path}`;
+
     // IDOR protection: non-admins can only modify their own deny list
     if (targetUserId !== requesterId) {
-      const isAdmin = await checkGlobalAdmin(requesterId);
+      const isAdmin = await authorizeAdmin(auth, operation, resource);
       if (!isAdmin) {
         return { status: 403, jsonBody: { error: 'You can only modify your own deny list' } };
       }
     }
 
+    const before = (await listUserDenyEntries(targetUserId, entryType)).find((e) => e.path === path);
     if (request.method === 'POST') {
       await addUserDenyEntry(targetUserId, entryType, path, body.addedByName);
     } else {
       await removeUserDenyEntry(targetUserId, entryType, path);
     }
+    logAccess({
+      ...auditActor(auth.session),
+      operation,
+      resource,
+      result: 'allowed',
+      source: 'http',
+      before: entrySnapshot(before),
+      after: entrySnapshot(request.method === 'POST' ? { path } : undefined),
+    });
     return { status: 200, jsonBody: { ok: true } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -124,16 +154,29 @@ async function denyListUserClear(
 
     // IDOR protection: non-admins can only clear their own deny list
     if (targetUserId !== auth.userId) {
-      const isAdmin = await checkGlobalAdmin(auth.userId);
+      const isAdmin = await authorizeAdmin(auth, 'policy.deny_list.user.clear', `user:${targetUserId}`);
       if (!isAdmin) {
         return { status: 403, jsonBody: { error: 'You can only clear your own deny list' } };
       }
     }
 
+    const [sharepoint, mail] = await Promise.all([
+      listUserDenyEntries(targetUserId, 'sharepoint'),
+      listUserDenyEntries(targetUserId, 'mail'),
+    ]);
     await Promise.all([
       clearUserDenyList(targetUserId, 'sharepoint'),
       clearUserDenyList(targetUserId, 'mail'),
     ]);
+    logAccess({
+      ...auditActor(auth.session),
+      operation: 'policy.deny_list.user.clear',
+      resource: `user:${targetUserId}`,
+      result: 'allowed',
+      source: 'http',
+      before: auditSnapshot({ sharepoint: sharepoint.map((e) => e.path), mail: mail.map((e) => e.path) }),
+      after: auditSnapshot({ sharepoint: [], mail: [] }),
+    });
     return { status: 200, jsonBody: { ok: true } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

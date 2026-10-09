@@ -21,6 +21,8 @@ import type { UserMailConfig } from '../services/userMailConfig.js';
 
 const mockAuthenticateRequest = jest.fn<(req: HttpRequest) => Promise<AuthResult | null>>();
 const mockCheckGlobalAdmin = jest.fn<(userId: string) => Promise<boolean>>();
+const mockAuditAdminRefusal = jest.fn<(operation: string) => void>();
+const mockLogAccess = jest.fn<(entry: Record<string, unknown>) => void>();
 const mockGetTenantId = jest.fn<(userId: string) => Promise<string>>();
 const mockGetMailConfig = jest.fn<(tenantId: string, userId: string) => Promise<UserMailConfig>>();
 const mockSetMailConfig = jest.fn<
@@ -32,6 +34,16 @@ const mockSetMailConfig = jest.fn<
 jest.mock('../services/authMiddleware.js', () => ({
   authenticateConsoleRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
   checkGlobalAdmin: (userId: unknown) => mockCheckGlobalAdmin(userId as string),
+  authorizeAdmin: async (auth: unknown, operation: unknown) => {
+    const isAdmin = await mockCheckGlobalAdmin((auth as AuthResult).userId);
+    if (!isAdmin) mockAuditAdminRefusal(operation as string);
+    return isAdmin;
+  },
+}));
+
+jest.mock('../services/auditLog.js', () => ({
+  ...jest.requireActual<object>('../services/auditLog.js'),
+  logAccess: (entry: unknown) => mockLogAccess(entry as Record<string, unknown>),
 }));
 
 jest.mock('../services/tokenCache.js', () => ({
@@ -153,6 +165,8 @@ describe('Authentication', () => {
 
     expect(res.status).toBe(403);
     expect((res.jsonBody as { error: string }).error).toContain('Global Administrator');
+    expect(mockAuditAdminRefusal).toHaveBeenCalledWith('policy.mail_config.set');
+    expect(mockSetMailConfig).not.toHaveBeenCalled();
   });
 });
 
@@ -201,6 +215,21 @@ describe('POST /api/manage/mail-config', () => {
     mockAuthenticateRequest.mockResolvedValue(ADMIN_AUTH);
     mockCheckGlobalAdmin.mockResolvedValue(true);
     mockSetMailConfig.mockResolvedValue(undefined);
+    mockGetMailConfig.mockResolvedValue({ disable_mail_indexing: false });
+  });
+
+  it('audits the change with the flag before and after', async () => {
+    await handler(makePostRequest({ userId: TARGET_USER, disable_mail_indexing: true }), makeContext());
+
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({
+      tenantId: TENANT,
+      userId: ADMIN_USER,
+      operation: 'policy.mail_config.set',
+      resource: `user:${TARGET_USER}`,
+      result: 'allowed',
+      before: '{"disable_mail_indexing":false}',
+      after: '{"disable_mail_indexing":true}',
+    }));
   });
 
   it('sets disable_mail_indexing to true', async () => {

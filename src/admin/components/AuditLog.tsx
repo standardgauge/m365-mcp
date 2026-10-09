@@ -10,6 +10,14 @@ interface AuditEntry {
   reason?: string;
   source: 'http' | 'mcp';
   ip?: string;
+  before?: string;
+  after?: string;
+}
+
+/** An admin change as `before → after`, empty for rows that change nothing. */
+function changeText(entry: AuditEntry): string {
+  if (entry.before === undefined && entry.after === undefined) return '';
+  return `${entry.before ?? ''} → ${entry.after ?? ''}`;
 }
 
 export default function AuditLog() {
@@ -196,7 +204,7 @@ export default function AuditLog() {
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
             <thead>
               <tr style={{ background: '#f5f5f5', textAlign: 'left' }}>
-                {['Timestamp', 'User', 'Device', 'Operation', 'Resource', 'Result', 'Reason'].map(col => (
+                {['Timestamp', 'User', 'Device', 'Client IP', 'Operation', 'Resource', 'Result', 'Reason', 'Change'].map(col => (
                   <th key={col} style={{ padding: '6px 10px', borderBottom: '1px solid #ddd', fontWeight: 600, whiteSpace: 'nowrap' }}>{col}</th>
                 ))}
               </tr>
@@ -207,8 +215,9 @@ export default function AuditLog() {
                   <td style={{ padding: '5px 10px', borderBottom: '1px solid #eee', whiteSpace: 'nowrap', color: '#555' }}>
                     {new Date(entry.timestamp).toLocaleString()}
                   </td>
-                  <td style={{ padding: '5px 10px', borderBottom: '1px solid #eee' }}>{entry.userEmail}</td>
+                  <td style={{ padding: '5px 10px', borderBottom: '1px solid #eee' }}>{entry.userEmail || <span style={{ color: '#999' }}>(not signed in)</span>}</td>
                   <td style={{ padding: '5px 10px', borderBottom: '1px solid #eee', color: '#777' }}>{entry.deviceLabel ?? ''}</td>
+                  <td style={{ padding: '5px 10px', borderBottom: '1px solid #eee', color: '#777', fontFamily: 'monospace' }}>{entry.ip ?? ''}</td>
                   <td style={{ padding: '5px 10px', borderBottom: '1px solid #eee', fontFamily: 'monospace' }}>{entry.operation}</td>
                   <td style={{ padding: '5px 10px', borderBottom: '1px solid #eee', color: '#777', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.resource ?? ''}</td>
                   <td style={{ padding: '5px 10px', borderBottom: '1px solid #eee' }}>
@@ -225,6 +234,12 @@ export default function AuditLog() {
                     </span>
                   </td>
                   <td style={{ padding: '5px 10px', borderBottom: '1px solid #eee', color: '#777' }}>{entry.reason ?? ''}</td>
+                  <td
+                    title={changeText(entry)}
+                    style={{ padding: '5px 10px', borderBottom: '1px solid #eee', color: '#777', fontFamily: 'monospace', maxWidth: '260px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  >
+                    {changeText(entry)}
+                  </td>
                 </tr>
               ))}
             </tbody>

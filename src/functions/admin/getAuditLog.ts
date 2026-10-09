@@ -1,5 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
-import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, authorizeAdmin } from '../../services/authMiddleware.js';
 import { queryAuditLog } from '../../services/auditLog.js';
 import { getTenantIdFromSession } from '../../services/tokenCache.js';
 import { withSecurity } from '../../services/securityHeaders.js';
@@ -13,7 +13,7 @@ async function getAuditLog(
     return { status: 401, jsonBody: { error: 'Authentication required' } };
   }
 
-  const isAdmin = await checkGlobalAdmin(auth.userId);
+  const isAdmin = await authorizeAdmin(auth, 'admin.audit_log.read');
   if (!isAdmin) {
     return { status: 403, jsonBody: { error: 'Global Administrator role required' } };
   }
@@ -37,7 +37,7 @@ async function getAuditLog(
 
   // CSV export
   if (request.query.get('format') === 'csv') {
-    const headers = ['timestamp', 'userEmail', 'deviceLabel', 'operation', 'resource', 'result', 'reason', 'source', 'ip'];
+    const headers = ['timestamp', 'userEmail', 'deviceLabel', 'operation', 'resource', 'result', 'reason', 'source', 'ip', 'before', 'after'];
     const rows = entries.map(e =>
       headers.map(h => {
         const v = (e as unknown as Record<string, unknown>)[h];

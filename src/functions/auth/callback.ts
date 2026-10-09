@@ -8,8 +8,27 @@ import { randomBytes } from 'crypto';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { resolveFrontendUrl } from '../../services/frontendUrl.js';
 import { consoleCookie, mintConsoleToken } from '../../services/consoleSession.js';
+import { auditActor, auditTenantId, logAccess } from '../../services/auditLog.js';
 
 const NONCE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * A sign-in that ended before a user was identified. The row goes to the
+ * instance's own tenant with no actor; `resource` names the foreign tenant
+ * when that is why it was refused.
+ */
+function auditSignInFailure(reason: string, resource?: string, tenantId?: string): void {
+  logAccess({
+    tenantId: auditTenantId(tenantId),
+    userId: '',
+    userEmail: '',
+    operation: 'auth.login',
+    resource,
+    result: 'denied',
+    reason,
+    source: 'http',
+  });
+}
 
 /**
  * GET /api/auth/callback
@@ -31,6 +50,8 @@ async function callback(
 
     if (error) {
       context.error('OAuth error from identity platform:', error, errorDescription);
+      // `error` arrives on the query string, so only a well-formed OAuth error code is recorded.
+      auditSignInFailure(`identity platform error: ${/^[a-z_]{1,64}$/.test(error) ? error : 'unrecognised'}`);
       return {
         status: 400,
         jsonBody: { error, description: errorDescription ?? 'No description provided' },
@@ -45,6 +66,7 @@ async function callback(
 
     if (!stateParam || !stateCookie || stateParam !== stateCookie) {
       context.error('OAuth state mismatch — possible CSRF attack');
+      auditSignInFailure('state mismatch');
       return {
         status: 403,
         jsonBody: { error: 'State parameter mismatch. Please try logging in again.' },
@@ -75,6 +97,7 @@ async function callback(
 
     const code = request.query.get('code');
     if (!code) {
+      auditSignInFailure('missing authorization code');
       return { status: 400, jsonBody: { error: 'Missing authorization code in callback' } };
     }
 
@@ -90,6 +113,7 @@ async function callback(
     const expectedTenantId = process.env.AZURE_TENANT_ID;
     if (expectedTenantId && tenantId !== expectedTenantId) {
       context.error(`Tenant mismatch: user tenant ${tenantId} does not match expected ${expectedTenantId}`);
+      auditSignInFailure('foreign tenant', `tenant:${tenantId}`, expectedTenantId);
       return {
         status: 403,
         jsonBody: { error: 'Access denied. Your account belongs to a different tenant.' },
@@ -121,6 +145,13 @@ async function callback(
     };
 
     await storeSession(session);
+    logAccess({
+      ...auditActor(session),
+      operation: 'auth.login',
+      resource: installNonce ? 'install' : 'browser',
+      result: 'allowed',
+      source: 'http',
+    });
 
     // If this OAuth flow was started by install-mcp.sh, attach the new
     // session to its install-nonce slot so the polling install script can
@@ -133,7 +164,16 @@ async function callback(
         email: session.email,
         displayName: session.displayName,
         deviceLabel: session.deviceLabel,
+        tenantId: session.tenantId,
         expiresAt: Date.now() + NONCE_TTL_MS,
+      });
+      logAccess({
+        ...auditActor(session),
+        operation: 'auth.install_handoff',
+        resource: 'attach',
+        result: attached ? 'allowed' : 'denied',
+        ...(attached ? {} : { reason: 'session could not be attached to the install nonce' }),
+        source: 'http',
       });
       if (!attached) {
         context.warn(
@@ -243,6 +283,7 @@ async function callback(
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     context.error('callback error:', message);
+    auditSignInFailure('callback error');
     return { status: 500, jsonBody: { error: 'Authentication callback failed' } };
   }
 }

@@ -15,6 +15,7 @@ import type { DenyListEntry } from '../services/denyList.js';
 
 const mockAuthenticateRequest = jest.fn<(req: HttpRequest) => Promise<AuthResult | null>>();
 const mockCheckGlobalAdmin = jest.fn<(userId: string) => Promise<boolean>>();
+const mockAuditAdminRefusal = jest.fn<(operation: string, resource?: string) => void>();
 const mockListUserDenyEntries = jest.fn<(userId: string, type: string) => Promise<DenyListEntry[]>>();
 const mockAddUserDenyEntry = jest.fn<() => Promise<void>>();
 const mockRemoveUserDenyEntry = jest.fn<() => Promise<void>>();
@@ -24,6 +25,13 @@ const mockRemoveUserDenyEntry = jest.fn<() => Promise<void>>();
 jest.mock('../services/authMiddleware.js', () => ({
   authenticateConsoleRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
   checkGlobalAdmin: (userId: unknown) => mockCheckGlobalAdmin(userId as string),
+  auditAdminRefusal: (_auth: unknown, operation: unknown, resource?: unknown) =>
+    mockAuditAdminRefusal(operation as string, resource as string | undefined),
+  authorizeAdmin: async (auth: unknown, operation: unknown, resource?: unknown) => {
+    const isAdmin = await mockCheckGlobalAdmin((auth as AuthResult).userId);
+    if (!isAdmin) mockAuditAdminRefusal(operation as string, resource as string | undefined);
+    return isAdmin;
+  },
 }));
 
 jest.mock('../services/tokenCache.js', () => ({

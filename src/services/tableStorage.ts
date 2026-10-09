@@ -497,6 +497,8 @@ export interface InstallNonceRecord {
   email: string;
   displayName: string;
   deviceLabel?: string;
+  /** Entra tenant of the signed-in user, for the audit row written when the record is consumed. */
+  tenantId?: string;
   /** Unix timestamp in milliseconds when this record expires. */
   expiresAt: number;
 }
@@ -543,6 +545,7 @@ export async function attachSessionToInstallNonce(
         email: record.email,
         displayName: record.displayName,
         deviceLabel: record.deviceLabel ?? null,
+        tenantId: record.tenantId ?? null,
         expiresAt: record.expiresAt,
       },
       'Replace'
@@ -620,6 +623,7 @@ export async function consumeInstallNonce(
     email: entity.email as string,
     displayName: entity.displayName as string,
     deviceLabel: entity.deviceLabel as string | undefined,
+    tenantId: (entity.tenantId as string | null | undefined) ?? undefined,
     expiresAt,
   };
 

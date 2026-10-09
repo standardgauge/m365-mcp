@@ -4,6 +4,7 @@ import { deleteAllUserSessions } from '../../services/tokenCache.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { checkBrowserOrigin, expiredConsoleCookie } from '../../services/consoleSession.js';
 import { resolveFrontendUrl } from '../../services/frontendUrl.js';
+import { auditActor, logAccess } from '../../services/auditLog.js';
 
 /**
  * POST /api/auth/logout
@@ -32,12 +33,27 @@ async function logout(
     return { status: 403, jsonBody: { error: 'Forbidden' } };
   }
 
-  // Best-effort: drop the server-side session if we can identify it.
+  // Best-effort: drop the server-side session if we can identify it. Only a
+  // logout that found a session is audited; the route is anonymous, so
+  // recording the rest would let anyone write rows.
+  let auth: Awaited<ReturnType<typeof authenticateRequest>> = null;
   try {
-    const auth = await authenticateRequest(request);
-    if (auth) await deleteAllUserSessions(auth.userId);
+    auth = await authenticateRequest(request);
+    if (auth) {
+      await deleteAllUserSessions(auth.userId);
+      logAccess({ ...auditActor(auth.session), operation: 'auth.logout', result: 'allowed', source: 'http' });
+    }
   } catch (err) {
     context.warn('[logout] session cleanup failed:', err instanceof Error ? err.message : err);
+    if (auth) {
+      logAccess({
+        ...auditActor(auth.session),
+        operation: 'auth.logout',
+        result: 'denied',
+        reason: 'session cleanup failed; the session may still be valid',
+        source: 'http',
+      });
+    }
   }
 
   const expired = {

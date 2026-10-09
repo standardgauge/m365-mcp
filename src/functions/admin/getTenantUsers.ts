@@ -1,5 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
-import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, authorizeAdmin } from '../../services/authMiddleware.js';
 import { getValidAccessTokenForSession, listActiveSessions, SESSION_TTL_MS } from '../../services/tokenCache.js';
 import { createGraphClient } from '../../services/graphClient.js';
 import { withSecurity } from '../../services/securityHeaders.js';
@@ -81,7 +81,7 @@ async function getTenantUsers(
       return { status: 401, jsonBody: { error: 'Authentication required' } };
     }
 
-    const isAdmin = await checkGlobalAdmin(auth.userId);
+    const isAdmin = await authorizeAdmin(auth, 'admin.tenant_users.read');
     if (!isAdmin) {
       return { status: 403, jsonBody: { error: 'Global Administrator role required' } };
     }

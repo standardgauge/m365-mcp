@@ -2,7 +2,8 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/fu
 import { getUserServiceOverrides, setUserServiceOverrides } from '../../services/userServiceOverrides.js';
 import { ALL_SERVICE_KEYS } from '../../services/serviceSettings.js';
 import { getTenantId } from '../../services/tokenCache.js';
-import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, auditAdminRefusal, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { auditActor, auditSnapshot, logAccess } from '../../services/auditLog.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 
 /**
@@ -40,6 +41,7 @@ async function manageUserServices(
       }
       // Non-admins can only query their own overrides
       if (!isAdmin && targetUserId !== auth.userId) {
+        auditAdminRefusal(auth, 'admin.user_services.read', `user:${targetUserId}`);
         return { status: 403, jsonBody: { error: 'You can only view your own service overrides' } };
       }
       const disabledServices = await getUserServiceOverrides(tenantId, targetUserId);
@@ -57,6 +59,7 @@ async function manageUserServices(
 
     // Non-admins can only modify their own overrides
     if (!isAdmin && body.userId !== auth.userId) {
+      auditAdminRefusal(auth, 'policy.user_services.set', `user:${body.userId}`);
       return { status: 403, jsonBody: { error: 'You can only modify your own service overrides' } };
     }
 
@@ -66,7 +69,17 @@ async function manageUserServices(
       return { status: 400, jsonBody: { error: `Invalid service key(s): ${invalid.join(', ')}` } };
     }
 
+    const before = await getUserServiceOverrides(tenantId, body.userId);
     await setUserServiceOverrides(tenantId, body.userId, body.disabledServices);
+    logAccess({
+      ...auditActor(auth.session),
+      operation: 'policy.user_services.set',
+      resource: `user:${body.userId}`,
+      result: 'allowed',
+      source: 'http',
+      before: auditSnapshot(before),
+      after: auditSnapshot(body.disabledServices),
+    });
     return { status: 200, jsonBody: { ok: true, userId: body.userId, disabledServices: body.disabledServices } };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

@@ -25,6 +25,7 @@ import type { AuthResult } from '../services/authMiddleware.js';
 
 const mockAuthenticateRequest = jest.fn<(req: HttpRequest) => Promise<AuthResult | null>>();
 const mockCheckGlobalAdmin = jest.fn<(userId: string) => Promise<boolean>>();
+const mockAuditAdminRefusal = jest.fn<(operation: string, resource?: string) => void>();
 const mockGetTenantId = jest.fn<(userId: string) => Promise<string>>();
 type Settings = {
   emailOutputMode: string;
@@ -41,6 +42,13 @@ const mockSetUserEmailSettings = jest.fn<
 jest.mock('../services/authMiddleware.js', () => ({
   authenticateRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
   checkGlobalAdmin: (userId: unknown) => mockCheckGlobalAdmin(userId as string),
+  auditAdminRefusal: (_auth: unknown, operation: unknown, resource?: unknown) =>
+    mockAuditAdminRefusal(operation as string, resource as string | undefined),
+  authorizeAdmin: async (auth: unknown, operation: unknown, resource?: unknown) => {
+    const isAdmin = await mockCheckGlobalAdmin((auth as AuthResult).userId);
+    if (!isAdmin) mockAuditAdminRefusal(operation as string, resource as string | undefined);
+    return isAdmin;
+  },
 }));
 
 jest.mock('../services/tokenCache.js', () => ({
@@ -67,6 +75,7 @@ jest.mock('../services/securityHeaders.js', () => ({
 }));
 
 jest.mock('../services/auditLog.js', () => ({
+  ...jest.requireActual<object>('../services/auditLog.js'),
   logAccess: (entry: unknown) => mockLogAccess(entry as Record<string, unknown>),
 }));
 
@@ -235,6 +244,7 @@ describe('POST /api/mail/settings', () => {
     expect(res.status).toBe(403);
     expect((res.jsonBody as { error: string }).error).toContain('your own');
     expect(mockSetUserEmailSettings).not.toHaveBeenCalled();
+    expect(mockAuditAdminRefusal).toHaveBeenCalledWith('set_email_output_mode', OTHER_USER);
   });
 
   it('returns 400 for invalid emailOutputMode', async () => {
@@ -327,13 +337,20 @@ describe('Enforced draft mode', () => {
     expect(mockGetUserEmailSettings).not.toHaveBeenCalled();
   });
 
-  it('POST writes and does not log a denial when no policy applies', async () => {
+  it('POST writes and audits the change, not a denial, when no policy applies', async () => {
     mockSetUserEmailSettings.mockResolvedValue(undefined);
 
     const res = await handler(makePostRequest({ emailOutputMode: 'send' }), makeContext());
 
     expect(res.status).toBe(200);
     expect(mockSetUserEmailSettings).toHaveBeenCalledWith(TENANT, CALLER_USER, { emailOutputMode: 'send' });
-    expect(mockLogAccess).not.toHaveBeenCalled();
+    expect(mockLogAccess).toHaveBeenCalledTimes(1);
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({
+      operation: 'set_email_output_mode',
+      resource: CALLER_USER,
+      result: 'allowed',
+      before: '{"emailOutputMode":"draft"}',
+      after: '{"emailOutputMode":"send"}',
+    }));
   });
 });

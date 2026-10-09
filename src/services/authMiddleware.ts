@@ -5,6 +5,7 @@ import { createGraphClient, acquireTokenSilent } from './graphClient.js';
 import { getValidAccessToken } from './tokenCache.js';
 import { checkBrowserOrigin, readCookie, verifyConsoleToken, CONSOLE_COOKIE } from './consoleSession.js';
 import type { ConsoleClaims } from './consoleSession.js';
+import { auditActor, logAccess } from './auditLog.js';
 
 // Well-known roleTemplateId for the Global Administrator built-in role
 const GLOBAL_ADMIN_ROLE_TEMPLATE_ID = '62e90394-69f5-4237-9190-012177145e10';
@@ -106,11 +107,25 @@ async function authenticateToken(token: string): Promise<AuthResult | null | 'un
         sessionCreatedAt: now,
       };
       await storeSession(refreshed);
+      logAccess({
+        ...auditActor(session),
+        operation: 'auth.session_renew',
+        result: 'allowed',
+        reason: `idle ${Math.round(elapsed / 60_000)}m`,
+        source: 'http',
+      });
       console.log(
         `[auth] Session TTL refresh succeeded for user ${session.userId} (idle ${Math.round(elapsed / 60_000)}m)`
       );
       return { userId: refreshed.userId, session: refreshed };
     } catch (err) {
+      logAccess({
+        ...auditActor(session),
+        operation: 'auth.session_renew',
+        result: 'denied',
+        reason: `silent token acquisition failed after idle ${Math.round(elapsed / 60_000)}m`,
+        source: 'http',
+      });
       console.error(
         `[auth] Session TTL refresh FAILED for user ${session.userId} ` +
         `(idle ${Math.round(elapsed / 60_000)}m):`,
@@ -222,6 +237,31 @@ export async function checkGlobalAdmin(userId: string, bearerToken?: string): Pr
   } catch {
     return false; // fail closed — deny if we cannot verify
   }
+}
+
+export const ADMIN_REQUIRED = 'Global Administrator role required';
+
+/**
+ * Record that a signed-in caller was refused an operation that needs Global
+ * Administrator. `operation` is the name the same change is audited under when
+ * it succeeds, so a refusal and a success sit side by side in the log.
+ */
+export function auditAdminRefusal(auth: AuthResult, operation: string, resource?: string): void {
+  logAccess({
+    ...auditActor(auth.session),
+    operation,
+    resource,
+    result: 'denied',
+    reason: ADMIN_REQUIRED,
+    source: 'http',
+  });
+}
+
+/** checkGlobalAdmin for an admin route, with the refusal audited. */
+export async function authorizeAdmin(auth: AuthResult, operation: string, resource?: string): Promise<boolean> {
+  const isAdmin = await checkGlobalAdmin(auth.userId);
+  if (!isAdmin) auditAdminRefusal(auth, operation, resource);
+  return isAdmin;
 }
 
 /**

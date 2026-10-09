@@ -20,6 +20,7 @@ type Scope = { scope: 'tenant' } | { scope: 'user'; userId: string };
 
 const mockAuthenticateRequest = jest.fn<(req: HttpRequest) => Promise<AuthResult | null>>();
 const mockCheckGlobalAdmin = jest.fn<(userId: string) => Promise<boolean>>();
+const mockAuditAdminRefusal = jest.fn<(operation: string, resource?: string) => void>();
 const mockGetTenantId = jest.fn<(userId: string) => Promise<string>>();
 const mockGetEmailOutputModePolicy = jest.fn<(tenantId: string, target: Scope) => Promise<Policy>>();
 const mockGetEmailOutputModeEnforcement = jest.fn<
@@ -33,6 +34,13 @@ const mockLogAccess = jest.fn<(entry: Record<string, unknown>) => void>();
 jest.mock('../services/authMiddleware.js', () => ({
   authenticateConsoleRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
   checkGlobalAdmin: (userId: unknown) => mockCheckGlobalAdmin(userId as string),
+  auditAdminRefusal: (_auth: unknown, operation: unknown, resource?: unknown) =>
+    mockAuditAdminRefusal(operation as string, resource as string | undefined),
+  authorizeAdmin: async (auth: unknown, operation: unknown, resource?: unknown) => {
+    const isAdmin = await mockCheckGlobalAdmin((auth as AuthResult).userId);
+    if (!isAdmin) mockAuditAdminRefusal(operation as string, resource as string | undefined);
+    return isAdmin;
+  },
 }));
 
 jest.mock('../services/tokenCache.js', () => ({
@@ -49,6 +57,7 @@ jest.mock('../services/userEmailSettings.js', () => ({
 }));
 
 jest.mock('../services/auditLog.js', () => ({
+  ...jest.requireActual<object>('../services/auditLog.js'),
   logAccess: (entry: unknown) => mockLogAccess(entry as Record<string, unknown>),
 }));
 
@@ -169,6 +178,7 @@ describe('gating', () => {
     expect(res.status).toBe(403);
     expect(mockSetEmailOutputModePolicy).not.toHaveBeenCalled();
     expect(mockLogAccess).not.toHaveBeenCalled();
+    expect(mockAuditAdminRefusal).toHaveBeenCalledWith('set_email_output_policy', undefined);
   });
 });
 
@@ -218,17 +228,24 @@ describe('POST /api/manage/email-output-policy', () => {
       operation: 'set_email_output_policy',
       resource: 'tenant',
       result: 'allowed',
-      reason: 'enforceDraft=true',
       source: 'http',
+      before: '{"enforceDraft":false}',
+      after: '{"enforceDraft":true}',
     }));
   });
 
   it('clears the tenant policy with enforceDraft=false', async () => {
+    mockGetEmailOutputModePolicy.mockResolvedValue({ enforceDraft: true, updatedAt: 'ts', updatedBy: ADMIN_USER });
+    mockSetEmailOutputModePolicy.mockResolvedValue({ enforceDraft: false, updatedAt: 'ts2', updatedBy: ADMIN_USER });
     const res = await handler(makePostRequest({ scope: 'tenant', enforceDraft: false }), makeContext());
 
     expect(res.status).toBe(200);
     expect(mockSetEmailOutputModePolicy).toHaveBeenCalledWith(TENANT, { scope: 'tenant' }, false, ADMIN_USER);
-    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ resource: 'tenant', reason: 'enforceDraft=false' }));
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({
+      resource: 'tenant',
+      before: '{"enforceDraft":true}',
+      after: '{"enforceDraft":false}',
+    }));
   });
 
   it('enforces draft mode for one user', async () => {

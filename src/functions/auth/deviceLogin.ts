@@ -6,6 +6,21 @@ import { extractTenantId } from '../../services/tenantUtils.js';
 import { randomBytes } from 'crypto';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { withRateLimit } from '../../services/rateLimit.js';
+import { auditActor, auditTenantId, logAccess } from '../../services/auditLog.js';
+
+/** A device-code sign-in that did not produce a session. */
+function auditDeviceLoginFailure(reason: string, resource?: string): void {
+  logAccess({
+    tenantId: auditTenantId(),
+    userId: '',
+    userEmail: '',
+    operation: 'auth.device_login',
+    resource,
+    result: 'denied',
+    reason,
+    source: 'http',
+  });
+}
 
 /**
  * GET /api/auth/device
@@ -16,6 +31,9 @@ import { withRateLimit } from '../../services/rateLimit.js';
  * resolves with the token response.
  *
  * Use this when the browser-redirect flow is blocked by tenant CA/SSO policies.
+ *
+ * The outcome is audited as `auth.device_login` when the flow finishes, which
+ * can be up to fifteen minutes after this request returned.
  */
 async function deviceLogin(
   _request: HttpRequest,
@@ -52,6 +70,7 @@ async function deviceLogin(
     .then(async (response) => {
       if (!response?.accessToken || !response.account) {
         context.error('deviceLogin: token response missing accessToken or account');
+        auditDeviceLoginFailure('token response missing accessToken or account');
         return;
       }
 
@@ -67,6 +86,7 @@ async function deviceLogin(
       const expectedTenantId = process.env.AZURE_TENANT_ID;
       if (expectedTenantId && tenantId !== expectedTenantId) {
         context.error(`deviceLogin: tenant mismatch — user tenant ${tenantId} does not match expected ${expectedTenantId}`);
+        auditDeviceLoginFailure('foreign tenant', `tenant:${tenantId}`);
         return;
       }
 
@@ -85,11 +105,15 @@ async function deviceLogin(
       };
 
       await storeSession(session);
+      // The address is the one that started the flow, not the device the user
+      // signed in on: the server never sees the latter.
+      logAccess({ ...auditActor(session), operation: 'auth.device_login', result: 'allowed', source: 'http' });
       context.log(`deviceLogin: session stored for ${session.email} (${session.userId})`);
     })
     .catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       context.error('deviceLogin: token acquisition failed:', message);
+      auditDeviceLoginFailure('token acquisition failed');
     });
 
   return {

@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import { consumeInstallNonce } from '../../services/tableStorage.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { withRateLimit } from '../../services/rateLimit.js';
+import { auditTenantId, logAccess } from '../../services/auditLog.js';
 
 // The verifier is 16 random bytes in hex (32 chars). The CLI keeps the verifier
 // and sends only SHA256(verifier) — the code_challenge — in the login URL.
@@ -49,6 +50,18 @@ async function installPoll(
 
   const result = await consumeInstallNonce(challenge);
   if (result === null) {
+    // A verifier whose record has expired. Unknown verifiers read as pending
+    // (see consumeInstallNonce), so they are not recorded here.
+    logAccess({
+      tenantId: auditTenantId(),
+      userId: '',
+      userEmail: '',
+      operation: 'auth.install_handoff',
+      resource: 'poll',
+      result: 'denied',
+      reason: 'install nonce expired',
+      source: 'http',
+    });
     return {
       status: 410,
       jsonBody: { error: 'Nonce unknown, expired, or already consumed' },
@@ -60,6 +73,18 @@ async function installPoll(
       jsonBody: { status: 'pending' },
     };
   }
+
+  logAccess({
+    tenantId: auditTenantId(result.tenantId),
+    userId: result.userId,
+    userEmail: result.email,
+    deviceLabel: result.deviceLabel,
+    operation: 'auth.install_handoff',
+    resource: 'poll',
+    result: 'allowed',
+    reason: 'session token handed to the installer',
+    source: 'http',
+  });
 
   return {
     status: 200,

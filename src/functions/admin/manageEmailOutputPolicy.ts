@@ -5,9 +5,9 @@ import {
   setEmailOutputModePolicy,
 } from '../../services/userEmailSettings.js';
 import { getTenantId } from '../../services/tokenCache.js';
-import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, authorizeAdmin } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
-import { logAccess } from '../../services/auditLog.js';
+import { auditActor, auditSnapshot, logAccess } from '../../services/auditLog.js';
 
 /**
  * Admin endpoint for the enforced draft-mode policy.
@@ -43,7 +43,10 @@ async function manageEmailOutputPolicy(
       return { status: 401, jsonBody: { error: 'Authentication required' } };
     }
 
-    const isAdmin = await checkGlobalAdmin(auth.userId);
+    const isAdmin = await authorizeAdmin(
+      auth,
+      request.method === 'GET' ? 'admin.email_output_policy.read' : 'set_email_output_policy',
+    );
     if (!isAdmin) {
       return { status: 403, jsonBody: { error: 'Global Administrator role required' } };
     }
@@ -89,19 +92,18 @@ async function manageEmailOutputPolicy(
     const target = body.scope === 'tenant'
       ? { scope: 'tenant' as const }
       : { scope: 'user' as const, userId: body.userId as string };
+    const before = await getEmailOutputModePolicy(tenantId, target);
     const policy = await setEmailOutputModePolicy(tenantId, target, body.enforceDraft, auth.userId);
 
     const resource = target.scope === 'tenant' ? 'tenant' : `user:${target.userId}`;
     logAccess({
-      tenantId,
-      userId: auth.userId,
-      userEmail: auth.session.email,
-      deviceLabel: auth.session.deviceLabel,
+      ...auditActor(auth.session),
       operation: 'set_email_output_policy',
       resource,
       result: 'allowed',
-      reason: `enforceDraft=${body.enforceDraft}`,
       source: 'http',
+      before: auditSnapshot({ enforceDraft: before.enforceDraft }),
+      after: auditSnapshot({ enforceDraft: policy.enforceDraft }),
     });
     console.log(
       `[audit] email-output-policy-set admin=${auth.userId} target=${resource} enforceDraft=${body.enforceDraft} ts=${policy.updatedAt}`,

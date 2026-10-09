@@ -1,5 +1,6 @@
 import type { HttpHandler, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { isIP } from 'net';
+import { forwardedClientEntry, stripAddress } from './clientAddress.js';
 
 // Per-client-address request limiter for the unauthenticated public endpoints
 // (login, device, install-poll, mcp).
@@ -19,9 +20,7 @@ import { isIP } from 'net';
 //                                  route (LOGIN, DEVICE, INSTALL_POLL, MCP).
 //                                  0 turns the limiter off for the route.
 //   RATE_LIMIT_TRUSTED_PROXY_HOPS  how many proxies in front of the app append
-//                                  to X-Forwarded-For. Default 1, the Container
-//                                  Apps ingress. Set 2 behind Front Door or an
-//                                  Application Gateway.
+//                                  to X-Forwarded-For (see clientAddress.ts).
 
 export type RateLimitedRoute = 'login' | 'device' | 'install-poll' | 'mcp';
 
@@ -60,27 +59,11 @@ export function limitFor(route: RateLimitedRoute): number {
   return n;
 }
 
-function trustedHops(): number {
-  const n = Number(process.env.RATE_LIMIT_TRUSTED_PROXY_HOPS ?? '1');
-  return Number.isInteger(n) && n >= 1 ? n : 1;
-}
-
 // Reduce one X-Forwarded-For entry to a bucket key: drop any port, and key
 // IPv6 by its /64 so one host cannot rotate through its own prefix.
 export function normalizeAddress(entry: string): string {
-  let addr = entry.trim().toLowerCase();
-  if (addr.startsWith('[')) {
-    // [v6] or [v6]:port
-    const close = addr.indexOf(']');
-    if (close > 0) addr = addr.slice(1, close);
-  } else if (addr.indexOf(':') === addr.lastIndexOf(':') && addr.includes(':')) {
-    // v4:port (a bare v6 address always has at least two colons)
-    addr = addr.slice(0, addr.indexOf(':'));
-  }
+  const addr = stripAddress(entry);
   if (isIP(addr) !== 6) return addr;
-
-  // IPv4-mapped IPv6 is the IPv4 address.
-  if (addr.startsWith('::ffff:') && isIP(addr.slice(7)) === 4) return addr.slice(7);
 
   const [head, tail] = addr.split('::');
   const left = head ? head.split(':') : [];
@@ -94,12 +77,8 @@ export function normalizeAddress(entry: string): string {
 // is the H-th entry from the right. Entries further left were supplied by the
 // client and are ignored: keying on them would let a caller pick its own bucket.
 export function clientAddress(request: HttpRequest): string {
-  const header = request.headers?.get('x-forwarded-for');
-  if (!header) return 'unknown';
-  const entries = header.split(',').map((s) => s.trim()).filter(Boolean);
-  if (entries.length === 0) return 'unknown';
-  const idx = Math.max(0, entries.length - trustedHops());
-  return normalizeAddress(entries[idx]);
+  const entry = forwardedClientEntry(request);
+  return entry ? normalizeAddress(entry) : 'unknown';
 }
 
 /**

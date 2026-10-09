@@ -50,6 +50,8 @@ export interface AuditLogAnalyticsRecord {
   Reason?: string;
   Source: 'http' | 'mcp';
   ClientIp?: string;
+  Before?: string;
+  After?: string;
 }
 
 /**
@@ -76,6 +78,8 @@ export function toLogAnalyticsRecord(
   if (entry.resource) record.TargetResource = entry.resource;
   if (entry.reason) record.Reason = entry.reason;
   if (entry.ip) record.ClientIp = entry.ip;
+  if (entry.before) record.Before = entry.before;
+  if (entry.after) record.After = entry.after;
   return record;
 }
 

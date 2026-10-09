@@ -1,4 +1,5 @@
 import type { HttpHandler, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
+import { runWithClientAddress } from './clientAddress.js';
 
 // Default response headers applied to every wrapped Azure Functions handler.
 //
@@ -59,7 +60,8 @@ export const adminSpaHeaders = {
 // can opt into Cache-Control, Content-Type, etc. without being overridden).
 export function withSecurity(handler: HttpHandler): HttpHandler {
   return async (request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> => {
-    const result = (await handler(request, context)) ?? {};
+    // Audit rows written while handling this request record its client address.
+    const result = (await runWithClientAddress(request, () => handler(request, context))) ?? {};
     return {
       ...result,
       headers: {
