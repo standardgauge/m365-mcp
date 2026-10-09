@@ -1,4 +1,5 @@
 import { TableClient, TableServiceClient } from '@azure/data-tables';
+import { sendToLogAnalytics, toLogAnalyticsRecord } from './auditLogAnalytics.js';
 
 const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
 let auditTable: TableClient | null = null;
@@ -47,10 +48,21 @@ function makeReverseRowKey(): string {
 
 /**
  * Fire-and-forget audit log write. Never throws — logs errors to console.error.
+ *
+ * Each event goes to two places: the auditLog table the admin screen reads,
+ * and, when configured, the instance's Log Analytics workspace (the
+ * authoritative record; see auditLogAnalytics.ts). The table RowKey travels to
+ * Log Analytics as EventId so the two copies can be joined.
  */
 export function logAccess(entry: AuditEntry): void {
   const timestamp = new Date().toISOString();
   const rowKey = makeReverseRowKey();
+
+  try {
+    sendToLogAnalytics(toLogAnalyticsRecord(entry, timestamp, rowKey));
+  } catch (err: unknown) {
+    console.error('[auditLog] Failed to queue audit entry for Log Analytics:', err instanceof Error ? err.message : err);
+  }
 
   ensureAuditTable().then(() => {
     return getAuditTable().upsertEntity({

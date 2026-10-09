@@ -146,9 +146,12 @@ ContainerAppConsoleLogs_CL
 ### Application audit log
 
 Every allowed and denied call on both the REST and MCP surfaces is written to
-the `auditLog` table in the tenant's storage account: tenant, user, device
-label, operation, resource, result, reason, source, client IP, timestamp. A
-Global Administrator reads it in the admin UI (Audit Log) or exports it:
+two places. The **authoritative record** is the `M365McpAudit_CL` table in the
+instance's Log Analytics workspace (next section), which is where a security
+team or SIEM should read it. A working copy goes to the `auditLog` table in the
+tenant's storage account: tenant, user, device label, operation, resource,
+result, reason, source, client IP, timestamp. That copy backs the admin screen;
+a Global Administrator reads it in the admin UI (Audit Log) or exports it:
 
 ```
 # JSON, newest first, filters are optional
@@ -219,6 +222,139 @@ Change it with
 and change `retentionInDays` in the Bicep to match so the next deployment does
 not put it back. Record the verified value with the rest of the deployment's
 own notes, outside this repository.
+
+### Audit trail in Log Analytics
+
+Each audit event is also sent through the Azure Monitor Logs Ingestion API to a
+custom table, `M365McpAudit_CL`, in the instance's own Log Analytics workspace
+(`m365-mcp-logs`), in the client's subscription. `infra/audit-ingestion.bicep`
+defines the table and the data collection rule `m365-mcp-audit-dcr` that feeds
+it; `infra/main.bicep` and `infra/container-app.bicep` deploy both and grant the
+Container App's system-assigned identity **Monitoring Metrics Publisher on that
+rule only**. The identity can append rows to this one stream; it cannot read the
+workspace or write anywhere else.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `TimeGenerated` | datetime | When the server recorded the event (UTC) |
+| `EventId` | string | Same value as the `auditLog` table's RowKey, to join the two copies |
+| `EntraTenantId` | string | Entra tenant of the caller (`TenantId` is reserved by Log Analytics for the workspace id) |
+| `UserId` | string | Entra object id of the caller |
+| `UserEmail` | string | Caller's UPN |
+| `DeviceLabel` | string | Device label from the session, when present |
+| `Operation` | string | e.g. `mail.search_mail`, `sharepoint.read_file` |
+| `TargetResource` | string | Message id, site/path, folder, when the operation has one |
+| `Result` | string | `allowed` or `denied` |
+| `Reason` | string | Why a call was denied |
+| `Source` | string | `mcp` or `http` |
+| `ClientIp` | string | Caller IP as seen by the server, when known |
+
+Retention follows the workspace (90 days in the Bicep). To keep the audit table
+longer than the console logs, set it on the table alone:
+
+```
+az monitor log-analytics workspace table update -g rg-m365-mcp \
+  --workspace-name m365-mcp-logs -n M365McpAudit_CL \
+  --retention-time 90 --total-retention-time 730
+```
+
+Queries (portal: **rg-m365-mcp → m365-mcp-logs → Logs**):
+
+```
+// Denied calls in the last 24 hours, by user and reason
+M365McpAudit_CL
+| where TimeGenerated > ago(24h) and Result == "denied"
+| summarize Denials = count(), Operations = make_set(Operation) by UserEmail, Reason
+| order by Denials desc
+
+// Everything one user did in a window
+M365McpAudit_CL
+| where UserEmail =~ "adele@fabrikam.com"
+| where TimeGenerated between (datetime(2026-01-01) .. datetime(2026-01-02))
+| project TimeGenerated, Operation, TargetResource, Result, Reason, Source, ClientIp
+| order by TimeGenerated asc
+```
+
+**Pointing Sentinel or another SIEM at it.** The table lives in the client's
+workspace, so the client's tooling owns what happens next:
+
+- *Sentinel on this workspace:* enable Microsoft Sentinel on `m365-mcp-logs` and
+  the table is immediately available to hunting queries and analytics rules.
+  Use the queries above as the starting point for a scheduled rule.
+- *Sentinel on a different workspace:* query across workspaces from the central
+  one, `workspace("<m365-mcp-logs resource id>").M365McpAudit_CL`, or export
+  the table into it with a data export rule.
+- *Any other SIEM (Splunk, Elastic, QRadar…):* export the table to an Event Hub
+  and point the SIEM's Event Hub connector at it:
+
+  ```
+  az monitor log-analytics workspace data-export create -g rg-m365-mcp \
+    --workspace-name m365-mcp-logs -n audit-to-siem \
+    --tables M365McpAudit_CL \
+    --destination <event hub namespace resource id>
+  ```
+
+**When a write fails, the server does nothing about it.** It logs
+`[auditLog] Failed to send N audit event(s) to Log Analytics` to the console and
+drops that batch; requests are not blocked and the server raises no alert of
+its own. The storage-table copy is written independently. Detecting a gap is the
+client's security tooling's job. Two signals to alert on:
+
+```
+// Upload failures reported by the server
+ContainerAppConsoleLogs_CL
+| where Log_s has "Failed to send" and Log_s has "Log Analytics"
+
+// The audit stream went quiet while the app was serving traffic
+M365McpAudit_CL
+| summarize Last = max(TimeGenerated)
+| where Last < ago(6h)
+```
+
+Events are sent in batches of up to 100, at most one second after the first
+event in a batch, so a replica killed mid-batch can lose up to a second of
+events from Log Analytics. They still reach the storage table.
+
+**Turning it on for an instance deployed before this existed.** The deploy
+workflow only swaps the image; it never applies Bicep. Either re-run the full
+`az deployment group create` with `infra/main.bicep`, or add just the audit
+pieces:
+
+```
+az deployment group create -g rg-m365-mcp \
+  --template-file infra/audit-ingestion.bicep \
+  --parameters location=<region of m365-mcp-logs> workspaceName=m365-mcp-logs \
+               dataCollectionRuleName=m365-mcp-audit-dcr \
+  --query properties.outputs
+# Note logsIngestionEndpoint and dataCollectionRuleImmutableId from the output.
+
+PRINCIPAL=$(az containerapp show -n m365-mcp -g rg-m365-mcp --query identity.principalId -o tsv)
+DCR_ID=$(az resource show -g rg-m365-mcp -n m365-mcp-audit-dcr \
+  --resource-type Microsoft.Insights/dataCollectionRules --query id -o tsv)
+az role assignment create --assignee-object-id "$PRINCIPAL" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Monitoring Metrics Publisher" --scope "$DCR_ID"
+
+az containerapp update -n m365-mcp -g rg-m365-mcp --set-env-vars \
+  AUDIT_LOGS_INGESTION_ENDPOINT=<logsIngestionEndpoint> \
+  AUDIT_DCR_IMMUTABLE_ID=<dataCollectionRuleImmutableId> \
+  AUDIT_DCR_STREAM_NAME=Custom-M365McpAudit
+```
+
+Without `AUDIT_LOGS_INGESTION_ENDPOINT` and `AUDIT_DCR_IMMUTABLE_ID` the server
+writes the storage table only. Expect `403` upload failures in the console for
+up to about half an hour after the role assignment while it propagates, and the
+first rows to take several minutes to appear in a newly created table. Verify
+with one tool call, then `M365McpAudit_CL | take 10`.
+
+**Why not Application Insights.** The server already sends console output to
+Application Insights, and `trackEvent` would put rows in the same workspace's
+`AppEvents` table. It is not used for the audit record because the App Insights
+connection string authenticates nothing (anyone holding it can write
+indistinguishable rows), telemetry is subject to sampling and the App Insights
+daily cap, and events arrive as an untyped property bag in a table shared with
+every other custom event. The Logs Ingestion API path accepts only callers
+holding the role on this rule and lands typed columns in a table of its own.
 
 ### Revision history
 ```
@@ -701,7 +837,8 @@ Ordered by speed. Each step stands alone; in an incident, do 1 and 3 first.
   5. **Delete the client secret** on the app registration. The server can no longer redeem authorization codes or refresh tokens.
   6. **Stop traffic:** `az containerapp ingress disable -n m365-mcp -g rg-m365-mcp`, or scale to zero, or delete the app. Storage and keys survive unless deleted.
 
-Then: export the audit log for the window (`/api/manage/audit-log?startDate=…&format=csv`),
+Then: pull the audit trail for the window from `M365McpAudit_CL` (or export the
+admin copy, `/api/manage/audit-log?startDate=…&format=csv`),
 pull Entra sign-in logs for the app registration, and read the container logs
 for the same window. Users get back in by re-authenticating once you re-enable
 the application.
@@ -712,8 +849,8 @@ the application.
 
   1. Pin the instance (`gh variable delete AUTO_UPDATE -R <fork>`) so nothing rolls mid-teardown.
   2. Tell users; the extension will report "Session expired" and can be removed from Claude Desktop.
-  3. Export the audit log if the record is needed.
-  4. `az group delete -n rg-m365-mcp`: Container App, environment, ACR, storage (every session, cache and audit row) and the Log Analytics workspace go together.
+  3. Export the audit log if the record is needed. The authoritative copy is `M365McpAudit_CL` in the Log Analytics workspace, which step 4 deletes; a SIEM that already ingests it keeps its own copy.
+  4. `az group delete -n rg-m365-mcp`: Container App, environment, ACR, storage (every session, cache and audit row) and the Log Analytics workspace (including the audit table) go together.
   5. Delete the app registration in Entra, or at least the client secret and the consent grants; every refresh token the instance held becomes unusable.
   6. Delete the fork, or leave it pinned as a record.
 

@@ -97,7 +97,7 @@ You need an Azure subscription and an Entra ID tenant you can register an applic
 
 Create a resource group, an Azure Container Registry, a storage account, and a Container App. Naming is yours to choose; record the names because they become the environment block of your deploy workflow.
 
-The Bicep templates under `infra/` provision this. `infra/main.bicep` is the full-stack template (storage account and tables, registry, identity, Log Analytics, Application Insights, environment, Container App); `infra/container-app.bicep` is the same without the storage account, for a deployment that brings its own. Entra setup, in order, with verification checkpoints: [`docs/entra-setup.md`](docs/entra-setup.md).
+The Bicep templates under `infra/` provision this. `infra/main.bicep` is the full-stack template (storage account and tables, registry, identity, Log Analytics with the audit table and its data collection rule, Application Insights, environment, Container App); `infra/container-app.bicep` is the same without the storage account, for a deployment that brings its own. Entra setup, in order, with verification checkpoints: [`docs/entra-setup.md`](docs/entra-setup.md).
 
 ### 2. Entra app registration
 
