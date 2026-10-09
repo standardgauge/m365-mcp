@@ -78,6 +78,16 @@ USER app
 
 EXPOSE 8080
 
+# Container health for Docker and anything else that reads the image's own
+# check (Trivy DS-0026). Azure Container Apps ignores HEALTHCHECK and runs the
+# probes in infra/probes.json instead; both hit the same route on the same port.
+# Asserts the JSON body rather than the status alone, because an unmatched path
+# can still answer 200 from the admin SPA (docs/operations-runbook.md, Health
+# probe). Node rather than curl: the runtime image is not guaranteed to ship
+# curl, and node is what it runs.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD ["node", "-e", "fetch('http://127.0.0.1:8080/health',{signal:AbortSignal.timeout(4000)}).then(r=>r.json()).then(b=>process.exit(b.status==='ok'?0:1),()=>process.exit(1))"]
+
 # Validate MCP_SESSION_HMAC_KEY and MCP_DATA_ENCRYPTION_KEY before the Functions
 # host starts. The keys are otherwise read lazily on first use, so a container
 # missing one booted, passed /health, and failed on the first sign-in. With the

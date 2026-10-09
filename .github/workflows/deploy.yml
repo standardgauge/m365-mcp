@@ -213,6 +213,89 @@ jobs:
             echo "- **Ingress:** moved targetPort from ${current} to ${CONTAINER_PORT}" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # Same reasoning for the probes: they are in the Bicep, but nothing here
+      # applies Bicep, so an existing app would otherwise keep the ingress
+      # defaults forever. Converge the app container's probes to
+      # infra/probes.json. A no-op once they match; otherwise one PATCH that
+      # replaces only the container list (JSON merge patch replaces arrays
+      # whole, and everything else in the template is left alone), so the
+      # first converge rolls one revision on the image already running. That
+      # image serves /health, which the smoke step below has required since
+      # the route shipped. The image update after it carries the probes over.
+      - name: Ensure container probes target /health
+        run: |
+          set -euo pipefail
+          # True when every field set in $w is equal in the input, so fields
+          # ARM fills in with defaults do not count as drift.
+          COVERS='def covers($w): . as $h
+            | if ($w | type) == "object"
+              then ($h | type) == "object" and all($w | keys[]; . as $k | $h[$k] | covers($w[$k]))
+              else $h == $w end;'
+          MATCHES="${COVERS}"' (.probes // []) as $h
+            | ($h | length) == ($want | length)
+              and all($want[]; . as $w | any($h[]; covers($w)))'
+
+          want=$(jq -c . infra/probes.json)
+          read_app() {
+            az containerapp show \
+              --name "${CONTAINER_APP_NAME}" \
+              --resource-group "${AZURE_RESOURCE_GROUP}" -o json
+          }
+          # The app container: the only one, or the one named after the app.
+          pick='.properties.template.containers as $c
+            | if ($c | length) == 1 then 0 else ($c | map(.name) | index($name)) end'
+
+          app=$(read_app)
+          idx=$(jq --arg name "$CONTAINER_APP_NAME" "$pick" <<<"$app")
+          if [ "$idx" = "null" ]; then
+            echo "::error::cannot tell which container is the app: none is named '${CONTAINER_APP_NAME}'"
+            exit 1
+          fi
+          container=".properties.template.containers[${idx}]"
+
+          if jq -e --argjson want "$want" "${container} | ${MATCHES}" <<<"$app" >/dev/null; then
+            echo "probes already match infra/probes.json"
+            exit 0
+          fi
+
+          echo "probes differ from infra/probes.json, converging"
+          jq -c "${container}.probes // []" <<<"$app"
+          id=$(jq -r .id <<<"$app")
+          # Nulls dropped: the Container Apps PATCH reads a null as "delete".
+          body=$(jq -c --argjson i "$idx" --argjson want "$want" '
+            {properties: {template: {containers: (
+              .properties.template.containers
+              | .[$i].probes = $want
+              | walk(if type == "object" then with_entries(select(.value != null)) else . end)
+            )}}}' <<<"$app")
+          az rest --method patch \
+            --url "${id}?api-version=2024-03-01" \
+            --body "$body" --output none
+
+          # az rest does not follow the long-running operation, and the image
+          # update below is refused while one is in flight. Wait it out, then
+          # read the probes back rather than trusting the PATCH status.
+          deadline=$(( $(date +%s) + 600 ))
+          while :; do
+            sleep 10
+            app=$(read_app)
+            state=$(jq -r '.properties.provisioningState' <<<"$app")
+            case "$state" in
+              Succeeded) break ;;
+              Failed|Canceled) echo "::error::probe update ended ${state}"; exit 1 ;;
+            esac
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::probe update still ${state} after 600s"
+              exit 1
+            fi
+          done
+          if ! jq -e --argjson want "$want" "${container} | ${MATCHES}" <<<"$app" >/dev/null; then
+            echo "::error::PATCH succeeded but the app's probes still differ from infra/probes.json"
+            jq -c "${container}.probes // []" <<<"$app"
+            exit 1
+          fi
+          echo "- **Probes:** converged to infra/probes.json" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Update Container App
         env:
           DEPLOY_IMAGE: ${{ steps.meta.outputs.image }}

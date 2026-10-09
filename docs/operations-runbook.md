@@ -87,6 +87,33 @@ months — it could not have failed even with the API completely dead. Unmatched
 `.sha` is the deployed commit, so the same call answers "is it up" and "is it
 running what I think it is".
 
+The platform checks the same route on its own:
+
+- **Container Apps** runs startup, readiness and liveness probes, `GET /health`
+  on port 8080, defined once in `infra/probes.json`. Both Bicep templates load
+  that file, and the deploy workflow converges a live app's probes to it before
+  each image update (the "Ensure container probes target /health" step), so an
+  app that was never deployed from Bicep picks them up on its next deploy.
+  Startup allows about 160s for the Functions host to come up, readiness pulls a
+  replica out of rotation after 3 misses 10s apart, and liveness restarts it
+  after 3 misses 30s apart. These probes see the status code only, which is
+  safe here because `/health` is a literal route and wins over the SPA
+  catch-all.
+- **Docker** runs the image's `HEALTHCHECK`, which also asserts the body.
+  Container Apps ignores it; it is there for `docker run`, compose and scanners.
+
+To see why a revision is failing its probes:
+
+```
+az containerapp revision list -n <app> -g <rg> \
+  --query "[].{name:name,health:properties.healthState,running:properties.runningState}" -o table
+az containerapp logs show -n <app> -g <rg> --type system --tail 50
+```
+
+To change a probe, edit `infra/probes.json`. The next deploy rolls it out
+everywhere; `src/__tests__/healthProbeInvariant.test.ts` holds its path and
+port to the route and the image.
+
 There is no external probe unless you add one. Run these same conditions from it.
 
 ### Session table check
