@@ -1,0 +1,52 @@
+{
+  "Account": {
+    "99999999-8888-4777-8666-555555555555.72f988bf-0000-4000-8000-00000000c0de-login.windows.net-72f988bf-0000-4000-8000-00000000c0de": {
+      "home_account_id": "99999999-8888-4777-8666-555555555555.72f988bf-0000-4000-8000-00000000c0de",
+      "environment": "login.windows.net",
+      "realm": "72f988bf-0000-4000-8000-00000000c0de",
+      "local_account_id": "99999999-8888-4777-8666-555555555555",
+      "username": "adele.vance@fabrikam.com",
+      "authority_type": "MSSTS",
+      "name": "Adele Vance",
+      "client_info": "eyJ1aWQiOiI5OTk5OTk5OS04ODg4LTQ3NzctODY2Ni01NTU1NTU1NTU1NTUiLCJ1dGlkIjoiNzJmOTg4YmYtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBjMGRlIn0",
+      "tenantProfiles": [
+        "{\"tenantId\":\"72f988bf-0000-4000-8000-00000000c0de\",\"localAccountId\":\"99999999-8888-4777-8666-555555555555\",\"name\":\"Adele Vance\",\"isHomeTenant\":true}"
+      ]
+    }
+  },
+  "IdToken": {
+    "99999999-8888-4777-8666-555555555555.72f988bf-0000-4000-8000-00000000c0de-login.windows.net-idtoken-11111111-2222-4333-8444-555555555555-72f988bf-0000-4000-8000-00000000c0de---": {
+      "home_account_id": "99999999-8888-4777-8666-555555555555.72f988bf-0000-4000-8000-00000000c0de",
+      "environment": "login.windows.net",
+      "credential_type": "IdToken",
+      "client_id": "11111111-2222-4333-8444-555555555555",
+      "secret": "__FAKE_ID_TOKEN__",
+      "realm": "72f988bf-0000-4000-8000-00000000c0de"
+    }
+  },
+  "AccessToken": {
+    "99999999-8888-4777-8666-555555555555.72f988bf-0000-4000-8000-00000000c0de-login.windows.net-accesstoken-11111111-2222-4333-8444-555555555555-72f988bf-0000-4000-8000-00000000c0de-sites.readwrite.all files.readwrite.all mail.readwrite mail.readbasic user.read contacts.readwrite directory.read.all--": {
+      "home_account_id": "99999999-8888-4777-8666-555555555555.72f988bf-0000-4000-8000-00000000c0de",
+      "environment": "login.windows.net",
+      "credential_type": "AccessToken",
+      "client_id": "11111111-2222-4333-8444-555555555555",
+      "secret": "fake-access-token-1",
+      "realm": "72f988bf-0000-4000-8000-00000000c0de",
+      "target": "Sites.ReadWrite.All Files.ReadWrite.All Mail.ReadWrite Mail.ReadBasic User.Read Contacts.ReadWrite Directory.Read.All",
+      "cached_at": "1791566898",
+      "expires_on": "1791566958",
+      "extended_expires_on": "1791567018",
+      "token_type": "Bearer"
+    }
+  },
+  "RefreshToken": {
+    "99999999-8888-4777-8666-555555555555.72f988bf-0000-4000-8000-00000000c0de-login.windows.net-refreshtoken-11111111-2222-4333-8444-555555555555----": {
+      "home_account_id": "99999999-8888-4777-8666-555555555555.72f988bf-0000-4000-8000-00000000c0de",
+      "environment": "login.windows.net",
+      "credential_type": "RefreshToken",
+      "client_id": "11111111-2222-4333-8444-555555555555",
+      "secret": "fake-refresh-token-1"
+    }
+  },
+  "AppMetadata": {}
+}
