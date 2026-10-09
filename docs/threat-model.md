@@ -368,7 +368,7 @@ shim's local-file limits.
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
 | 10.1 | D | Flooding public endpoints. | Per-address limit on `login`, `install-poll`, `install-confirm`, `mcp` and `device`, keyed on the ingress-appended forwarded address (IPv6 by `/64`), answering `429`. Optional ingress IP restriction for tenants with named egress. Container Apps scales to three replicas. | The limit is per replica and in memory, so three replicas allow three times it, and a distributed source with many addresses is not slowed. A volumetric attack needs an edge service (Front Door with WAF rate rules); not in the templates. |
-| 10.2 | D | An unknown bearer token costs a table scan. | Fast path is a single row lookup. | On a miss the server scans the whole `mcpSessions` partition looking for legacy rows, for up to three token candidates per request, before rejecting. A JSON-RPC batch has no size limit. **G14** |
+| 10.2 | D | An unknown bearer token or an oversized request costs disproportionate work. | A token lookup is one point read on its hash, hit or miss: rows from before multi-session support are re-keyed to the hash (or dropped, if no token can reach them) once at process start, so there is no scan fallback. A request carries at most three token candidates, so at most three reads. A JSON-RPC batch is capped at 20 messages; an empty or larger batch gets `-32600` before any session lookup. | None. |
 | 10.3 | D | MSAL cache write failure signs users out. | A failed or losing write is logged and the account's existing row stands, so the next refresh uses the refresh token already there. Writes do not fail for size, because a row holds one account. | None. |
 | 10.4 | D | Cold start. | Minimum one replica in the templates. | Operator setting. |
 
@@ -400,7 +400,6 @@ separately" in the tables and are not repeated here.
 | G8 | Medium | 7, 8 Audit | Auth events and admin policy changes are not audited; MCP rows have no client address; REST rows trust the leftmost forwarded address. |
 | G10 | Medium | 4 Client update | Extension auto-update is unsigned, writes payload paths without containment, and bakes in an origin from forwarded headers. |
 | G13 | Low | 3 Session | The 7-day idle window renews silently instead of ending the session; sessions with no timestamps skip the 30-day cap; runbook overstates the idle timeout. |
-| G14 | Low | 10 Availability | An unknown bearer token triggers full-partition scans (up to three per request); JSON-RPC batch size is unbounded. |
 | G15 | Low | 3, 7 Session | Cookie-authenticated non-admin REST routes have no Origin check (SameSite=Lax alone, so a same-site sibling can post to them); the install flow gives the browser and the MCP client the same session token. |
 
 When a gap closes, change its row in the relevant table to describe the new
