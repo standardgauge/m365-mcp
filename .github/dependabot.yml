@@ -4,6 +4,11 @@
 # and GitHub Actions versions. Production npm deps are grouped so security
 # patches arrive as one PR per ecosystem rather than one per package.
 #
+# Every ecosystem waits 7 days after a release before proposing it, so a
+# compromised or yanked release has time to be caught upstream first. Security
+# updates are not subject to the cooldown. Actions in .github/workflows/ are
+# pinned to full commit SHAs with a `# vX.Y.Z` comment; Dependabot bumps both.
+#
 # Snyk () is not configured here — it requires SNYK_TOKEN
 # in repo secrets. Add the workflow once that secret is provisioned.
 
@@ -16,6 +21,8 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/New_York"
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
@@ -39,6 +46,8 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/New_York"
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 3
     labels:
       - "dependencies"
@@ -61,6 +70,8 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/New_York"
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 3
     labels:
       - "dependencies"

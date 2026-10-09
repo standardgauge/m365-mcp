@@ -37,7 +37,6 @@ on:
 
 permissions:
   contents: read
-  actions: write  # docker/build-push-action GHA cache backend
 
 # Serialize deploys so a fast follow-up commit cannot race the previous run
 # into az containerapp update. Never cancel in progress: a half-rolled
@@ -59,8 +58,11 @@ jobs:
       (github.event_name == 'workflow_dispatch' || vars.AUTO_UPDATE == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write  # docker/build-push-action GHA cache backend
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check required configuration
         run: |
@@ -94,7 +96,7 @@ jobs:
           echo "Will deploy: ${IMAGE}"
 
       - name: Azure login
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
@@ -102,10 +104,10 @@ jobs:
         run: az acr login --name "$ACR_NAME"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: Dockerfile
