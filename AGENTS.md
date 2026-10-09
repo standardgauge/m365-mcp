@@ -43,7 +43,8 @@ App's own configuration.
 Consequences for a change here:
 
 - Anything that reaches the tree reaches every tracking deployment on its next
-  sync, and a tracking deployment deploys on push. Treat `main` as production.
+  sync, and a tracking deployment deploys it as soon as CI passes there. Treat
+  `main` as production.
 - Never add a scope to `GRAPH_SCOPES` for one deployment's benefit. A scope a
   tenant has not consented to makes `acquireTokenSilent` throw
   `interaction_required` and breaks every tool call for signed-in users on
