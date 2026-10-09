@@ -10,7 +10,11 @@ import {
 } from '@azure/msal-node';
 import { Client, ClientOptions } from '@microsoft/microsoft-graph-client';
 import 'isomorphic-fetch';
-import { saveMsalCache, loadMsalCache } from './tableStorage.js';
+import {
+  loadMsalCachePartition,
+  saveMsalCachePartition,
+  MsalCacheConflictError,
+} from './tableStorage.js';
 import { migrateLegacyCredentialKeys } from './msalCacheKeys.js';
 
 export interface MsalConfig {
@@ -69,34 +73,143 @@ export const GRAPH_SCOPES = [
   'Directory.Read.All',
 ];
 
-// MSAL cache plugin — persists token cache to Azure Table Storage
-const cachePlugin: ICachePlugin = {
-  async beforeCacheAccess(cacheContext: TokenCacheContext): Promise<void> {
-    try {
-      const cached = await loadMsalCache();
-      if (cached) {
-        // A cache written by msal-node 2.x keeps its old credential keys until
-        // re-keyed here; see msalCacheKeys.ts for what goes wrong otherwise.
-        cacheContext.tokenCache.deserialize(migrateLegacyCredentialKeys(cached));
-      } else {
-        console.warn('[MSAL] No cache data returned from storage — MSAL operating with empty cache');
-      }
-    } catch (err) {
-      console.error('[MSAL] Failed to load cache from Table Storage:', err);
-    }
-  },
-  async afterCacheAccess(cacheContext: TokenCacheContext): Promise<void> {
-    if (cacheContext.cacheHasChanged) {
-      try {
-        await saveMsalCache(cacheContext.tokenCache.serialize());
-      } catch (err) {
-        console.error('[MSAL] Failed to save cache to Table Storage:', err);
-      }
-    }
-  },
-};
+// ── Token cache: one MSAL app and one Table row per account ──
+//
+// MSAL keeps its cache in memory on the app object and calls the plugin around
+// every access. A single app shared by every user would hold every user's
+// refresh token in one place, and two requests for different users would
+// interleave their load and save on the same in-memory cache. So each account
+// gets its own ConfidentialClientApplication, whose plugin reads and writes
+// only that account's row (tableStorage.ts, "MSAL cache persistence"), and
+// token acquisition for one account runs one call at a time on this replica.
+//
+// Writes are conditional on the ETag the plugin last read. If another replica
+// refreshed the same account in between, our write loses and theirs stands:
+// both caches hold a refresh token issued moments apart for the same account,
+// and the next access loads the winner's.
 
-// Singleton MSAL app per client+tenant combination
+function msalLogger(): NonNullable<Configuration['system']>['loggerOptions'] {
+  return {
+    loggerCallback(loglevel: LogLevel, message: string, containsPii: boolean) {
+      if (!containsPii) {
+        console.log('[MSAL]', message);
+      }
+    },
+    piiLoggingEnabled: false,
+    // Warning (not Verbose) in production: Verbose floods logs with
+    // per-request MSAL internals that add noise without diagnostic value
+    // here, and keeps the log surface minimal (F11).
+    logLevel: LogLevel.Warning,
+  };
+}
+
+function confidentialConfig(cfg: MsalConfig, cachePlugin?: ICachePlugin): Configuration {
+  return {
+    auth: {
+      clientId: cfg.clientId,
+      authority: `https://login.microsoftonline.com/${cfg.tenantId}`,
+      clientSecret: cfg.clientSecret,
+    },
+    ...(cachePlugin ? { cache: { cachePlugin } } : {}),
+    system: { loggerOptions: msalLogger() },
+  };
+}
+
+interface AccountCachePlugin extends ICachePlugin {
+  /** Whether the last load found no usable row for the account. */
+  readonly rowMissing: boolean;
+}
+
+/**
+ * Cache plugin bound to one account's row. It only ever updates a row it
+ * found: rows are created by sign-in (acquireTokenByCode), so a row deleted to
+ * sign the account out is not recreated from what this replica still holds in
+ * memory.
+ */
+function accountCachePlugin(homeAccountId: string): AccountCachePlugin {
+  let etag: string | undefined;
+  let rowMissing = false;
+  return {
+    get rowMissing() {
+      return rowMissing;
+    },
+    async beforeCacheAccess(cacheContext: TokenCacheContext): Promise<void> {
+      try {
+        const row = await loadMsalCachePartition(homeAccountId);
+        etag = row.etag;
+        rowMissing = row.data === null;
+        if (row.data) {
+          // A cache written by msal-node 2.x keeps its old credential keys until
+          // re-keyed here; see msalCacheKeys.ts for what goes wrong otherwise.
+          cacheContext.tokenCache.deserialize(migrateLegacyCredentialKeys(row.data));
+        }
+      } catch (err) {
+        // A storage error is not a sign-out: carry on with what is in memory,
+        // as before. The write below is still conditional on the last ETag.
+        console.error('[MSAL] Failed to load cache from Table Storage:', err);
+      }
+    },
+    async afterCacheAccess(cacheContext: TokenCacheContext): Promise<void> {
+      if (!cacheContext.cacheHasChanged || rowMissing || etag === undefined) return;
+      try {
+        etag = await saveMsalCachePartition(homeAccountId, cacheContext.tokenCache.serialize(), etag);
+      } catch (err) {
+        if (err instanceof MsalCacheConflictError) {
+          console.warn('[MSAL] Cache row changed under this write; keeping the newer row');
+        } else {
+          console.error('[MSAL] Failed to save cache to Table Storage:', err);
+        }
+      }
+    },
+  };
+}
+
+// Per-account apps, least recently used first. Bounded so a replica that has
+// served many users does not keep an app for each of them forever; an evicted
+// account just gets a new app (and one metadata lookup) on its next request.
+const MAX_ACCOUNT_APPS = 1000;
+interface AccountApp {
+  app: ConfidentialClientApplication;
+  cache: AccountCachePlugin;
+}
+const accountApps = new Map<string, AccountApp>();
+const accountLocks = new Map<string, Promise<unknown>>();
+
+function accountAppKey(homeAccountId: string): string {
+  const cfg = getMsalConfig();
+  return `${cfg.clientId}:${cfg.tenantId}:${homeAccountId}`;
+}
+
+function getAccountMsalApp(homeAccountId: string): AccountApp {
+  const key = accountAppKey(homeAccountId);
+  let entry = accountApps.get(key);
+  if (entry) {
+    accountApps.delete(key);
+  } else {
+    const cache = accountCachePlugin(homeAccountId);
+    entry = { app: new ConfidentialClientApplication(confidentialConfig(getMsalConfig(), cache)), cache };
+    if (accountApps.size >= MAX_ACCOUNT_APPS) {
+      accountApps.delete(accountApps.keys().next().value!);
+    }
+  }
+  accountApps.set(key, entry);
+  return entry;
+}
+
+/** Runs `fn` after any earlier call for the same account on this replica. */
+function withAccountLock<T>(homeAccountId: string, fn: () => Promise<T>): Promise<T> {
+  const previous = accountLocks.get(homeAccountId) ?? Promise.resolve();
+  const run = previous.then(fn, fn);
+  const settled = run.catch(() => undefined);
+  accountLocks.set(homeAccountId, settled);
+  void settled.then(() => {
+    if (accountLocks.get(homeAccountId) === settled) accountLocks.delete(homeAccountId);
+  });
+  return run;
+}
+
+// The app used to build sign-in URLs. It has no cache plugin and never holds a
+// token: code redemption runs on a fresh app per sign-in (acquireTokenByCode).
 const msalApps = new Map<string, ConfidentialClientApplication>();
 const publicMsalApps = new Map<string, PublicClientApplication>();
 
@@ -105,31 +218,7 @@ export function getMsalApp(config?: MsalConfig): ConfidentialClientApplication {
   const key = `${cfg.clientId}:${cfg.tenantId}`;
 
   if (!msalApps.has(key)) {
-    const msalConfig: Configuration = {
-      auth: {
-        clientId: cfg.clientId,
-        authority: `https://login.microsoftonline.com/${cfg.tenantId}`,
-        clientSecret: cfg.clientSecret,
-      },
-      cache: {
-        cachePlugin,
-      },
-      system: {
-        loggerOptions: {
-          loggerCallback(loglevel: LogLevel, message: string, containsPii: boolean) {
-            if (!containsPii) {
-              console.log('[MSAL]', message);
-            }
-          },
-          piiLoggingEnabled: false,
-          // Warning (not Verbose) in production: Verbose floods logs with
-          // per-request MSAL internals that add noise without diagnostic value
-          // here, and keeps the log surface minimal (F11).
-          logLevel: LogLevel.Warning,
-        },
-      },
-    };
-    msalApps.set(key, new ConfidentialClientApplication(msalConfig));
+    msalApps.set(key, new ConfidentialClientApplication(confidentialConfig(cfg)));
   }
 
   return msalApps.get(key)!;
@@ -145,20 +234,7 @@ export function getPublicMsalApp(config?: MsalConfig): PublicClientApplication {
         clientId: cfg.clientId,
         authority: `https://login.microsoftonline.com/${cfg.tenantId}`,
       },
-      system: {
-        loggerOptions: {
-          loggerCallback(loglevel: LogLevel, message: string, containsPii: boolean) {
-            if (!containsPii) {
-              console.log('[MSAL]', message);
-            }
-          },
-          piiLoggingEnabled: false,
-          // Warning (not Verbose) in production: Verbose floods logs with
-          // per-request MSAL internals that add noise without diagnostic value
-          // here, and keeps the log surface minimal (F11).
-          logLevel: LogLevel.Warning,
-        },
-      },
+      system: { loggerOptions: msalLogger() },
     };
     publicMsalApps.set(key, new PublicClientApplication(msalConfig));
   }
@@ -208,8 +284,10 @@ export async function acquireTokenByCode(
   homeAccountId: string;
   expiresOn: Date | null;
 }> {
-  const msalApp = getMsalApp();
   const cfg = getMsalConfig();
+  // A fresh app, so its cache holds this sign-in and nothing else; that cache
+  // becomes the account's row below.
+  const msalApp = new ConfidentialClientApplication(confidentialConfig(cfg));
 
   const request: AuthorizationCodeRequest = {
     code,
@@ -226,40 +304,72 @@ export async function acquireTokenByCode(
     throw new Error('Failed to acquire token by authorization code');
   }
 
+  const homeAccountId = response.account.homeAccountId;
+  await withAccountLock(homeAccountId, () =>
+    persistSignIn(homeAccountId, msalApp.getTokenCache().serialize()),
+  );
+
   return {
     accessToken: response.accessToken,
-    homeAccountId: response.account.homeAccountId,
+    homeAccountId,
     expiresOn: response.expiresOn,
   };
+}
+
+const SIGN_IN_SAVE_ATTEMPTS = 3;
+
+/**
+ * Replaces the account's row with the cache from a fresh sign-in. Still
+ * conditional: it re-reads the ETag and retries if another replica writes the
+ * row in between, so the sign-in's tokens are what is left in the row.
+ */
+async function persistSignIn(homeAccountId: string, cacheData: string): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    const { etag } = await loadMsalCachePartition(homeAccountId);
+    try {
+      await saveMsalCachePartition(homeAccountId, cacheData, etag);
+      return;
+    } catch (err) {
+      if (!(err instanceof MsalCacheConflictError) || attempt >= SIGN_IN_SAVE_ATTEMPTS) throw err;
+    }
+  }
 }
 
 export async function acquireTokenSilent(
   homeAccountId: string
 ): Promise<{ accessToken: string; expiresOn: Date | null }> {
-  const msalApp = getMsalApp();
-  const tokenCache = msalApp.getTokenCache();
-  const accounts = await tokenCache.getAllAccounts();
-  const account = accounts.find((a) => a.homeAccountId === homeAccountId);
+  return withAccountLock(homeAccountId, async () => {
+    const { app: msalApp, cache } = getAccountMsalApp(homeAccountId);
+    const accounts = await msalApp.getTokenCache().getAllAccounts();
+    // MSAL merges a loaded cache into what it already holds in memory, so an
+    // app that served this account before still lists it after its row is
+    // gone. The row is what counts: no row, no account, and the app (with
+    // its stale tokens) is dropped.
+    const account = cache.rowMissing
+      ? undefined
+      : accounts.find((a) => a.homeAccountId === homeAccountId);
 
-  if (!account) {
-    throw new Error(
-      `No cached account found for homeAccountId ${homeAccountId}. Re-authentication required.`
-    );
-  }
+    if (!account) {
+      if (cache.rowMissing) accountApps.delete(accountAppKey(homeAccountId));
+      throw new Error(
+        `No cached account found for homeAccountId ${homeAccountId}. Re-authentication required.`
+      );
+    }
 
-  const response = await msalApp.acquireTokenSilent({
-    scopes: GRAPH_SCOPES,
-    account,
+    const response = await msalApp.acquireTokenSilent({
+      scopes: GRAPH_SCOPES,
+      account,
+    });
+
+    if (!response?.accessToken) {
+      throw new Error('Token refresh failed. Re-authentication required.');
+    }
+
+    return {
+      accessToken: response.accessToken,
+      expiresOn: response.expiresOn,
+    };
   });
-
-  if (!response?.accessToken) {
-    throw new Error('Token refresh failed. Re-authentication required.');
-  }
-
-  return {
-    accessToken: response.accessToken,
-    expiresOn: response.expiresOn,
-  };
 }
 
 export function createGraphClient(accessToken: string): Client {

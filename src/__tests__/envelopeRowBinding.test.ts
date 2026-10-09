@@ -6,7 +6,9 @@
  * the binding are still read and get rewritten bound on that read, and (3) the
  * identity columns beside the envelope (userId, homeAccountId, tenantId) are
  * covered by the same tag, so a row whose identity was edited fails
- * authentication instead of steering a silent refresh at another user.
+ * authentication instead of steering a silent refresh at another user. Also the
+ * per-account MSAL cache rows: binding, ETag-conditional writes, and the split
+ * of the old shared row.
  */
 
 import { jest } from '@jest/globals';
@@ -49,9 +51,23 @@ function makeTableClient(name: string) {
         throw Object.assign(new Error('precondition failed'), { statusCode: 412 });
       }
       const merged = mode === 'Merge' ? { ...existing, ...entity } : { ...entity };
-      rows().set(key(entity.partitionKey, entity.rowKey), { ...merged, etag: `e${++etagCounter}` });
+      const etag = `e${++etagCounter}`;
+      rows().set(key(entity.partitionKey, entity.rowKey), { ...merged, etag });
+      return { etag };
     },
-    async deleteEntity(pk: string, rk: string) {
+    async createEntity(entity: Entity) {
+      if (rows().has(key(entity.partitionKey, entity.rowKey))) {
+        throw Object.assign(new Error('conflict'), { statusCode: 409 });
+      }
+      const etag = `e${++etagCounter}`;
+      rows().set(key(entity.partitionKey, entity.rowKey), { ...entity, etag });
+      return { etag };
+    },
+    async deleteEntity(pk: string, rk: string, opts?: { etag?: string }) {
+      const existing = rows().get(key(pk, rk));
+      if (existing && opts?.etag && opts.etag !== existing.etag) {
+        throw Object.assign(new Error('precondition failed'), { statusCode: 412 });
+      }
       rows().delete(key(pk, rk));
     },
     listEntities() {
@@ -69,8 +85,11 @@ jest.mock('@azure/data-tables', () => ({
 import {
   saveSession,
   loadSessionByToken,
-  saveMsalCache,
-  loadMsalCache,
+  saveMsalCachePartition,
+  loadMsalCachePartition,
+  splitLegacyMsalCache,
+  resetLegacyMsalSplitForTests,
+  MsalCacheConflictError,
   type StoredSession,
 } from '../services/tableStorage.js';
 import { encryptWithDek, envelopeAad } from '../services/credentialCrypto.js';
@@ -110,6 +129,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 beforeEach(() => {
   tables.clear();
+  resetLegacyMsalSplitForTests();
   delete process.env.MCP_ENVELOPE_REQUIRE_AAD;
   delete process.env.MCP_SESSION_REQUIRE_IDENTITY_BINDING;
 });
@@ -294,66 +314,167 @@ describe('session identity column binding', () => {
   });
 });
 
-describe('MSAL cache envelope binding', () => {
-  test('round-trips', async () => {
-    await saveMsalCache('{"cache":1}');
-    expect(await loadMsalCache()).toBe('{"cache":1}');
+const HOME_A = '00000000-0000-4000-8000-00000000000a.72f988bf-0000-4000-8000-00000000c0de';
+const HOME_B = '00000000-0000-4000-8000-00000000000b.72f988bf-0000-4000-8000-00000000c0de';
+const LEGACY_AAD = envelopeAad('mcpMsalCache', 'cache', 'msal-token-cache', 'msalCache');
+
+function accountCache(homeAccountId: string, rt: string) {
+  return {
+    Account: { [`${homeAccountId}-login.windows.net-tenant`]: { home_account_id: homeAccountId } },
+    IdToken: {},
+    AccessToken: {},
+    RefreshToken: { [`${homeAccountId}-rt`]: { home_account_id: homeAccountId, secret: rt } },
+    AppMetadata: { 'appmetadata-login.windows.net-client': { client_id: 'client' } },
+  };
+}
+
+function setLegacyRow(envelope: { ciphertext: string; iv: string; authTag: string }) {
+  tableFor('mcpMsalCache').set('cache|msal-token-cache', {
+    partitionKey: 'cache', rowKey: 'msal-token-cache', ...envelope, etag: 'legacy-e',
+  });
+}
+
+describe('MSAL cache rows, one per account', () => {
+  test('round-trip through the account row, with the ETag the next write needs', async () => {
+    const etag = await saveMsalCachePartition(HOME_A, '{"a":1}', undefined);
+    const row = await loadMsalCachePartition(HOME_A);
+    expect(row).toEqual({ data: '{"a":1}', etag });
+    expect(tableFor('mcpMsalCache').has(`account|${HOME_A}`)).toBe(true);
   });
 
-  test('a session access token envelope substituted into the cache row does not decrypt', async () => {
-    await saveSession(session('userA', 'tok-A', 'graph-token-A'));
-    const rowA = sessionRow('userA');
-    tableFor('mcpMsalCache').set('cache|msal-token-cache', {
-      partitionKey: 'cache',
-      rowKey: 'msal-token-cache',
-      ciphertext: rowA.accessTokenCiphertext,
-      iv: rowA.accessTokenIv,
-      authTag: rowA.accessTokenAuthTag,
-      etag: 'x',
+  test('a missing row is empty with no ETag', async () => {
+    expect(await loadMsalCachePartition(HOME_A)).toEqual({ data: null, etag: undefined });
+  });
+
+  test("account A's envelope copied into account B's row does not decrypt", async () => {
+    await saveMsalCachePartition(HOME_A, '{"a":1}', undefined);
+    await saveMsalCachePartition(HOME_B, '{"b":1}', undefined);
+    const table = tableFor('mcpMsalCache');
+    const a = table.get(`account|${HOME_A}`)!;
+    const b = table.get(`account|${HOME_B}`)!;
+    table.set(`account|${HOME_B}`, { ...b, ciphertext: a.ciphertext, iv: a.iv, authTag: a.authTag });
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const row = await loadMsalCachePartition(HOME_B);
+    expect(row.data).toBeNull();
+    // The ETag comes back so a fresh sign-in can replace the bad row.
+    expect(row.etag).toBe(b.etag);
+  });
+
+  test('the shared row envelope substituted into an account row does not decrypt', async () => {
+    const shared = encryptWithDek('{"shared":1}', LEGACY_AAD);
+    tableFor('mcpMsalCache').set(`account|${HOME_A}`, {
+      partitionKey: 'account', rowKey: HOME_A, ...shared, etag: 'x',
     });
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
-    expect(await loadMsalCache()).toBeNull();
+    expect((await loadMsalCachePartition(HOME_A)).data).toBeNull();
   });
 
-  test('a pre-binding unbound cache is read and rewritten bound', async () => {
-    const legacy = encryptUnbound('{"legacy":true}');
-    tableFor('mcpMsalCache').set('cache|msal-token-cache', {
-      partitionKey: 'cache', rowKey: 'msal-token-cache', ...legacy, etag: 'e0',
+  test('an unbound envelope in an account row is not read, even while legacy reads are allowed', async () => {
+    tableFor('mcpMsalCache').set(`account|${HOME_A}`, {
+      partitionKey: 'account', rowKey: HOME_A, ...encryptUnbound('{"a":1}'), etag: 'x',
     });
-
-    expect(await loadMsalCache()).toBe('{"legacy":true}');
-    const rebound = tableFor('mcpMsalCache').get('cache|msal-token-cache')!;
-    expect(rebound.ciphertext).not.toBe(legacy.ciphertext);
-
-    process.env.MCP_ENVELOPE_REQUIRE_AAD = 'true';
-    expect(await loadMsalCache()).toBe('{"legacy":true}');
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect((await loadMsalCachePartition(HOME_A)).data).toBeNull();
   });
 
-  test('the rebind does not overwrite a newer cache written concurrently', async () => {
-    const legacy = encryptUnbound('{"old":true}');
-    const table = tableFor('mcpMsalCache');
-    table.set('cache|msal-token-cache', {
-      partitionKey: 'cache', rowKey: 'msal-token-cache', ...legacy, etag: 'e0',
-    });
-    // Another replica saves a newer cache between our read and our rebind.
-    const newer = encryptWithDek(
-      '{"new":true}',
-      envelopeAad('mcpMsalCache', 'cache', 'msal-token-cache', 'msalCache'),
+  test('a write with a stale ETag loses and leaves the newer row', async () => {
+    const first = await saveMsalCachePartition(HOME_A, '{"v":1}', undefined);
+    const second = await saveMsalCachePartition(HOME_A, '{"v":2}', first);
+
+    await expect(saveMsalCachePartition(HOME_A, '{"v":"stale"}', first)).rejects.toBeInstanceOf(
+      MsalCacheConflictError,
     );
+    expect(await loadMsalCachePartition(HOME_A)).toEqual({ data: '{"v":2}', etag: second });
+  });
+
+  test('creating a row that another writer already created loses', async () => {
+    await saveMsalCachePartition(HOME_A, '{"winner":1}', undefined);
+    await expect(saveMsalCachePartition(HOME_A, '{"loser":1}', undefined)).rejects.toBeInstanceOf(
+      MsalCacheConflictError,
+    );
+    expect((await loadMsalCachePartition(HOME_A)).data).toBe('{"winner":1}');
+  });
+
+  test('writing to one account never touches another account', async () => {
+    await saveMsalCachePartition(HOME_A, '{"a":1}', undefined);
+    const b = await saveMsalCachePartition(HOME_B, '{"b":1}', undefined);
+    await saveMsalCachePartition(HOME_B, '{"b":2}', b);
+    expect((await loadMsalCachePartition(HOME_A)).data).toBe('{"a":1}');
+  });
+
+  test('refuses a home account id that is not safe as a row key', async () => {
+    await expect(saveMsalCachePartition('a/b#c', '{}', undefined)).rejects.toThrow('malformed home account id');
+  });
+});
+
+describe('splitting the old shared MSAL cache row', () => {
+  const shared = JSON.stringify({
+    Account: { ...accountCache(HOME_A, 'rt-a').Account, ...accountCache(HOME_B, 'rt-b').Account },
+    IdToken: {},
+    AccessToken: {},
+    RefreshToken: { ...accountCache(HOME_A, 'rt-a').RefreshToken, ...accountCache(HOME_B, 'rt-b').RefreshToken },
+    AppMetadata: accountCache(HOME_A, '').AppMetadata,
+  });
+
+  beforeEach(() => {
+    jest.spyOn(console, 'log').mockImplementation(() => undefined);
+  });
+
+  test('gives each account its own row and deletes the shared row on first load', async () => {
+    setLegacyRow(encryptWithDek(shared, LEGACY_AAD));
+
+    const a = JSON.parse((await loadMsalCachePartition(HOME_A)).data!);
+    expect(a).toEqual(accountCache(HOME_A, 'rt-a'));
+    const b = JSON.parse((await loadMsalCachePartition(HOME_B)).data!);
+    expect(b).toEqual(accountCache(HOME_B, 'rt-b'));
+    expect(tableFor('mcpMsalCache').has('cache|msal-token-cache')).toBe(false);
+  });
+
+  test('reads a shared row written before AAD binding', async () => {
+    setLegacyRow(encryptUnbound(shared));
+    expect(await splitLegacyMsalCache()).toBe(2);
+    expect(JSON.parse((await loadMsalCachePartition(HOME_B)).data!)).toEqual(accountCache(HOME_B, 'rt-b'));
+  });
+
+  test('keeps an account row that already exists rather than the older shared copy', async () => {
+    await saveMsalCachePartition(HOME_A, JSON.stringify(accountCache(HOME_A, 'rt-a-newer')), undefined);
+    setLegacyRow(encryptWithDek(shared, LEGACY_AAD));
+
+    expect(await splitLegacyMsalCache()).toBe(1);
+    expect(JSON.parse((await loadMsalCachePartition(HOME_A)).data!)).toEqual(accountCache(HOME_A, 'rt-a-newer'));
+  });
+
+  test('leaves the shared row if a replica on the previous release wrote it during the split', async () => {
+    setLegacyRow(encryptWithDek(shared, LEGACY_AAD));
+    const table = tableFor('mcpMsalCache');
     const realGet = table.get.bind(table);
-    let raced = false;
     const spy = jest.spyOn(table, 'get').mockImplementation((k: string) => {
       const row = realGet(k);
-      if (!raced && row) {
-        raced = true;
-        table.set(k, { ...row, ...newer, etag: 'e-newer' });
+      if (k === 'cache|msal-token-cache' && row) {
+        spy.mockRestore();
+        table.set(k, { ...row, etag: 'written-meanwhile' });
       }
       return row;
     });
-    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-    expect(await loadMsalCache()).toBe('{"old":true}');
-    spy.mockRestore();
-    expect(await loadMsalCache()).toBe('{"new":true}');
+    expect(await splitLegacyMsalCache()).toBe(2);
+    expect(table.has('cache|msal-token-cache')).toBe(true);
+    // The next process to start finishes the job.
+    expect(await splitLegacyMsalCache()).toBe(0);
+    expect(table.has('cache|msal-token-cache')).toBe(false);
+  });
+
+  test('leaves a shared row it cannot decrypt in place', async () => {
+    setLegacyRow(encryptWithDek(shared, envelopeAad('mcpMsalCache', 'cache', 'other', 'msalCache')));
+    process.env.MCP_ENVELOPE_REQUIRE_AAD = 'true';
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(await splitLegacyMsalCache()).toBe(0);
+    expect(tableFor('mcpMsalCache').has('cache|msal-token-cache')).toBe(true);
+  });
+
+  test('does nothing when there is no shared row', async () => {
+    expect(await splitLegacyMsalCache()).toBe(0);
   });
 });

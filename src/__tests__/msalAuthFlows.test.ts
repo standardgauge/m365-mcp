@@ -20,6 +20,10 @@
  *   - refresh: an expired access token is renewed with the cached refresh token
  *     and the rotated refresh token is persisted; a rejected refresh surfaces
  *     as an error the /api/auth/refresh handler turns into a 401
+ *   - many users: each account's cache is its own row holding only that
+ *     account, concurrent refreshes for different users do not touch each
+ *     other's rows, and a write that loses to another replica leaves the
+ *     other replica's cache in place
  *   - device code: GET /api/auth/device returns the user code, polls through
  *     authorization_pending, and stores a session once the grant succeeds
  */
@@ -35,6 +39,8 @@ import { jest } from '@jest/globals';
 import type { HttpRequest, InvocationContext } from '@azure/functions';
 import {
   FakeEntra,
+  fakeAuthCode,
+  fakeUserOid,
   FAKE_CLIENT_ID,
   FAKE_HOME_ACCOUNT_ID,
   FAKE_TENANT_ID,
@@ -78,17 +84,36 @@ jest.mock('@azure/msal-node', () => {
   return { ...actual, ConfidentialClientApplication, PublicClientApplication };
 });
 
-// ── Table Storage row for the MSAL cache ──────────────────────────────────────
+// ── Table Storage rows for the MSAL cache, one per account ───────────────────
 
-const mockCacheRow: { value: string | null; saves: number } = { value: null, saves: 0 };
+const mockCacheRows = new Map<string, { value: string; etag: string }>();
+const mockCacheSaves = { count: 0, etag: 0 };
 
-jest.mock('../services/tableStorage.js', () => ({
-  loadMsalCache: jest.fn(async () => mockCacheRow.value),
-  saveMsalCache: jest.fn(async (data: string) => {
-    mockCacheRow.value = data;
-    mockCacheRow.saves += 1;
-  }),
-}));
+jest.mock('../services/tableStorage.js', () => {
+  class MsalCacheConflictError extends Error {}
+  return {
+    MsalCacheConflictError,
+    loadMsalCachePartition: jest.fn(async (homeAccountId: string) => {
+      const row = mockCacheRows.get(homeAccountId);
+      return { data: row?.value ?? null, etag: row?.etag };
+    }),
+    saveMsalCachePartition: jest.fn(async (homeAccountId: string, data: string, etag?: string) => {
+      if (mockCacheRows.get(homeAccountId)?.etag !== etag) throw new MsalCacheConflictError();
+      const next = `e${++mockCacheSaves.etag}`;
+      mockCacheRows.set(homeAccountId, { value: data, etag: next });
+      mockCacheSaves.count += 1;
+      return next;
+    }),
+  };
+});
+
+function setCacheRow(homeAccountId: string, value: string): void {
+  mockCacheRows.set(homeAccountId, { value, etag: `e${++mockCacheSaves.etag}` });
+}
+
+function cacheRow(homeAccountId = FAKE_HOME_ACCOUNT_ID): string | null {
+  return mockCacheRows.get(homeAccountId)?.value ?? null;
+}
 
 // ── Collaborators of the device code handler ──────────────────────────────────
 
@@ -120,6 +145,7 @@ jest.mock('@azure/functions', () => ({ app: { http: jest.fn() } }));
 // ── Modules under test ────────────────────────────────────────────────────────
 
 import { app } from '@azure/functions';
+import { saveMsalCachePartition } from '../services/tableStorage.js';
 import { InteractionRequiredAuthError } from '@azure/msal-node';
 import {
   GRAPH_SCOPES,
@@ -157,7 +183,11 @@ function armAuthorize(): void {
 }
 
 function persistedRefreshTokens(): string[] {
-  const cache = JSON.parse(mockCacheRow.value ?? '{}') as {
+  return persistedRefreshTokensFor(FAKE_HOME_ACCOUNT_ID);
+}
+
+function persistedRefreshTokensFor(homeAccountId: string): string[] {
+  const cache = JSON.parse(cacheRow(homeAccountId) ?? '{}') as {
     RefreshToken?: Record<string, { secret: string }>;
   };
   return Object.values(cache.RefreshToken ?? {}).map((rt) => rt.secret);
@@ -165,8 +195,8 @@ function persistedRefreshTokens(): string[] {
 
 beforeEach(() => {
   mockEntraRef.current = new FakeEntra();
-  mockCacheRow.value = null;
-  mockCacheRow.saves = 0;
+  mockCacheRows.clear();
+  mockCacheSaves.count = 0;
   mockStoreSession.mockReset();
   mockStoreSession.mockResolvedValue(undefined);
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -211,7 +241,8 @@ describe('authorization code flow', () => {
     expect(req.form.get('client_secret')).toBe('fake-client-secret');
     expect(req.form.get('code_verifier')).toBe(CODE_VERIFIER);
 
-    expect(mockCacheRow.saves).toBeGreaterThan(0);
+    expect(mockCacheSaves.count).toBeGreaterThan(0);
+    expect([...mockCacheRows.keys()]).toEqual([FAKE_HOME_ACCOUNT_ID]);
     expect(persistedRefreshTokens()).toEqual(['fake-refresh-token-1']);
   });
 
@@ -275,7 +306,7 @@ describe('silent refresh from the persisted cache', () => {
   });
 
   it('reads a cache written by msal-node 2.16.3 and refreshes from its refresh token', async () => {
-    mockCacheRow.value = LEGACY_CACHE;
+    setCacheRow(FAKE_HOME_ACCOUNT_ID, LEGACY_CACHE);
     // The fixture holds token pair 1; number the fresh pairs so they are distinct.
     mockEntraRef.current.issued = 100;
 
@@ -289,7 +320,7 @@ describe('silent refresh from the persisted cache', () => {
 
     // One account, and the rotated refresh token replaced the old one rather
     // than landing beside it under msal-node 7's key format.
-    const cache = JSON.parse(mockCacheRow.value!) as {
+    const cache = JSON.parse(cacheRow()!) as {
       Account: Record<string, { username: string }>;
       IdToken: Record<string, unknown>;
     };
@@ -311,7 +342,7 @@ describe('silent refresh from the persisted cache', () => {
     armAuthorize();
     await acquireTokenByCode('fake-auth-code', BINDING);
     await acquireTokenSilent(FAKE_HOME_ACCOUNT_ID);
-    const written = mockCacheRow.value!;
+    const written = cacheRow()!;
 
     expect(migrateLegacyCredentialKeys(written)).toBe(written);
   });
@@ -339,14 +370,14 @@ describe('silent refresh from the persisted cache', () => {
   it('rejects when Entra refuses the refresh token', async () => {
     // Any rejection here is what /api/auth/refresh turns into a 401 with a
     // loginUrl; the error class is MSAL's business.
-    mockCacheRow.value = LEGACY_CACHE;
+    setCacheRow(FAKE_HOME_ACCOUNT_ID, LEGACY_CACHE);
     mockEntraRef.current.refreshError = 'invalid_grant';
 
     await expect(acquireTokenSilent(FAKE_HOME_ACCOUNT_ID)).rejects.toThrow('invalid_grant');
   });
 
   it('classifies interaction_required from Entra as InteractionRequiredAuthError', async () => {
-    mockCacheRow.value = LEGACY_CACHE;
+    setCacheRow(FAKE_HOME_ACCOUNT_ID, LEGACY_CACHE);
     mockEntraRef.current.refreshError = 'interaction_required';
 
     await expect(acquireTokenSilent(FAKE_HOME_ACCOUNT_ID)).rejects.toBeInstanceOf(
@@ -355,12 +386,106 @@ describe('silent refresh from the persisted cache', () => {
   });
 
   it('asks for re-authentication when the account is not in the cache', async () => {
-    mockCacheRow.value = LEGACY_CACHE;
+    setCacheRow(FAKE_HOME_ACCOUNT_ID, LEGACY_CACHE);
 
     await expect(acquireTokenSilent(`not-cached.${FAKE_TENANT_ID}`)).rejects.toThrow(
       'Re-authentication required'
     );
     expect(mockEntraRef.current.tokenRequests).toHaveLength(0);
+  });
+});
+
+type SerializedCache = {
+  Account: Record<string, { home_account_id: string }>;
+  RefreshToken: Record<string, { home_account_id: string; secret: string }>;
+};
+
+describe('one cache row per account', () => {
+  const USERS = 40;
+  const homeIdFor = (n: number) => `${fakeUserOid(n)}.${FAKE_TENANT_ID}`;
+
+  beforeEach(armAuthorize);
+
+  it('keeps every signed-in user in a row of their own through concurrent refreshes', async () => {
+    for (let n = 1; n <= USERS; n++) {
+      const signedIn = await acquireTokenByCode(fakeAuthCode(fakeUserOid(n)), BINDING);
+      expect(signedIn.homeAccountId).toBe(homeIdFor(n));
+    }
+    const issuedAtSignIn = new Map(
+      Array.from({ length: USERS }, (_, i) => [homeIdFor(i + 1), persistedRefreshTokensFor(homeIdFor(i + 1))[0]]),
+    );
+
+    // Every user refreshes at once, twice over.
+    const ids = Array.from({ length: USERS }, (_, i) => homeIdFor(i + 1));
+    await Promise.all([...ids, ...ids].map((id) => acquireTokenSilent(id)));
+
+    expect(new Set(mockCacheRows.keys())).toEqual(new Set(ids));
+    const owners = mockEntraRef.current.refreshTokenOwners;
+    for (const id of ids) {
+      const raw = cacheRow(id)!;
+      const cache = JSON.parse(raw) as SerializedCache;
+      // Only this account, and only its own refresh token, in its row.
+      expect(Object.values(cache.Account).map((a) => a.home_account_id)).toEqual([id]);
+      const rts = Object.values(cache.RefreshToken);
+      expect(rts).toHaveLength(1);
+      expect(rts[0].home_account_id).toBe(id);
+      expect(`${owners.get(rts[0].secret)}.${FAKE_TENANT_ID}`).toBe(id);
+      // Two refreshes on top of sign-in: the row holds the latest rotation.
+      expect(rts[0].secret).not.toBe(issuedAtSignIn.get(id));
+      // A row's size depends on one account, not on how many are signed in.
+      expect(raw.length).toBeLessThan(16 * 1024);
+    }
+
+    // Each refresh presented a refresh token issued to the same user.
+    for (const req of mockEntraRef.current.tokenRequests) {
+      if (req.form.get('grant_type') !== 'refresh_token') continue;
+      expect(owners.get(req.form.get('refresh_token')!)).toBeDefined();
+    }
+    expect(mockEntraRef.current.tokenRequests.filter((r) => r.form.get('grant_type') === 'refresh_token'))
+      .toHaveLength(USERS * 2);
+  });
+
+  it('keeps the row another replica wrote between this replica\'s load and save', async () => {
+    await acquireTokenByCode('fake-auth-code', BINDING);
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    // The other replica refreshes the same account after our load and before
+    // our save.
+    const otherReplica = cacheRow()!.replace('fake-refresh-token-1', 'other-replica-refresh-token');
+    const save = saveMsalCachePartition as jest.MockedFunction<typeof saveMsalCachePartition>;
+    const realSave = save.getMockImplementation()!;
+    save.mockImplementationOnce(async (id: string, data: string, etag?: string) => {
+      setCacheRow(id, otherReplica);
+      return realSave(id, data, etag);
+    });
+
+    const ours = await acquireTokenSilent(FAKE_HOME_ACCOUNT_ID);
+    expect(ours.accessToken).toBe('fake-access-token-2');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('keeping the newer row'));
+    expect(cacheRow()).toBe(otherReplica);
+
+    // The next refresh uses the other replica's token, not ours.
+    mockEntraRef.current.refreshTokenOwners.set('other-replica-refresh-token', FAKE_USER_OID);
+    const before = mockEntraRef.current.tokenRequests.length;
+    await acquireTokenSilent(FAKE_HOME_ACCOUNT_ID);
+    expect(mockEntraRef.current.tokenRequests[before].form.get('refresh_token')).toBe('other-replica-refresh-token');
+  });
+
+  it('a deleted row signs the account out, even on a replica that served it before', async () => {
+    mockEntraRef.current.accessTokenLifetimeSeconds = 3600;
+    await acquireTokenByCode('fake-auth-code', BINDING);
+    await acquireTokenSilent(FAKE_HOME_ACCOUNT_ID);
+
+    mockCacheRows.delete(FAKE_HOME_ACCOUNT_ID);
+
+    await expect(acquireTokenSilent(FAKE_HOME_ACCOUNT_ID)).rejects.toThrow('Re-authentication required');
+  });
+
+  it('a new sign-in replaces the row of an account that already has one', async () => {
+    await acquireTokenByCode('fake-auth-code', BINDING);
+    await acquireTokenByCode('fake-auth-code', BINDING);
+
+    expect(persistedRefreshTokens()).toEqual(['fake-refresh-token-2']);
   });
 });
 
