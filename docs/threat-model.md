@@ -186,15 +186,18 @@ administrator for the whole permission set ([`entra-setup.md`](entra-setup.md)).
 primitives: HMAC-SHA256 over session tokens, and AES-256-GCM envelopes for access
 tokens and the MSAL cache. Each envelope is bound by GCM additional authenticated
 data to its table, partition, row and column, so an envelope copied into another
-row fails to decrypt. Envelopes written before that binding are still readable
-until the operator sets `MCP_ENVELOPE_REQUIRE_AAD=true`
+row fails to decrypt. A session row's access-token envelope also binds the row's
+`userId`, `homeAccountId` and `tenantId`, so editing any of them fails the row's
+authentication. Envelopes written before those bindings are still readable until
+the operator sets `MCP_ENVELOPE_REQUIRE_AAD=true` and
+`MCP_SESSION_REQUIRE_IDENTITY_BINDING=true`
 ([runbook](operations-runbook.md#credential-envelope-row-binding-mcp_envelope_require_aad)).
 
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
 | 2.1 | I | Storage-only attacker reads refresh and access tokens. | Both are AES-256-GCM ciphertext under a key that is not in storage. Session tokens are stored only as a keyed HMAC. | Holds against a storage-only attacker. Does **not** hold against anyone who can read Container App secrets, because the DEK sits beside the storage key (section 6, **G11**). |
 | 2.2 | T, E | Storage writer moves user A's access-token envelope into user B's row, so B's session acts as A. | AAD binds each envelope to its row; a moved envelope fails authentication. 16-byte tag enforced. | Until `MCP_ENVELOPE_REQUIRE_AAD=true` is set, an unbound legacy envelope still moves. Operator action, documented. |
-| 2.3 | T, E | Storage writer edits the plaintext columns next to the envelope instead of the envelope. | None. `userId`, `homeAccountId` and `tenantId` are plaintext and outside the AAD. | A writer holding any valid session can repoint that session's `homeAccountId` at another user's MSAL account; the next silent refresh returns the other user's access token into the attacker's session. Editing `userId` changes whose deny lists and settings apply and whose name the audit records. **G3** |
+| 2.3 | T, E | Storage writer edits the plaintext columns next to the envelope instead of the envelope, for example repointing a session's `homeAccountId` at another user's MSAL account so the next silent refresh returns that user's token. | `userId`, `homeAccountId` and `tenantId` are in the access-token envelope's AAD. Editing any of them makes the envelope fail to decrypt, so the session fails authentication before a refresh or a policy lookup reads them. Older row-only envelopes are rewritten identity-bound on first read. | Until `MCP_SESSION_REQUIRE_IDENTITY_BINDING=true` is set, a row still carrying a row-only or unbound envelope (or one the writer kept from before the rewrite) can still be edited. Operator action, documented. `displayName` and `email` stay unbound: display only, not used for authorization. |
 | 2.4 | I, D | One MSAL cache row for all users. | Encrypted and AAD-bound like everything else. | Every user's refresh token is in one blob, so any code path that loads the cache holds all of them. Writes are an unconditional replace, so two replicas refreshing at once can drop a user's newly rotated refresh token. One Table property is capped at 64 KiB, which puts a ceiling on how many users the cache can hold before writes start failing; the failure is logged, not surfaced. **G4** |
 | 2.5 | T | Truncated GCM tag accepted. | Tag length pinned to 16 bytes on decrypt. | None. |
 | 2.6 | I | Key reuse across deployments. | Generated per deployment; README says never reuse across tenants. | Not enforced. Startup validation of key shape is tracked separately. |
@@ -253,7 +256,7 @@ infrastructure between deployments.
 | 5.2 | E | Guest (B2B) accounts. | The tenant compared is the one in the account's home ID, so a guest whose home tenant differs is refused. | Behaviour to confirm in the penetration test; it is a side effect of 5.1, not a designed control. |
 | 5.3 | I | One deployment's credentials work against another. | Keys, client secrets and storage are per deployment. Session tokens are only meaningful against the storage and HMAC key that issued them. | Key reuse across deployments is possible if an operator copies values. Documented, not enforced. |
 | 5.4 | E | Upstream change reaches every deployment at once. | `main` is protected, reviewed and CI-gated. | Section 11. |
-| 5.5 | I | One user reads another user's data inside the tenant. | Every Graph call uses the caller's own delegated token, so Graph applies that user's permissions. Session lookup is by token, never by a client-supplied user ID. | Server-side policy keyed on `userId` inherits the integrity of the session row (**G3**). |
+| 5.5 | I | One user reads another user's data inside the tenant. | Every Graph call uses the caller's own delegated token, so Graph applies that user's permissions. Session lookup is by token, never by a client-supplied user ID. | Server-side policy keyed on `userId` relies on the session row's identity binding (2.3). |
 
 ---
 
@@ -332,7 +335,7 @@ shim's local-file limits.
 | 9.3 | T | Injected prompt deletes or overwrites data. | Read-only mode per service; deny lists on paths and folders; Graph's own recycle bins. | No server-side confirmation for destructive calls; the MCP client's approval prompt is the only human step. Accepted, stated so operators choose read-only where it matters. |
 | 9.4 | I | Confused deputy on the device: an injected prompt makes the shim read a local file and attach or upload it. | Root folders, dotfile refusal, symlink resolution, size cap (4.4). Enforced draft mode keeps the attachment in Drafts. | Residual: anything under `~/Documents` or `~/Downloads` can be attached to a draft or uploaded to OneDrive. Operators can narrow `M365_MCP_ATTACH_ROOTS`. Accepted. |
 | 9.5 | E | Confused deputy across users: a delegate's agent reaches an owner's mailbox or calendar. | Graph enforces the delegation itself. Global (tier 1) deny entries apply to everyone. Every mail tool and route that takes `mailboxId`, and `respond_to_event` on another mailbox's calendar, is checked against the per-user (tier 2) lists of both the caller and the mailbox owner. The owner is looked up in the directory (`/users/{mailboxId}`); if the lookup fails, the call is refused before any message is read (`src/services/mailboxOwner.ts`). | A calendar someone shares into the caller's own calendar list is reached by `calendarId`, not `mailboxId`. It is checked against the caller's list and tier 1 only. The shared copy has its own ID in the recipient's list, and its name there can differ from the owner's, so the owner's entries could not reliably match it anyway. An owner who wants a shared calendar hidden from every agent asks an administrator for a tier 1 entry. The README says so. |
-| 9.6 | E | Confused deputy at the server: someone gets the server to act with another user's authority. | Sessions are looked up by token, never by a supplied user ID; the old `x-user-id` trust model is gone. | Through the install handoff (**G1**) or a tampered session row (**G3**). |
+| 9.6 | E | Confused deputy at the server: someone gets the server to act with another user's authority. | Sessions are looked up by token, never by a supplied user ID; the old `x-user-id` trust model is gone. | Through the install handoff (**G1**). A tampered session row fails authentication once identity binding is required (2.3). |
 | 9.7 | E | Argument injection into Graph paths or OData. | `assertOpaqueIds` on every ID parameter; KQL and filter values escaped; unknown parameters refused. | None found; worth fuzzing (see test scope). |
 | 9.8 | I | Model sees content the user hid. | Deny lists filter listings and search hits, including ancestor-folder matches on search results. | Deny matching is by name and path. A renamed folder escapes a name-based entry until the entry is updated. Accepted and documented in the access-control docs. |
 
@@ -373,7 +376,6 @@ separately" in the tables and are not repeated here.
 | Gap | Severity | Area | Summary |
 |---|---|---|---|
 | G1 | High | 4 Install | Install sign-in handoff binding. Details withheld until fixed. |
-| G3 | Medium | 2 Envelopes | `userId`, `homeAccountId`, `tenantId` on session rows are outside the envelope AAD and unprotected. |
 | G4 | Medium | 2 Token cache | One MSAL cache row for every user: shared blast radius, last-writer-wins across replicas, 64 KiB property ceiling. |
 | G6 | Medium | 9 Prompt abuse | Enforced draft mode does not cover calendar invitations, event-response comments or Teams sends; no external-recipient control. |
 | G8 | Medium | 7, 8 Audit | Auth events and admin policy changes are not audited; MCP rows have no client address; REST rows trust the leftmost forwarded address. |
@@ -415,7 +417,8 @@ line names the rows it exercises.
    containment including symlinks and Windows path forms (4.4).
 7. **Storage with write access.** If the engagement includes a storage-scoped
    credential: envelope swap with and without `MCP_ENVELOPE_REQUIRE_AAD`, and
-   session-row column edits (2.2, 2.3).
+   session-row identity column edits with and without
+   `MCP_SESSION_REQUIRE_IDENTITY_BINDING` (2.2, 2.3).
 8. **Availability.** Unknown-token request cost, batch size, device-flow
    start-up cost (10.1, 10.2, 1.4).
 
