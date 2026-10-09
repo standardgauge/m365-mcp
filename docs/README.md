@@ -1,5 +1,7 @@
 # Documentation
 
+- [Threat model](threat-model.md) — assets, trust boundaries, threats with
+  current mitigations and gaps, and penetration test scope
 - [Entra setup](entra-setup.md) — the app registration, redirect URIs, client
   secret, and the delegated permissions to consent, in order
 - [Operations runbook](operations-runbook.md) — day-two operations: rotating
