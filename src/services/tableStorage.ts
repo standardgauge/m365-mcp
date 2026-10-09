@@ -188,11 +188,68 @@ function entityToSession(
   };
 }
 
-export async function saveSession(session: StoredSession): Promise<void> {
+/**
+ * Raised by saveSession in 'update' mode when the session's row no longer
+ * exists. The row was deleted (logout, credential purge, manual deletion) on
+ * some replica after this one cached the session, so the session is revoked.
+ */
+export class SessionRowMissingError extends Error {
+  constructor(storageKey: string) {
+    super(`Session row ${storageKey.slice(0, 8)}… no longer exists`);
+    this.name = 'SessionRowMissingError';
+  }
+}
+
+function isNotFound(err: unknown): boolean {
+  return (err as { statusCode?: number } | null)?.statusCode === 404;
+}
+
+/**
+ * Persist a session.
+ *
+ * 'create' writes a new row keyed by tokenHash[:32] (one row per device or
+ * login). It upserts, so it must only be used for a session that has just
+ * been minted.
+ *
+ * 'update' writes back a session that was already persisted (TTL refresh,
+ * sliding-window touch, access-token refresh). It is a conditional Merge on
+ * the existing row (`If-Match: *`), so it can never recreate a row that was
+ * deleted in the meantime. A missing row raises SessionRowMissingError.
+ */
+export async function saveSession(
+  session: StoredSession,
+  mode: 'create' | 'update' = 'create',
+): Promise<void> {
   await ensureTables();
 
-  if (session.sessionToken) {
-    // New session or re-auth — RowKey = tokenHash[:32] for multi-device support.
+  if (mode === 'update' && session._storageKey) {
+    const accessEnvelope = encryptWithDek(
+      session.accessToken,
+      sessionAccessTokenAad(session._storageKey),
+    );
+    try {
+      await getSessionsTable().updateEntity({
+        partitionKey: 'session',
+        rowKey: session._storageKey,
+        userId: session.userId,
+        homeAccountId: session.homeAccountId,
+        displayName: session.displayName,
+        email: session.email,
+        tenantId: session.tenantId,
+        expiresAt: session.expiresAt,
+        sessionCreatedAt: session.sessionCreatedAt || Date.now(),
+        sessionAbsoluteCreatedAt: session.sessionAbsoluteCreatedAt ?? null,
+        deviceLabel: session.deviceLabel ?? null,
+        accessTokenCiphertext: accessEnvelope.ciphertext,
+        accessTokenIv: accessEnvelope.iv,
+        accessTokenAuthTag: accessEnvelope.authTag,
+      }, 'Merge', { etag: '*' });
+    } catch (err) {
+      if (isNotFound(err)) throw new SessionRowMissingError(session._storageKey);
+      throw err;
+    }
+  } else if (session.sessionToken) {
+    // New session — RowKey = tokenHash[:32] for multi-device support.
     // Each device/login gets its own row; no more overwriting.
     const tokenHash = hashSessionToken(session.sessionToken);
     const rowKey = tokenHash.slice(0, 32);
@@ -214,31 +271,27 @@ export async function saveSession(session: StoredSession): Promise<void> {
       accessTokenAuthTag: accessEnvelope.authTag,
       sessionTokenHash: tokenHash,
     }, 'Replace');
-  } else if (session._storageKey) {
-    // Refresh path — update the specific row identified by _storageKey.
-    // Merge preserves the existing sessionTokenHash.
-    const accessEnvelope = encryptWithDek(
-      session.accessToken,
-      sessionAccessTokenAad(session._storageKey),
-    );
-    await getSessionsTable().upsertEntity({
-      partitionKey: 'session',
-      rowKey: session._storageKey,
-      userId: session.userId,
-      homeAccountId: session.homeAccountId,
-      displayName: session.displayName,
-      email: session.email,
-      tenantId: session.tenantId,
-      expiresAt: session.expiresAt,
-      sessionCreatedAt: session.sessionCreatedAt || Date.now(),
-      sessionAbsoluteCreatedAt: session.sessionAbsoluteCreatedAt ?? null,
-      deviceLabel: session.deviceLabel ?? null,
-      accessTokenCiphertext: accessEnvelope.ciphertext,
-      accessTokenIv: accessEnvelope.iv,
-      accessTokenAuthTag: accessEnvelope.authTag,
-    }, 'Merge');
   } else {
     console.warn('[tableStorage] saveSession called without sessionToken or _storageKey — cannot persist');
+  }
+}
+
+/**
+ * Whether a session's row still exists. A cheap point read used to revalidate
+ * sessions held in a replica's memory cache. Throws on any error other than
+ * not-found so the caller can tell "deleted" from "storage unreachable".
+ * Returns true when storage is not configured: there is no row to have been
+ * deleted, and the memory cache is the only store.
+ */
+export async function sessionRowExists(storageKey: string): Promise<boolean> {
+  if (!connectionString) return true;
+  await ensureTables();
+  try {
+    await getSessionsTable().getEntity('session', storageKey, { queryOptions: { select: ['RowKey'] } });
+    return true;
+  } catch (err) {
+    if (isNotFound(err)) return false;
+    throw err;
   }
 }
 

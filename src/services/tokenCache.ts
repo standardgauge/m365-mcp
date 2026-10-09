@@ -1,5 +1,14 @@
 import { acquireTokenSilent } from './graphClient.js';
-import { saveSession, loadSession, loadSessionByToken, removeSession, removeSessionByKey, listAllSessions } from './tableStorage.js';
+import {
+  saveSession,
+  loadSession,
+  loadSessionByToken,
+  removeSession,
+  removeSessionByKey,
+  listAllSessions,
+  sessionRowExists,
+  SessionRowMissingError,
+} from './tableStorage.js';
 import { hashSessionToken } from './credentialCrypto.js';
 
 /** Session inactivity TTL (in milliseconds). Active sessions auto-extend
@@ -16,6 +25,21 @@ export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  *  cannot be refreshed indefinitely while the MSAL refresh token remains
  *  valid (up to 90 days). */
 export const SESSION_MAX_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** How long a replica trusts a session in its memory cache before checking
+ *  that the session's row still exists. Deleting rows (logout, the credential
+ *  purge script, manual deletion) reaches other replicas only through this
+ *  check, so it is the bound on how long a deleted session keeps working. */
+export const SESSION_REVALIDATE_MS = 30 * 1000;
+
+/** While storage is unreachable a cached session keeps working, so a storage
+ *  blip does not log every client out. This caps that grace: past it, the
+ *  session is refused until storage answers. */
+export const SESSION_REVALIDATE_MAX_STALE_MS = 5 * 60 * 1000;
+
+/** Thrown by storeSession when the session's row was deleted after this
+ *  replica cached it. The session is revoked and has been evicted. */
+export { SessionRowMissingError };
 
 export interface UserSession {
   userId: string;
@@ -106,6 +130,48 @@ function materializeLegacyAnchor(session: UserSession): boolean {
 // session that's actually being used for this request.
 const sessionCache = new Map<string, UserSession>();   // tokenHash → session
 const userIndex = new Map<string, string>();             // userId → tokenHash of most recent auth
+const verifiedAt = new Map<string, number>();            // cache key → when storage last confirmed the row
+
+function cachePut(key: string, session: UserSession): void {
+  sessionCache.set(key, session);
+  verifiedAt.set(key, Date.now());
+}
+
+function cacheEvict(key: string): void {
+  const session = sessionCache.get(key);
+  sessionCache.delete(key);
+  verifiedAt.delete(key);
+  if (session && userIndex.get(session.userId) === key) userIndex.delete(session.userId);
+}
+
+/**
+ * Confirm a cached session's row still exists, at most once per
+ * SESSION_REVALIDATE_MS. Returns false (and evicts) when the row is gone, or
+ * when storage has been unreachable for longer than
+ * SESSION_REVALIDATE_MAX_STALE_MS since the last confirmation.
+ */
+async function revalidateCached(key: string, session: UserSession): Promise<boolean> {
+  const last = verifiedAt.get(key) ?? 0;
+  const now = Date.now();
+  if (now - last < SESSION_REVALIDATE_MS || !session._storageKey) return true;
+  try {
+    if (await sessionRowExists(session._storageKey)) {
+      verifiedAt.set(key, now);
+      return true;
+    }
+    console.warn(`[tokenCache] Session row for user ${session.userId} was deleted — evicting cached session`);
+  } catch (err) {
+    if (now - last < SESSION_REVALIDATE_MAX_STALE_MS) {
+      console.warn('[tokenCache] Could not revalidate cached session; serving cached copy:', err);
+      return true;
+    }
+    console.error('[tokenCache] Could not revalidate cached session past the stale limit; refusing it:', err);
+    // Refuse but keep the entry: it is still valid if storage comes back.
+    return false;
+  }
+  cacheEvict(key);
+  return false;
+}
 
 /**
  * Compute or retrieve the cache key for a session.
@@ -118,17 +184,33 @@ function cacheKey(session: UserSession): string {
   return `user:${session.userId}`;
 }
 
+/**
+ * Cache and persist a session.
+ *
+ * A session without a _storageKey has just been minted (OAuth callback,
+ * device login) and gets a new row. Anything carrying a _storageKey came from
+ * storage or from an earlier storeSession, so the write is an update that
+ * fails rather than recreating the row if it was deleted meanwhile. That case
+ * evicts the session and throws SessionRowMissingError: a refresh must not undo
+ * a logout or a purge.
+ */
 export async function storeSession(session: UserSession): Promise<void> {
+  const mode = session._storageKey ? 'update' : 'create';
   // Ensure _storageKey is set so refresh/delete paths know which row to target
   if (session.sessionToken && !session._storageKey) {
     session._storageKey = hashSessionToken(session.sessionToken).slice(0, 32);
   }
   const key = cacheKey(session);
-  sessionCache.set(key, session);
+  cachePut(key, session);
   userIndex.set(session.userId, key);
   try {
-    await saveSession(session);
+    await saveSession(session, mode);
   } catch (err) {
+    if (err instanceof SessionRowMissingError) {
+      console.warn(`[tokenCache] Session row for user ${session.userId} was deleted — not writing it back`);
+      cacheEvict(key);
+      throw err;
+    }
     console.error('[tokenCache] Failed to persist session to Table Storage:', err);
   }
 }
@@ -138,6 +220,7 @@ export async function getSession(userId: string): Promise<UserSession | undefine
   const cachedKey = userIndex.get(userId);
   if (cachedKey) {
     const cached = sessionCache.get(cachedKey);
+    if (cached && !(await revalidateCached(cachedKey, cached))) return undefined;
     if (cached) {
       if (materializeLegacyAnchor(cached)) {
         storeSession(cached).catch((err) =>
@@ -160,7 +243,7 @@ export async function getSession(userId: string): Promise<UserSession | undefine
         );
       }
       const key = cacheKey(stored);
-      sessionCache.set(key, stored);
+      cachePut(key, stored);
       userIndex.set(userId, key);
       return stored;
     }
@@ -183,6 +266,7 @@ export async function getSessionByToken(token: string): Promise<UserSession | un
 
   // Fast path: direct session lookup by token hash
   const cached = sessionCache.get(hash);
+  if (cached && !(await revalidateCached(hash, cached))) return undefined;
   if (cached) {
     if (!cached.sessionToken) cached.sessionToken = token;
     if (materializeLegacyAnchor(cached)) {
@@ -202,7 +286,7 @@ export async function getSessionByToken(token: string): Promise<UserSession | un
           console.error('[tokenCache] Failed to persist legacy absolute anchor (getSessionByToken storage):', err)
         );
       }
-      sessionCache.set(hash, stored);
+      cachePut(hash, stored);
       // Update userId index so subsequent getSession/getValidAccessToken
       // calls in this request context use THIS session
       userIndex.set(stored.userId, hash);
@@ -230,6 +314,7 @@ export async function deleteSessionByKey(storageKey: string, userId: string): Pr
   for (const [cacheEntryKey, cached] of sessionCache) {
     if (cached.userId === userId && cached._storageKey === storageKey) {
       sessionCache.delete(cacheEntryKey);
+      verifiedAt.delete(cacheEntryKey);
       // Only drop the userId index if it pointed at THIS session; a different
       // concurrent session for the same user must stay indexed.
       if (userIndex.get(userId) === cacheEntryKey) {
@@ -246,13 +331,17 @@ export async function deleteSessionByKey(storageKey: string, userId: string): Pr
 }
 
 /**
- * Delete ALL sessions for a user. Used for admin "kick user" operations.
- * Also exported as deleteSession for backward compatibility with tests.
+ * Delete ALL sessions for a user. Used for logout and admin "kick user"
+ * operations. Also exported as deleteSession for backward compatibility.
+ *
+ * Evicts every cached session for the user on this replica, not only the
+ * indexed one. Other replicas drop theirs on the next revalidation
+ * (SESSION_REVALIDATE_MS), and cannot write a deleted row back meanwhile.
  */
 export async function deleteAllUserSessions(userId: string): Promise<void> {
-  // Clear cache entries
-  const cachedHash = userIndex.get(userId);
-  if (cachedHash) sessionCache.delete(cachedHash);
+  for (const [key, cached] of sessionCache) {
+    if (cached.userId === userId) cacheEvict(key);
+  }
   userIndex.delete(userId);
   try {
     await removeSession(userId);
@@ -287,6 +376,7 @@ export async function getValidAccessTokenForSession(session: UserSession): Promi
     console.log(`[tokenCache] Access token refreshed for user ${session.userId}, session TTL extended`);
     return updated.accessToken;
   } catch (err) {
+    if (err instanceof SessionRowMissingError) throw err;
     // MSAL silent refresh failed. Do NOT delete the session here.
     //
     // Deleting it permanently unbinds the client's long-lived session token: the
@@ -359,7 +449,7 @@ export async function listActiveSessions(): Promise<Array<{
     // Refresh memory cache with all sessions
     for (const s of sessions) {
       const key = cacheKey(s);
-      sessionCache.set(key, s);
+      cachePut(key, s);
       // Only update userIndex if no entry exists (don't override active session)
       if (!userIndex.has(s.userId)) {
         userIndex.set(s.userId, key);
