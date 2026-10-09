@@ -11,6 +11,7 @@ import {
 import { Client, ClientOptions } from '@microsoft/microsoft-graph-client';
 import 'isomorphic-fetch';
 import { saveMsalCache, loadMsalCache } from './tableStorage.js';
+import { migrateLegacyCredentialKeys } from './msalCacheKeys.js';
 
 export interface MsalConfig {
   clientId: string;
@@ -74,7 +75,9 @@ const cachePlugin: ICachePlugin = {
     try {
       const cached = await loadMsalCache();
       if (cached) {
-        cacheContext.tokenCache.deserialize(cached);
+        // A cache written by msal-node 2.x keeps its old credential keys until
+        // re-keyed here; see msalCacheKeys.ts for what goes wrong otherwise.
+        cacheContext.tokenCache.deserialize(migrateLegacyCredentialKeys(cached));
       } else {
         console.warn('[MSAL] No cache data returned from storage — MSAL operating with empty cache');
       }

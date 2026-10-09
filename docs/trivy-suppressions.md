@@ -53,63 +53,37 @@ justify re-gating: the newer OS still accrues `linux-libc-dev` kernel-header wav
 so the report-only posture remains the correct long-term stance for a consumed
 vendor image.
 
-## `uuid` < 11.1.1 via `@azure/msal-node` — assessed, not acting
+## `uuid` < 11.1.1 via `@azure/msal-node` — retired
 
-`npm audit` reports two linked **moderate** findings:
+`npm audit --omit=dev` used to report two linked moderates: `uuid` <11.1.1
+(GHSA-w5hq-g745-h8pq, a missing bounds check in `v3`/`v5`/`v6` when `buf` is
+passed) and `@azure/msal-node` <=5.1.4 for depending on it. The vulnerable calls
+were never reachable (msal-node 2.16.3 only called `v4()`), so the entry was held
+open until the library could be upgraded deliberately rather than through
+`npm audit fix --force`, which an `overrides` pin on `uuid` would have been a
+worse version of.
 
-```
-uuid              <11.1.1     Missing buffer bounds check in v3/v5/v6 when buf is provided
-@azure/msal-node  <=5.1.4     Depends on vulnerable versions of uuid
-  fixAvailable: @azure/msal-node@6.0.0  (isSemVerMajor: true)
-```
+That upgrade has happened: `@azure/msal-node` is on 7.x, which does not depend on
+`uuid`, and the production audit is clean. What made it safe to take:
 
-**Neither gates CI**, and neither should be "fixed" by taking npm's advice.
+- `src/__tests__/msalAuthFlows.test.ts` runs the real library against an
+  in-process stand-in for the Entra endpoints (`src/__tests__/fixtures/fakeEntra.ts`)
+  through the authorization code, device code and refresh flows, and through the
+  Table Storage cache plugin. Every other test mocks MSAL out, so before this
+  nothing would have noticed a change in request shapes or cache handling.
+- A cache serialized by 2.16.3 is checked in as a fixture
+  (`msal-node-2.16.3-cache.json`) and the test confirms 7.x reads it, finds the
+  account, and refreshes with its refresh token, so signed-in users are not sent
+  back to sign in by the deploy.
+- That test found the one behavioural break: 7.x keys cached credentials
+  differently and never migrates 2.x keys, so an upgraded cache kept presenting
+  the pre-upgrade refresh token on every refresh while the rotated one sat
+  unused beside it. `src/services/msalCacheKeys.ts` re-keys the blob as the
+  cache plugin loads it; its header has the detail.
 
-### Why the suggested fix is wrong here
-
-npm proposes upgrading the direct dependency `@azure/msal-node` from **2.16.3 to
-6.0.0** — four major versions, on the library that performs every OAuth token
-acquisition for every tenant. The blast radius of getting that wrong is total:
-no user on any tenant can authenticate. is a reminder that this code path
-fails in subtle, hard-to-detect ways.
-
-Doing that to clear two moderates that gate nothing is a bad trade.
-
-### Reachability (why this is low risk here)
-
-The advisory is specific: a missing bounds check in **`v3`, `v5` and `v6`**, and
-only **when the optional `buf` argument is supplied**.
-
-`@azure/msal-node@2.16.3` calls **`v4()` only** — a single call site, for
-correlation IDs, with no `buf` argument. `v4` is not in the affected set.
-
-There is exactly one `uuid` copy in the tree (`node_modules/uuid@8.3.2`,
-hoisted). The second `@azure/msal-node@5.4.2` present via
-`applicationinsights → @azure/identity` does not pull its own.
-
-So the vulnerable code paths are not called, and cannot be reached through this
-application's use of the library.
-
-### Why not just override `uuid`
-
-An `overrides` pin to `uuid@^11.1.1` would silence the finding without the major
-bump, and was considered. Rejected for now: it forces an untested transitive
-substitution (8.x → 11.x, across the CommonJS/ESM export rework) **inside the
-auth library**, to remediate a code path that is not reachable. That is real risk
-bought with no real gain. Revisit if the finding ever becomes gating or reachable.
-
-### Exit criteria
-
-Any of these should retire this entry:
-
-- The `@azure/msal-node` 2.x line ships a release depending on `uuid` ≥ 11.1.1.
-- A deliberate, tested upgrade to `@azure/msal-node` 6.x happens on its own
-  merits — with token-flow regression coverage, not as a side effect of `npm
-  audit fix --force`.
-- msal-node begins calling `v3`/`v5`/`v6`, which would make the advisory
-  reachable. Re-check the call sites when the dependency moves.
-
-**Re-review by:** 2026-12-01
+If a later MSAL major changes the credential key format again, the test that
+expects a 7.x-written cache to pass through the re-keying unchanged fails, and
+`currentCredentialKey` needs updating to match.
 
 ## MessagePack (MessagePack-CSharp) 2.5.192 — ``
 
