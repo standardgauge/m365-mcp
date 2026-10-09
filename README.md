@@ -250,7 +250,7 @@ Copy `.env.example` to `.env` for local work, or set these as Container App secr
 | `AZURE_STORAGE_IDENTITY_CLIENT_ID` | With the endpoint | Client ID of the user-assigned identity holding Storage Table Data Contributor on the account. Unset uses the system-assigned identity. Set by the Bicep |
 | `AZURE_STORAGE_CONNECTION_STRING` | No | Account-key connection string, used only when `AZURE_STORAGE_TABLE_ENDPOINT` is unset: local development and instances whose infra predates it. Both unset falls back to the Azurite emulator |
 | `AUDIT_LOG_RETENTION_DAYS` | No | Days of `auditLog` rows to keep. Older rows are purged about once a day while the server is in use. Defaults to `365`; `0` keeps every row. See the operations runbook |
-| `RATE_LIMIT_<ROUTE>_PER_MINUTE` | No | Requests per client address per minute, per replica, on the unauthenticated routes. `<ROUTE>` is `LOGIN` (default `30`), `DEVICE` (`10`), `INSTALL_POLL` (`120`) or `MCP` (`1200`); `0` turns that route's limiter off. See the operations runbook |
+| `RATE_LIMIT_<ROUTE>_PER_MINUTE` | No | Requests per client address per minute, per replica, on the unauthenticated routes. `<ROUTE>` is `LOGIN` (default `30`), `DEVICE` (`10`), `INSTALL_POLL` (`120`), `INSTALL_CONFIRM` (`30`) or `MCP` (`1200`); `0` turns that route's limiter off. See the operations runbook |
 | `RATE_LIMIT_TRUSTED_PROXY_HOPS` | No | Proxies in front of the app that append to `X-Forwarded-For`. Default `1`, the Container Apps ingress; set `2` behind Front Door or an Application Gateway |
 | `DEFAULT_MAIL_DENY_FOLDERS` | No | Comma-separated mail folder names always denied, matched by display name, case-insensitively |
 | `DEFAULT_SHAREPOINT_DENY_PATHS` | No | Comma-separated SharePoint path prefixes always denied |
@@ -264,7 +264,7 @@ Copy `.env.example` to `.env` for local work, or set these as Container App secr
 
 ## Connecting a client
 
-Each instance serves its own installers. They sign you in through the browser, save a small local shim, store the session token in the OS credential store (macOS Keychain, Windows DPAPI, libsecret on Linux, or a 0600 file under `~/.m365-mcp/` where none is available), and write the Claude Desktop and Claude Code configs. The configs name the store, not the token:
+Each instance serves its own installers. They sign you in through the browser, save a small local shim, store the session token in the OS credential store (macOS Keychain, Windows DPAPI, libsecret on Linux, or a 0600 file under `~/.m365-mcp/` where none is available), and write the Claude Desktop and Claude Code configs. The configs name the store, not the token. Each installer shows a confirmation code before the browser opens; after you sign in, the browser asks for it, and the session reaches the installer only once it matches. A sign-in link you did not start yourself ends at that page, so close it.
 
 ```bash
 curl -fsSL https://<your-host>/install.sh | bash        # macOS

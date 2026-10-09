@@ -23,15 +23,18 @@ import { isIP } from 'net';
 //                                  Apps ingress. Set 2 behind Front Door or an
 //                                  Application Gateway.
 
-export type RateLimitedRoute = 'login' | 'device' | 'install-poll' | 'mcp';
+export type RateLimitedRoute = 'login' | 'device' | 'install-poll' | 'install-confirm' | 'mcp';
 
 // Defaults sized for a whole office behind one NAT address, not one user.
 // install-poll: the install scripts poll every 2s, so 30/min per install.
+// install-confirm: one GET and one POST per install; wrong codes are also
+// capped per handoff, so this only bounds the table reads.
 // mcp: one request per tool call; an agent can burst, several share an address.
 export const DEFAULT_LIMITS: Record<RateLimitedRoute, number> = {
   login: 30,
   device: 10,
   'install-poll': 120,
+  'install-confirm': 30,
   mcp: 1200,
 };
 
