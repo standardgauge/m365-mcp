@@ -236,8 +236,8 @@ Copy `.env.example` to `.env` for local work, or set these as Container App secr
 | `DEFAULT_MAIL_DENY_FOLDERS` | No | Comma-separated mail folder names always denied, matched by display name, case-insensitively |
 | `DEFAULT_SHAREPOINT_DENY_PATHS` | No | Comma-separated SharePoint path prefixes always denied |
 | `MCP_INSTANCE_NAME` | No | Display name shown in the admin UI, the `initialize` response, and the generated extension bundle (also derives the bundle's slug and keychain service name). Defaults to `M365 MCP` |
-| `MCP_SESSION_HMAC_KEY` | Production | 64-hex-char key that hashes session tokens at rest. Generate with `openssl rand -hex 32`; never reuse across tenants |
-| `MCP_DATA_ENCRYPTION_KEY` | Production | 64-hex-char AES-256-GCM key for access tokens and the MSAL cache at rest. Same generation rule. Rotating it signs every user out |
+| `MCP_SESSION_HMAC_KEY` | Yes | 64-hex-char key that hashes session tokens at rest. Generate with `openssl rand -hex 32`; never reuse across tenants. The container refuses to start if it is missing or malformed |
+| `MCP_DATA_ENCRYPTION_KEY` | Yes | 64-hex-char AES-256-GCM key for access tokens and the MSAL cache at rest. Same generation and startup rules. Rotating it signs every user out; see "Application keys" in `docs/operations-runbook.md` |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | No | Forwards console output and exceptions to the tenant's own Application Insights resource |
 | `GIT_SHA` | Set by the build | Reported by `GET /health` so a probe can assert which commit is running |
 
@@ -385,7 +385,8 @@ Notes, categories, and postal addresses round-trip: anything written reads back 
 ```bash
 npm install
 cp local.settings.json.example local.settings.json
-# Edit local.settings.json with your Entra app credentials
+# Edit local.settings.json with your Entra app credentials and two fresh
+# application keys (`openssl rand -hex 32` each); the host will not start without them
 
 # Table Storage emulator
 npx azurite --tableHost 127.0.0.1

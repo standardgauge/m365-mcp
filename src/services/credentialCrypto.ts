@@ -16,9 +16,12 @@ import { createHmac, randomBytes, createCipheriv, createDecipheriv } from 'crypt
  *    authenticated data (see envelopeAad), so it cannot be moved to another
  *    user's row and still decrypt.
  *
- * Both keys (`MCP_SESSION_HMAC_KEY` and `MCP_DATA_ENCRYPTION_KEY`) live in
- * Azure Key Vault and are bound to the Container App as secretRef env vars.
- * Container App managed identity needs `Key Vault Secrets User` on the vault.
+ * Both keys (`MCP_SESSION_HMAC_KEY` and `MCP_DATA_ENCRYPTION_KEY`) reach the
+ * process as env vars bound to Container App secrets (secretRef). The secrets
+ * should be Key Vault references; see "Application keys" in
+ * docs/operations-runbook.md for storage, rotation and revocation. Both are
+ * validated before the Functions host starts (src/startup/checkKeys.ts), so a
+ * missing or malformed key stops the container instead of the first sign-in.
  *
  * Loss of either key permanently invalidates the corresponding stored data:
  *  - Lose HMAC key → all sessions become unauthenticatable, every user re-OAuths
@@ -33,53 +36,80 @@ import { createHmac, randomBytes, createCipheriv, createDecipheriv } from 'crypt
 // load) so that tests can set them in beforeAll without import-order races.
 // The cost is one Buffer.from per crypto operation, which is negligible.
 
-function getHmacKey(): Buffer {
-  const hex = process.env.MCP_SESSION_HMAC_KEY ?? '';
+export const CRYPTO_KEY_ENV_VARS = ['MCP_SESSION_HMAC_KEY', 'MCP_DATA_ENCRYPTION_KEY'] as const;
+export type CryptoKeyEnvVar = (typeof CRYPTO_KEY_ENV_VARS)[number];
+
+const KEY_PURPOSE: Record<CryptoKeyEnvVar, string> = {
+  MCP_SESSION_HMAC_KEY: 'Server cannot persist sessions safely.',
+  MCP_DATA_ENCRYPTION_KEY: 'Server cannot persist credentials safely.',
+};
+
+/**
+ * Decode one key, or say why it is unusable. Surrounding whitespace is
+ * ignored, since a value pasted into Key Vault often carries a trailing
+ * newline. Anything else must be exactly 64 hex characters.
+ *
+ * Buffer.from(hex, 'hex') is not a validator on its own: it stops at the first
+ * non-hex character and drops a trailing odd nibble, so a 65-character value or
+ * a valid key with junk appended decodes to 32 bytes without complaint. The
+ * regex is what rejects those.
+ */
+function parseKey(name: CryptoKeyEnvVar, raw: string | undefined): { key: Buffer } | { error: string } {
+  const hex = (raw ?? '').trim();
   if (!hex) {
-    throw new Error(
-      'MCP_SESSION_HMAC_KEY env var is not set. Server cannot persist sessions safely. ' +
-      'Bind a 64-hex-char key from Key Vault before starting the container.'
-    );
+    return {
+      error:
+        `${name} env var is not set. ${KEY_PURPOSE[name]} ` +
+        'Bind a 64-hex-char key from Key Vault before starting the container.',
+    };
   }
-  const bytes = Buffer.from(hex, 'hex');
-  if (bytes.length !== 32) {
-    throw new Error(
-      `MCP_SESSION_HMAC_KEY must decode to exactly 32 bytes (64 hex chars), got ${bytes.length}`
-    );
+  if (!/^[0-9a-fA-F]+$/.test(hex)) {
+    return { error: `${name} must be hex-encoded (64 hex chars); it contains non-hex characters` };
   }
-  return bytes;
+  if (hex.length !== 64) {
+    return {
+      error: `${name} must decode to exactly 32 bytes (64 hex chars), got ${hex.length} hex chars`,
+    };
+  }
+  return { key: Buffer.from(hex, 'hex') };
+}
+
+function getKey(name: CryptoKeyEnvVar): Buffer {
+  const parsed = parseKey(name, process.env[name]);
+  if ('error' in parsed) throw new Error(parsed.error);
+  return parsed.key;
+}
+
+function getHmacKey(): Buffer {
+  return getKey('MCP_SESSION_HMAC_KEY');
 }
 
 function getDek(): Buffer {
-  const hex = process.env.MCP_DATA_ENCRYPTION_KEY ?? '';
-  if (!hex) {
-    throw new Error(
-      'MCP_DATA_ENCRYPTION_KEY env var is not set. Server cannot persist credentials safely. ' +
-      'Bind a 64-hex-char key from Key Vault before starting the container.'
-    );
-  }
-  const bytes = Buffer.from(hex, 'hex');
-  if (bytes.length !== 32) {
-    throw new Error(
-      `MCP_DATA_ENCRYPTION_KEY must decode to exactly 32 bytes (64 hex chars), got ${bytes.length}`
-    );
-  }
-  return bytes;
+  return getKey('MCP_DATA_ENCRYPTION_KEY');
 }
 
-export function isCryptoConfigured(): boolean {
-  try {
-    getHmacKey();
-    getDek();
-    return true;
-  } catch {
-    return false;
+/**
+ * Every problem with the two keys in `env`, one message per key. Empty means
+ * both are usable. Reports both keys at once so an operator fixing a fresh
+ * deployment is not sent round the loop twice. Never includes key material.
+ */
+export function cryptoKeyProblems(env: NodeJS.ProcessEnv = process.env): string[] {
+  const problems: string[] = [];
+  for (const name of CRYPTO_KEY_ENV_VARS) {
+    const parsed = parseKey(name, env[name]);
+    if ('error' in parsed) problems.push(parsed.error);
   }
+  return problems;
 }
 
-export function requireCryptoConfigured(): void {
-  getHmacKey();
-  getDek();
+export function isCryptoConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return cryptoKeyProblems(env).length === 0;
+}
+
+/** Throws one error naming every unusable key. Called at host startup. */
+export function requireCryptoConfigured(env: NodeJS.ProcessEnv = process.env): void {
+  const problems = cryptoKeyProblems(env);
+  if (problems.length) throw new Error(problems.join('\n'));
 }
 
 // ── HMAC for session token lookup ──────────────────────────────────────────────
