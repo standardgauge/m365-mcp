@@ -205,6 +205,32 @@ export function getDefaultDenyPaths(type: DenyListType): string[] {
 // ── Combined path-check helpers ───────────────────────────────────────────────
 
 /**
+ * Whose per-user (tier 2) deny lists apply to an operation. Usually the
+ * signed-in caller alone. When the caller reaches another user's mailbox or
+ * calendar through delegation, it is the caller *and* the owner of that data
+ * (see `resolveDenySubject` in mailboxOwner.ts): an owner who hides a folder
+ * from AI hides it from every agent, not only their own.
+ */
+export type DenySubject = string | readonly string[];
+
+/** Default + global + every subject's per-user entries, as a flat path list. */
+async function loadDeniedPaths(
+  tenantId: string,
+  subject: DenySubject,
+  type: DenyListType
+): Promise<string[]> {
+  const userIds = typeof subject === 'string' ? [subject] : [...new Set(subject)];
+  const [globalEntries, ...userEntryLists] = await Promise.all([
+    listGlobalDenyEntries(tenantId, type),
+    ...userIds.map((id) => listUserDenyEntries(id, type)),
+  ]);
+  return [
+    ...getDefaultDenyPaths(type),
+    ...[...globalEntries, ...userEntryLists.flat()].map((e) => e.path),
+  ];
+}
+
+/**
  * Strips the Graph API drive prefix so paths from two different sources can be
  * compared on equal footing.
  *
@@ -253,23 +279,17 @@ function matchesDenyList(path: string, deniedPaths: string[]): boolean {
 
 /**
  * Checks both the global and per-user deny list for `path`.
- * Returns true if the path is blocked for this user.
+ * Returns true if the path is blocked for this user — or, when `userId` names
+ * several subjects (delegated access), for any of them.
  */
 export async function isPathDenied(
   tenantId: string,
-  userId: string,
+  userId: DenySubject,
   type: DenyListType,
   path: string
 ): Promise<boolean> {
   try {
-    const [globalEntries, userEntries] = await Promise.all([
-      listGlobalDenyEntries(tenantId, type),
-      listUserDenyEntries(userId, type),
-    ]);
-    const allDenied = [
-      ...getDefaultDenyPaths(type),
-      ...[...globalEntries, ...userEntries].map((e) => e.path),
-    ];
+    const allDenied = await loadDeniedPaths(tenantId, userId, type);
     return matchesDenyList(path, allDenied);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -355,16 +375,9 @@ export async function filterDeniedSearchHits<
  */
 export async function filterDeniedPaths<
   T extends { path?: string; webUrl?: string; id?: string; name?: string }
->(tenantId: string, userId: string, type: DenyListType, items: T[]): Promise<T[]> {
+>(tenantId: string, userId: DenySubject, type: DenyListType, items: T[]): Promise<T[]> {
   try {
-    const [globalEntries, userEntries] = await Promise.all([
-      listGlobalDenyEntries(tenantId, type),
-      listUserDenyEntries(userId, type),
-    ]);
-    const allDenied = [
-      ...getDefaultDenyPaths(type),
-      ...[...globalEntries, ...userEntries].map((e) => e.path),
-    ];
+    const allDenied = await loadDeniedPaths(tenantId, userId, type);
 
     return items.filter((item) => {
       // Exclude when the primary identifier (path/webUrl/id) OR the display

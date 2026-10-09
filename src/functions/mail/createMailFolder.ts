@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getValidAccessTokenForSession } from '../../services/tokenCache.js';
 import { createGraphClient } from '../../services/graphClient.js';
+import { resolveDenySubject } from '../../services/mailboxOwner.js';
 import { withPolicyEnforcement, checkDenyList } from '../../services/policyEnforcement.js';
 import { assertOpaqueId } from '../../services/opaqueId.js';
 import type { AuthResult } from '../../services/authMiddleware.js';
@@ -30,13 +31,13 @@ async function createMailFolderHandler(
   // Mail deny-list entries match on display name (see listFoldersMail / moveMessage).
   // Block creating a folder whose name is already denied, so it can't be used to
   // route mail past the deny list.
-  const denyViolation = await checkDenyList(userId, 'mail', body.displayName);
+  const accessToken = await getValidAccessTokenForSession(auth.session);
+  const graph = createGraphClient(accessToken);
+  const denySubject = await resolveDenySubject(graph, userId, body.mailboxId);
+  const denyViolation = await checkDenyList(userId, 'mail', body.displayName, undefined, denySubject);
   if (denyViolation) {
     return { status: denyViolation.status, jsonBody: { error: denyViolation.error } };
   }
-
-  const accessToken = await getValidAccessTokenForSession(auth.session);
-  const graph = createGraphClient(accessToken);
 
   const mailboxBase = body.mailboxId && body.mailboxId !== 'me'
     ? `/users/${body.mailboxId}`

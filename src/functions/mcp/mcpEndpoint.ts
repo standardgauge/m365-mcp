@@ -5,7 +5,8 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/fu
 import { getValidAccessTokenForSession, getTenantIdFromSession } from '../../services/tokenCache.js';
 import { createGraphClient } from '../../services/graphClient.js';
 import { filterDeniedPaths, filterDeniedSearchHits } from '../../services/denyList.js';
-import { isPathDenied } from '../../services/denyList.js';
+import { isPathDenied, type DenySubject } from '../../services/denyList.js';
+import { resolveDenySubject } from '../../services/mailboxOwner.js';
 import { checkCalendarAccess } from '../../services/calendarAccess.js';
 import { resolveMailFolderName, resolveContactParentFolder, resolveDefaultContactFolder, resolveSectionNotebook, normalizeContactFolderId, resolveDefaultCalendarId } from '../../services/containerResolver.js';
 import { authenticateRequest } from '../../services/authMiddleware.js';
@@ -195,7 +196,7 @@ async function stripDeniedFolders(
   graph: Client,
   base: string,
   tenantId: string,
-  userId: string,
+  userId: DenySubject,
   messages: MessageSummary[],
   folderScoped: boolean,
 ): Promise<MessageSummary[]> {
@@ -369,6 +370,7 @@ async function createReplyDraft(
   const token = await getValidAccessTokenForSession(session);
   const graph = createGraphClient(token);
   const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+  const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
 
   // Source message must be readable — same check read_message makes. Its addressing is read
   // too, to default the reply's From to the alias it came in on.
@@ -378,12 +380,12 @@ async function createReplyDraft(
     .get();
   if (msgMeta.parentFolderId) {
     const folderName = await resolveMailFolderName(graph, msgMeta.parentFolderId, base);
-    if (folderName && await isPathDenied(tenantId, session.userId, 'mail', folderName)) {
+    if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) {
       throw new Error('Access restricted by deny list');
     }
   }
   // The reply draft is written to Drafts — same check create_draft makes.
-  if (await isPathDenied(tenantId, session.userId, 'mail', 'Drafts')) {
+  if (await isPathDenied(tenantId, denySubject, 'mail', 'Drafts')) {
     throw new Error('Access restricted by deny list — Drafts folder is blocked');
   }
 
@@ -781,13 +783,14 @@ const tools: ToolDef[] = [
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       const apiPath = args.parentFolderId ? `${base}/mailFolders/${args.parentFolderId}/childFolders` : `${base}/mailFolders`;
       const result = await graph.api(apiPath).select('id,displayName,totalItemCount,unreadItemCount,childFolderCount').top(100).get();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const folders = (result.value ?? []).map((f: any) => ({ id: f.id, displayName: f.displayName, path: f.displayName, totalItemCount: f.totalItemCount, unreadItemCount: f.unreadItemCount, childFolderCount: f.childFolderCount }));
       // Filter folders by deny list (uses displayName as path — admin deny-list entries match on display name)
       const tenantId = getTenantIdFromSession(session);
-      const allowed = await filterDeniedPaths(tenantId, session.userId, 'mail', folders);
+      const allowed = await filterDeniedPaths(tenantId, denySubject, 'mail', folders);
       const { items, count, limit, truncated } = toEnvelope(allowed, 100, graphCollectionHasMore(result));
       return { items, count, limit, truncated };
     },
@@ -809,12 +812,13 @@ const tools: ToolDef[] = [
       // Block creating a folder whose display name is on the deny list — the deny
       // list keys on displayName for mail, so a denied name must not become creatable.
       const tenantId = getTenantIdFromSession(session);
-      if (await isPathDenied(tenantId, session.userId, 'mail', args.displayName)) {
-        throw new Error('Access restricted by deny list');
-      }
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
+      if (await isPathDenied(tenantId, denySubject, 'mail', args.displayName)) {
+        throw new Error('Access restricted by deny list');
+      }
       const apiPath = args.parentFolderId ? `${base}/mailFolders/${args.parentFolderId}/childFolders` : `${base}/mailFolders`;
       const result = await graph.api(apiPath).post({ displayName: args.displayName });
       return { id: result.id, displayName: result.displayName, parentFolderId: result.parentFolderId, status: 'created' };
@@ -837,13 +841,14 @@ const tools: ToolDef[] = [
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       // Block renaming a folder that is itself deny-listed (resolve its current name).
       const currentName = await resolveMailFolderName(graph, args.folderId, base);
-      if (currentName && await isPathDenied(tenantId, session.userId, 'mail', currentName)) {
+      if (currentName && await isPathDenied(tenantId, denySubject, 'mail', currentName)) {
         throw new Error('Access restricted by deny list');
       }
       // Block renaming TO a deny-listed name (parity with create_mail_folder).
-      if (await isPathDenied(tenantId, session.userId, 'mail', args.displayName)) {
+      if (await isPathDenied(tenantId, denySubject, 'mail', args.displayName)) {
         throw new Error('Access restricted by deny list');
       }
       const result = await graph.api(`${base}/mailFolders/${args.folderId}`).patch({ displayName: args.displayName });
@@ -867,13 +872,14 @@ const tools: ToolDef[] = [
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       // Deny-list check on the folder being moved and on the destination parent.
       const movedName = await resolveMailFolderName(graph, args.folderId, base);
-      if (movedName && await isPathDenied(tenantId, session.userId, 'mail', movedName)) {
+      if (movedName && await isPathDenied(tenantId, denySubject, 'mail', movedName)) {
         throw new Error('Access restricted by deny list');
       }
       const destName = await resolveMailFolderName(graph, args.destinationParentFolderId, base);
-      if (destName && await isPathDenied(tenantId, session.userId, 'mail', destName)) {
+      if (destName && await isPathDenied(tenantId, denySubject, 'mail', destName)) {
         throw new Error('Destination folder restricted by deny list');
       }
       const result = await graph.api(`${base}/mailFolders/${args.folderId}/move`).post({ destinationId: args.destinationParentFolderId });
@@ -911,10 +917,11 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       // Block search if the requested folder is denied (resolve display name first)
       if (args.folderId) {
         const folderName = await resolveMailFolderName(graph, args.folderId, base);
-        if (folderName && await isPathDenied(tenantId, session.userId, 'mail', folderName)) {
+        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) {
           throw new Error('Access restricted by deny list');
         }
       }
@@ -935,7 +942,7 @@ const tools: ToolDef[] = [
         since: args.since,
       });
 
-      const filtered = await stripDeniedFolders(graph, base, tenantId, session.userId, outcome.messages.map(toMessageSummary), Boolean(args.folderId));
+      const filtered = await stripDeniedFolders(graph, base, tenantId, denySubject, outcome.messages.map(toMessageSummary), Boolean(args.folderId));
       // Surface truncation: the defect where a cap horizon was mistaken for the
       // mailbox's earliest message. `moreAvailable` is Graph's nextLink for $search /
       // $filter, and "stopped before the end" for a scan.
@@ -966,15 +973,16 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       if (args.folderId) {
         const folderName = await resolveMailFolderName(graph, args.folderId, base);
-        if (folderName && await isPathDenied(tenantId, session.userId, 'mail', folderName)) {
+        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) {
           throw new Error('Access restricted by deny list');
         }
       }
       const maxResults = resolveMaxResults(args.maxResults, 25, 100);
       const outcome = await listMessages(graph, { base, folderId: args.folderId, since: args.since, maxResults });
-      const filtered = await stripDeniedFolders(graph, base, tenantId, session.userId, outcome.messages.map(toMessageSummary), Boolean(args.folderId));
+      const filtered = await stripDeniedFolders(graph, base, tenantId, denySubject, outcome.messages.map(toMessageSummary), Boolean(args.folderId));
       const { items, count, limit, truncated } = toEnvelope(filtered, maxResults, outcome.moreAvailable);
       return { items, count, limit, truncated, ...outcomeMeta(outcome) };
     },
@@ -991,12 +999,13 @@ const tools: ToolDef[] = [
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const msg: any = await graph.api(`${base}/messages/${args.messageId}`).get();
       if (msg.parentFolderId) {
         const tenantId = getTenantIdFromSession(session);
         const folderName = await resolveMailFolderName(graph, msg.parentFolderId, base);
-        if (folderName && await isPathDenied(tenantId, session.userId, 'mail', folderName)) throw new Error('Access restricted by deny list');
+        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) throw new Error('Access restricted by deny list');
       }
       return msg;
     },
@@ -1013,13 +1022,14 @@ const tools: ToolDef[] = [
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       // Check deny list via parent folder of the message
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const msgMeta: any = await graph.api(`${base}/messages/${args.messageId}`).select('parentFolderId').get();
       if (msgMeta.parentFolderId) {
         const tenantId = getTenantIdFromSession(session);
         const folderName = await resolveMailFolderName(graph, msgMeta.parentFolderId, base);
-        if (folderName && await isPathDenied(tenantId, session.userId, 'mail', folderName)) throw new Error('Access restricted by deny list');
+        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) throw new Error('Access restricted by deny list');
       }
       if (args.attachmentId) {
         return readMailAttachment(graph, `${base}/messages/${args.messageId}/attachments/${args.attachmentId}`);
@@ -1122,6 +1132,7 @@ const tools: ToolDef[] = [
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       if (args.subject === undefined && args.body === undefined && args.to === undefined && args.cc === undefined && args.bcc === undefined && args.from === undefined) {
         throw new Error('At least one of subject, body, to, cc, bcc, from must be provided');
       }
@@ -1130,7 +1141,7 @@ const tools: ToolDef[] = [
       if (msgMeta.parentFolderId) {
         const tenantId = getTenantIdFromSession(session);
         const folderName = await resolveMailFolderName(graph, msgMeta.parentFolderId, base);
-        if (folderName && await isPathDenied(tenantId, session.userId, 'mail', folderName)) throw new Error('Access restricted by deny list');
+        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) throw new Error('Access restricted by deny list');
       }
       if (msgMeta.isDraft === false) {
         throw new Error('This message is not a draft. Graph only allows updates to categories/flag/isRead on sent messages — to rewrite the body or recipients, delete the original (delete_message) and create a new draft (create_draft).');
@@ -1217,6 +1228,7 @@ const tools: ToolDef[] = [
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const draft: any = await graph.api(`${base}/messages/${args.messageId}`)
@@ -1227,11 +1239,11 @@ const tools: ToolDef[] = [
       // sent copy — same pair of checks send_mail makes across its two modes.
       if (draft.parentFolderId) {
         const folderName = await resolveMailFolderName(graph, draft.parentFolderId, base);
-        if (folderName && await isPathDenied(tenantId, session.userId, 'mail', folderName)) {
+        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) {
           throw new Error('Access restricted by deny list');
         }
       }
-      if (await isPathDenied(tenantId, session.userId, 'mail', 'Sent Items')) {
+      if (await isPathDenied(tenantId, denySubject, 'mail', 'Sent Items')) {
         throw new Error('Access restricted by deny list — Sent Items folder is blocked');
       }
 
@@ -1333,16 +1345,17 @@ const tools: ToolDef[] = [
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       // Check deny list for both source folder and destination folder
       const tenantId = getTenantIdFromSession(session);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const msgMeta: any = await graph.api(`${base}/messages/${args.messageId}`).select('parentFolderId').get();
       if (msgMeta.parentFolderId) {
         const srcName = await resolveMailFolderName(graph, msgMeta.parentFolderId, base);
-        if (srcName && await isPathDenied(tenantId, session.userId, 'mail', srcName)) throw new Error('Access restricted by deny list');
+        if (srcName && await isPathDenied(tenantId, denySubject, 'mail', srcName)) throw new Error('Access restricted by deny list');
       }
       const destName = await resolveMailFolderName(graph, args.destinationFolderId, base);
-      if (destName && await isPathDenied(tenantId, session.userId, 'mail', destName)) throw new Error('Destination folder restricted by deny list');
+      if (destName && await isPathDenied(tenantId, denySubject, 'mail', destName)) throw new Error('Destination folder restricted by deny list');
       const result = await graph.api(`${base}/messages/${args.messageId}/move`).post({ destinationId: args.destinationFolderId });
       return { id: result.id, subject: result.subject, status: 'moved' };
     },
@@ -1359,12 +1372,13 @@ const tools: ToolDef[] = [
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const msgMeta: any = await graph.api(`${base}/messages/${args.messageId}`).select('parentFolderId').get();
       if (msgMeta.parentFolderId) {
         const tenantId = getTenantIdFromSession(session);
         const folderName = await resolveMailFolderName(graph, msgMeta.parentFolderId, base);
-        if (folderName && await isPathDenied(tenantId, session.userId, 'mail', folderName)) throw new Error('Access restricted by deny list');
+        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) throw new Error('Access restricted by deny list');
       }
       await graph.api(`${base}/messages/${args.messageId}`).delete();
       return { status: 'deleted', messageId: args.messageId };
@@ -1950,6 +1964,7 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
+      const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       // Deny-list enforcement (by ID and name). Invite responses act on the
       // mailbox's default calendar: checkCalendarAccess covers the /me case; an
       // explicit mailbox is checked against ITS default calendar directly.
@@ -1960,8 +1975,8 @@ const tools: ToolDef[] = [
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const cal: any = await graph.api(`${base}/calendar`).select('id,name').get();
         if (
-          (cal?.id && (await isPathDenied(tenantId, session.userId, 'calendar', cal.id))) ||
-          (cal?.name && (await isPathDenied(tenantId, session.userId, 'calendar', cal.name)))
+          (cal?.id && (await isPathDenied(tenantId, denySubject, 'calendar', cal.id))) ||
+          (cal?.name && (await isPathDenied(tenantId, denySubject, 'calendar', cal.name)))
         ) {
           throw new Error('Access restricted by deny list');
         }

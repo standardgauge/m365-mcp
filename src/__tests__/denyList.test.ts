@@ -339,3 +339,29 @@ describe('default deny list (env-configured)', () => {
     expect(await isPathDenied(TENANT, USER, TYPE, 'Finance')).toBe(false);
   });
 });
+
+// Delegated access passes [caller, owner]: each subject's per-user list applies
+// (threat model §9.5).
+describe('multiple deny subjects (delegated mailbox)', () => {
+  const OWNER = 'owner-xyz';
+  const MAIL_TYPE = 'mail' as const;
+
+  it("denies a path on the owner's list even when the caller's is empty", async () => {
+    pushUser(OWNER, MAIL_TYPE, 'Payroll');
+    expect(await isPathDenied(TENANT, [USER, OWNER], MAIL_TYPE, 'Payroll')).toBe(true);
+    expect(await isPathDenied(TENANT, USER, MAIL_TYPE, 'Payroll')).toBe(false);
+  });
+
+  it("still denies a path on the caller's own list", async () => {
+    pushUser(USER, MAIL_TYPE, 'Personal');
+    expect(await isPathDenied(TENANT, [USER, OWNER], MAIL_TYPE, 'Personal')).toBe(true);
+  });
+
+  it("filterDeniedPaths drops items on either subject's list", async () => {
+    pushUser(OWNER, MAIL_TYPE, 'Payroll');
+    pushUser(USER, MAIL_TYPE, 'Personal');
+    const items = ['Inbox', 'Payroll', 'Personal'].map((path) => ({ path }));
+    const allowed = await filterDeniedPaths(TENANT, [USER, OWNER], MAIL_TYPE, items);
+    expect(allowed.map((i) => i.path)).toEqual(['Inbox']);
+  });
+});

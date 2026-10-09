@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getValidAccessTokenForSession, getTenantId } from '../../services/tokenCache.js';
 import { createGraphClient } from '../../services/graphClient.js';
+import { resolveDenySubject } from '../../services/mailboxOwner.js';
 import { isPathDenied } from '../../services/denyList.js';
 import { withPolicyEnforcement } from '../../services/policyEnforcement.js';
 import { resolveMailFolderName } from '../../services/containerResolver.js';
@@ -52,6 +53,7 @@ async function updateMessageHandler(
   if (mailboxId && mailboxId !== 'me') assertOpaqueId(mailboxId, 'mailboxId');
   const accessToken = await getValidAccessTokenForSession(auth.session);
   const graph = createGraphClient(accessToken);
+  const denySubject = await resolveDenySubject(graph, userId, mailboxId);
 
   const apiPath = mailboxId && mailboxId !== 'me'
     ? `/users/${mailboxId}/messages/${messageId}`
@@ -67,7 +69,7 @@ async function updateMessageHandler(
     const folderName = await resolveMailFolderName(graph, msgMeta.parentFolderId, mailboxBase);
     if (folderName) {
       const tenantId = await getTenantId(userId);
-      if (await isPathDenied(tenantId, userId, 'mail', folderName)) {
+      if (await isPathDenied(tenantId, denySubject, 'mail', folderName)) {
         return { status: 403, jsonBody: { error: 'Access restricted by deny list' } };
       }
     }

@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getValidAccessTokenForSession } from '../../services/tokenCache.js';
 import { createGraphClient } from '../../services/graphClient.js';
+import { resolveDenySubject } from '../../services/mailboxOwner.js';
 import { withPolicyEnforcement, checkDenyList } from '../../services/policyEnforcement.js';
 import { resolveMailFolderName } from '../../services/containerResolver.js';
 import { assertOpaqueId } from '../../services/opaqueId.js';
@@ -34,6 +35,7 @@ async function moveMailFolderHandler(
 
   const accessToken = await getValidAccessTokenForSession(auth.session);
   const graph = createGraphClient(accessToken);
+  const denySubject = await resolveDenySubject(graph, userId, body.mailboxId);
 
   const mailboxBase = body.mailboxId && body.mailboxId !== 'me'
     ? `/users/${body.mailboxId}`
@@ -42,7 +44,7 @@ async function moveMailFolderHandler(
   // Deny-list check on the folder being moved (resolve its display name).
   const movedName = await resolveMailFolderName(graph, folderId, mailboxBase);
   if (movedName) {
-    const movedViolation = await checkDenyList(userId, 'mail', movedName);
+    const movedViolation = await checkDenyList(userId, 'mail', movedName, undefined, denySubject);
     if (movedViolation) {
       return { status: movedViolation.status, jsonBody: { error: movedViolation.error } };
     }
@@ -51,7 +53,7 @@ async function moveMailFolderHandler(
   // Deny-list check on the destination parent folder.
   const destName = await resolveMailFolderName(graph, body.destinationParentFolderId, mailboxBase);
   if (destName) {
-    const destViolation = await checkDenyList(userId, 'mail', destName);
+    const destViolation = await checkDenyList(userId, 'mail', destName, undefined, denySubject);
     if (destViolation) {
       return { status: destViolation.status, jsonBody: { error: 'Destination folder restricted by deny list' } };
     }

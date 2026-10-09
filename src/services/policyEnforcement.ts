@@ -12,7 +12,7 @@ import { getTenantId, getTenantIdFromSession } from './tokenCache.js';
 import type { UserSession } from './tokenCache.js';
 import { getEnabledServices, getAllowedSites, getReadOnlyServices } from './serviceSettings.js';
 import { isServiceDisabledForUser } from './userServiceOverrides.js';
-import { isPathDenied } from './denyList.js';
+import { isPathDenied, type DenySubject } from './denyList.js';
 import { isMailIndexingDisabled } from './userMailConfig.js';
 import { authenticateRequest, AuthResult } from './authMiddleware.js';
 import { logAccess } from './auditLog.js';
@@ -109,15 +109,18 @@ export async function checkMailIndexing(
 /**
  * Check a single path against the deny list.
  * Uses the session directly — no global userIndex lookup.
+ * `subject` names whose per-user lists apply when it is not the caller alone
+ * (delegated mailbox access — see resolveDenySubject in mailboxOwner.ts).
  */
 export async function checkDenyList(
   userId: string,
   service: ServiceCategory,
   path: string,
   session?: UserSession,
+  subject: DenySubject = userId,
 ): Promise<PolicyViolation | null> {
   const tenantId = session ? getTenantIdFromSession(session) : await getTenantId(userId);
-  if (await isPathDenied(tenantId, userId, service, path)) {
+  if (await isPathDenied(tenantId, subject, service, path)) {
     return { status: 403, error: 'Access restricted by deny list' };
   }
   return null;
