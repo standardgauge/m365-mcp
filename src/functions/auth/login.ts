@@ -2,6 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/fu
 import { getAuthCodeUrl } from '../../services/graphClient.js';
 import { randomBytes } from 'crypto';
 import { withSecurity } from '../../services/securityHeaders.js';
+import { withRateLimit } from '../../services/rateLimit.js';
 
 // install_nonce is a PKCE-style code_challenge: SHA256(verifier) in hex.
 // The verifier (16 random bytes = 32 hex chars) stays on the CLI; only the
@@ -109,5 +110,5 @@ app.http('login', {
   methods: ['GET'],
   authLevel: 'anonymous',
   route: 'api/auth/login',
-  handler: withSecurity(login),
+  handler: withSecurity(withRateLimit('login', login)),
 });

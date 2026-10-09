@@ -236,6 +236,8 @@ Copy `.env.example` to `.env` for local work, or set these as Container App secr
 | `FRONTEND_URL` | Yes | Base URL of the admin UI, used for post-login redirects |
 | `AZURE_STORAGE_CONNECTION_STRING` | Production | Table Storage account. Unset locally falls back to the Azurite emulator |
 | `AUDIT_LOG_RETENTION_DAYS` | No | Days of `auditLog` rows to keep. Older rows are purged about once a day while the server is in use. Defaults to `365`; `0` keeps every row. See the operations runbook |
+| `RATE_LIMIT_<ROUTE>_PER_MINUTE` | No | Requests per client address per minute, per replica, on the unauthenticated routes. `<ROUTE>` is `LOGIN` (default `30`), `DEVICE` (`10`), `INSTALL_POLL` (`120`) or `MCP` (`1200`); `0` turns that route's limiter off. See the operations runbook |
+| `RATE_LIMIT_TRUSTED_PROXY_HOPS` | No | Proxies in front of the app that append to `X-Forwarded-For`. Default `1`, the Container Apps ingress; set `2` behind Front Door or an Application Gateway |
 | `DEFAULT_MAIL_DENY_FOLDERS` | No | Comma-separated mail folder names always denied, matched by display name, case-insensitively |
 | `DEFAULT_SHAREPOINT_DENY_PATHS` | No | Comma-separated SharePoint path prefixes always denied |
 | `MCP_INSTANCE_NAME` | No | Display name shown in the admin UI, the `initialize` response, and the generated extension bundle (also derives the bundle's slug and keychain service name). Defaults to `M365 MCP` |

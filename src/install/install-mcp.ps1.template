@@ -235,6 +235,11 @@ function Wait-ForSession {
                     DisplayName = $body.displayName
                 }
             }
+            # 202 is a success status, so Invoke-WebRequest returns it here rather
+            # than throwing; without this sleep the loop polls flat out.
+            Write-Host -NoNewline "."
+            Start-Sleep -Seconds $POLL_INTERVAL_SEC
+            continue
         } catch {
             $statusCode = $null
             if ($_.Exception.Response) {
@@ -244,6 +249,11 @@ function Wait-ForSession {
             if ($statusCode -eq 202) {
                 Write-Host -NoNewline "."
                 Start-Sleep -Seconds $POLL_INTERVAL_SEC
+                continue
+            } elseif ($statusCode -eq 429) {
+                # Rate limited (several installs behind one address). Back off and keep polling.
+                Write-Host -NoNewline "."
+                Start-Sleep -Seconds ($POLL_INTERVAL_SEC * 5)
                 continue
             } elseif ($statusCode -eq 410) {
                 Write-Host ""

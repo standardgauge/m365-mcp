@@ -476,6 +476,63 @@ az containerapp update \
 
 Setting min-replicas to 0 causes cold starts of 10-30 seconds. Do not set this on the production instance — users will see authentication timeouts on the first request after an idle period.
 
+### Rate limiting and ingress restriction
+
+Container Apps ingress has no native rate limit, so the server limits its four
+unauthenticated routes itself: `/api/auth/login`, `/api/auth/device`,
+`/api/auth/install-poll` and `/api/mcp`. Each client address gets a fixed
+one-minute window per route, counted in the replica's memory. Over the limit,
+the route answers `429` with `Retry-After` and the handler never runs.
+
+| Route | Default per address per minute | Override |
+|---|---|---|
+| `login` | 30 | `RATE_LIMIT_LOGIN_PER_MINUTE` |
+| `device` | 10 | `RATE_LIMIT_DEVICE_PER_MINUTE` |
+| `install-poll` | 120 | `RATE_LIMIT_INSTALL_POLL_PER_MINUTE` |
+| `mcp` | 1200 | `RATE_LIMIT_MCP_PER_MINUTE` |
+
+The defaults are sized for an office behind one NAT address, not for one user.
+`device` is the tightest because every call starts a device-code flow that polls
+Entra in the background for up to fifteen minutes. The install scripts poll every
+two seconds and back off on a `429`, so a burst of installs from one office slows
+down rather than failing.
+
+Things to know:
+
+  * **Per replica.** With three replicas an address can reach up to three times the
+    limit. That is deliberate: the limiter makes the routes cost something to
+    hammer, it does not meter them.
+  * **Client address.** The limiter keys on the entry the ingress appended to
+    `X-Forwarded-For` (the rightmost one), never on entries the client sent.
+    IPv6 clients are grouped by `/64`. If you put Front Door or an Application
+    Gateway in front of the app, set `RATE_LIMIT_TRUSTED_PROXY_HOPS=2`, or every
+    user shares the proxy's bucket.
+  * **Seeing it fire.** The first refusal for an address in a window logs
+    `rate limit: <route> refused <address> over <n>/min` at warning level.
+  * **Turning a route off.** Set its variable to `0`.
+
+```
+az containerapp update -n m365-mcp -g rg-m365-mcp \
+  --set-env-vars RATE_LIMIT_MCP_PER_MINUTE=2400
+```
+
+**If your users always connect from known addresses**, restrict ingress as well.
+This is the stronger control: requests from anywhere else are refused at the
+edge and never reach the app. It only fits a tenant whose users reach the server
+from named egress ranges (an office, a VPN, a proxy). Remote users on home
+connections will be locked out, and so will Microsoft's sign-in redirect back to
+`/api/auth/callback` if the browser is outside the allowed ranges.
+
+```
+az containerapp ingress access-restriction set -n m365-mcp -g rg-m365-mcp \
+  --rule-name office --action Allow --ip-address 203.0.113.0/24
+az containerapp ingress access-restriction list -n m365-mcp -g rg-m365-mcp
+az containerapp ingress access-restriction remove -n m365-mcp -g rg-m365-mcp --rule-name office
+```
+
+Once any `Allow` rule exists, every address not on the list is denied. The deploy
+workflow only swaps the image, so restrictions you set survive deploys.
+
 ### Right-sizing vCPU/memory
 ```
 # Current allocation: 0.5 vCPU / 1 GiB — adequate for up to ~20 concurrent users

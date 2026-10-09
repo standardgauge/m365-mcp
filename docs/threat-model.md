@@ -342,7 +342,7 @@ shim's local-file limits.
 
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
-| 10.1 | D | Flooding public endpoints. | Container Apps scales to three replicas. | No rate limiting on `login`, `install-poll`, `mcp` or `device`; tracked separately. |
+| 10.1 | D | Flooding public endpoints. | Per-address limit on `login`, `install-poll`, `mcp` and `device`, keyed on the ingress-appended forwarded address (IPv6 by `/64`), answering `429`. Optional ingress IP restriction for tenants with named egress. Container Apps scales to three replicas. | The limit is per replica and in memory, so three replicas allow three times it, and a distributed source with many addresses is not slowed. A volumetric attack needs an edge service (Front Door with WAF rate rules); not in the templates. |
 | 10.2 | D | An unknown bearer token costs a table scan. | Fast path is a single row lookup. | On a miss the server scans the whole `mcpSessions` partition looking for legacy rows, for up to three token candidates per request, before rejecting. A JSON-RPC batch has no size limit. **G14** |
 | 10.3 | D | MSAL cache write failure signs users out. | Logged. | **G4**. |
 | 10.4 | D | Cold start. | Minimum one replica in the templates. | Operator setting. |
