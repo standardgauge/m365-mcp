@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
 import { withSecurity, installLandingHeaders } from '../../services/securityHeaders.js';
+import { extensionPublicKey, signExtensionPayload } from '../../services/extensionSigning.js';
 
 /**
  * Dynamic .mcpb extension bundle generator with auto-update support.
@@ -12,7 +13,13 @@ import { withSecurity, installLandingHeaders } from '../../services/securityHead
  * Each deployment auto-serves its own bundle — no separate distribution step.
  *
  * The generated extension checks /api/extension-version on every startup
- * and self-updates if the server has a newer version.
+ * and self-updates if the server has a newer version. Updates are signed with
+ * this instance's key and the extension carries the public half, so it applies
+ * only payloads this instance signed (src/services/extensionSigning.ts).
+ *
+ * Every URL baked into served code — the bundle, the update payload, both
+ * installers, the landing page — comes from configuration (the origin of
+ * OAUTH_REDIRECT_URI), never from the request's Host or X-Forwarded-Host.
  *
  * Routes:
  *   GET /install                — HTML landing page (browser) with download link
@@ -34,18 +41,39 @@ import { withSecurity, installLandingHeaders } from '../../services/securityHead
 // code before it hands a session to an installer, and 2.9.0 never shows one, so
 // a 2.9.0 extension that has to sign in again cannot finish. The bump is what
 // delivers the code-showing authenticate() to those installs.
-const EXTENSION_VERSION = '2.10.0';
+//
+// Bumped 2.10.0 -> 2.11.0: 2.11.0 is the first client that verifies update
+// signatures and confines update paths to its own directory. Earlier clients
+// accept the update unsigned, which is how they become 2.11.0; every update
+// after that has to be signed.
+const EXTENSION_VERSION = '2.11.0';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function getPublicOrigin(request: HttpRequest): string {
-  const proto =
-    request.headers.get('x-forwarded-proto')?.split(',')[0].trim() ?? 'https';
-  const host =
-    request.headers.get('x-forwarded-host')?.split(',')[0].trim() ??
-    request.headers.get('host') ??
-    'localhost';
-  return `${proto}://${host}`;
+/**
+ * The public origin baked into everything this file serves. Taken from
+ * OAUTH_REDIRECT_URI, which is required, is this app's own callback, and is
+ * registered with Entra, so its origin is the one users reach. Forwarded host
+ * headers are not consulted: whoever can set one would otherwise choose the
+ * server URL, and so the update source, of every client installed from that
+ * response.
+ */
+export function configuredPublicOrigin(
+  redirectUri: string | undefined = process.env.OAUTH_REDIRECT_URI,
+): string {
+  if (!redirectUri) {
+    throw new Error('OAUTH_REDIRECT_URI is not set; it is the source of the public origin served to clients');
+  }
+  let url: URL;
+  try {
+    url = new URL(redirectUri);
+  } catch {
+    throw new Error('OAUTH_REDIRECT_URI is not an absolute URL; cannot derive the public origin');
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error('OAUTH_REDIRECT_URI must be an http(s) URL');
+  }
+  return url.origin;
 }
 
 function getMcpSlug(host: string): string {
@@ -61,12 +89,8 @@ function getMcpSlug(host: string): string {
   return `${firstSegment || 'mcp'}-m365`;
 }
 
-function getHost(request: HttpRequest): string {
-  return (
-    request.headers.get('x-forwarded-host')?.split(',')[0].trim() ??
-    request.headers.get('host') ??
-    'localhost'
-  );
+function configuredHost(): string {
+  return new URL(configuredPublicOrigin()).host;
 }
 
 // ── ZIP builder (minimal, no dependencies) ───────────────────────────────────
@@ -194,6 +218,20 @@ function renderPackageJson(slug: string): string {
   }, null, 2) + '\n';
 }
 
+/**
+ * The client-side update helpers, inlined into server/index.js. Wrapped in a
+ * function scope so the module's own `const fs = require('fs')` and friends do
+ * not collide with the entry point's.
+ */
+function renderUpdateModule(): string {
+  return (
+    'const extensionUpdate = (function () {\n' +
+    '  const module = { exports: {} };\n' +
+    readInstallFile(UPDATE_MODULE_FILE) +
+    '\n  return module.exports;\n})();\n'
+  );
+}
+
 function renderServerJs(mcpUrl: string, mcpName: string, keychainService: string): string {
   return `#!/usr/bin/env node
 /**
@@ -223,33 +261,29 @@ const MCP_NAME = '${mcpName}';
 const KEYCHAIN_SERVICE = '${keychainService}';
 const KEYCHAIN_ACCOUNT = 'session-token';
 const EXTENSION_VERSION = '${EXTENSION_VERSION}';
+// Ed25519 public key (SPKI DER, base64) of the instance that served this file.
+// Updates must be signed by the matching private key.
+const UPDATE_PUBLIC_KEY = '${extensionPublicKey()}';
 const POLL_INTERVAL = 2000;
 const POLL_MAX = 150; // 5 minutes
 
 // -- Auto-update --
-// On startup, checks the server for a newer extension version.
-// If strictly newer (semver), downloads updated files and overwrites in place.
-// Next Claude Desktop restart picks up the new code automatically.
-// Bounded by a 5-second timeout so a stalled server never blocks startup.
+// On startup, checks the server for a newer extension version. If strictly
+// newer (semver), downloads the update, verifies its signature against
+// UPDATE_PUBLIC_KEY, checks every path stays inside the extension directory,
+// and only then overwrites files in place. Anything that fails a check is
+// refused and the current version keeps running. Next Claude Desktop restart
+// picks up the new code. Bounded by timeouts so a stalled server never blocks
+// startup.
+
+${renderUpdateModule()}
+const { isNewerVersion } = extensionUpdate;
 
 function withTimeout(promise, ms) {
   return Promise.race([
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
   ]);
-}
-
-function isNewerVersion(remote, local) {
-  const parse = (v) => (v || '').split('.').map(Number);
-  const r = parse(remote);
-  const l = parse(local);
-  for (let i = 0; i < Math.max(r.length, l.length); i++) {
-    const rv = r[i] || 0;
-    const lv = l[i] || 0;
-    if (rv > lv) return true;
-    if (rv < lv) return false;
-  }
-  return false;
 }
 
 async function autoUpdate() {
@@ -266,19 +300,18 @@ async function autoUpdate() {
       return;
     }
     const update = JSON.parse(updateRes.body);
-    if (!update.files) return;
 
-    // Write updated files atomically (temp + rename)
-    const extDir = path.resolve(__dirname, '..');
-    for (const [filePath, content] of Object.entries(update.files)) {
-      const fullPath = path.join(extDir, filePath);
-      const dir = path.dirname(fullPath);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      const tmpPath = fullPath + '.tmp';
-      fs.writeFileSync(tmpPath, content, 'utf8');
-      fs.renameSync(tmpPath, fullPath);
+    // Only the signed block is trusted. The unsigned top-level files are there
+    // for clients older than 2.11.0, which do not verify.
+    let payload;
+    try {
+      payload = extensionUpdate.verifySignedUpdate(update.signed, UPDATE_PUBLIC_KEY, EXTENSION_VERSION);
+      extensionUpdate.applyUpdate(path.resolve(__dirname, '..'), payload.files);
+    } catch (err) {
+      process.stderr.write('[' + MCP_NAME + '] Update refused: ' + err.message + '. Continuing with ' + EXTENSION_VERSION + '.\\n');
+      return;
     }
-    process.stderr.write('[' + MCP_NAME + '] Updated to ' + data.version + '. Changes take effect on next restart.\\n');
+    process.stderr.write('[' + MCP_NAME + '] Updated to ' + payload.version + '. Changes take effect on next restart.\\n');
   } catch {
     // Update check failed silently — not fatal, continue with current version
   }
@@ -760,32 +793,35 @@ function renderLandingPage(origin: string, slug: string): string {
 // ── Route handlers ───────────────────────────────────────────────────────────
 
 async function installLandingHandler(
-  request: HttpRequest,
-  _context: InvocationContext,
-): Promise<HttpResponseInit> {
-  const origin = getPublicOrigin(request);
-  const host = getHost(request);
-  const slug = getMcpSlug(host);
-
-  return {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'public, max-age=300',
-      ...installLandingHeaders,
-    },
-    body: renderLandingPage(origin, slug),
-  };
-}
-
-async function installBundleHandler(
-  request: HttpRequest,
+  _request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
   try {
-    const origin = getPublicOrigin(request);
-    const host = getHost(request);
-    const slug = getMcpSlug(host);
+    const origin = configuredPublicOrigin();
+    const slug = getMcpSlug(configuredHost());
+
+    return {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'public, max-age=300',
+        ...installLandingHeaders,
+      },
+      body: renderLandingPage(origin, slug),
+    };
+  } catch (err) {
+    context.error('install landing error:', err);
+    return { status: 500, jsonBody: { error: 'Failed to render install page' } };
+  }
+}
+
+async function installBundleHandler(
+  _request: HttpRequest,
+  context: InvocationContext,
+): Promise<HttpResponseInit> {
+  try {
+    const origin = configuredPublicOrigin();
+    const slug = getMcpSlug(configuredHost());
     const displayName = process.env.MCP_INSTANCE_NAME ?? `${slug} MCP`;
     const bundle = generateBundle(origin, slug, displayName);
 
@@ -822,26 +858,31 @@ async function extensionVersionHandler(
 }
 
 async function extensionUpdateHandler(
-  request: HttpRequest,
+  _request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
   try {
-    const origin = getPublicOrigin(request);
-    const host = getHost(request);
-    const slug = getMcpSlug(host);
+    const origin = configuredPublicOrigin();
+    const slug = getMcpSlug(configuredHost());
     const displayName = process.env.MCP_INSTANCE_NAME ?? `${slug} MCP`;
     const keychainService = `ai.standardgauge.${slug}`;
+
+    const files = {
+      'manifest.json': renderManifest(slug, displayName),
+      'package.json': renderPackageJson(slug),
+      'server/index.js': renderServerJs(origin, slug, keychainService),
+    };
 
     return {
       status: 200,
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=60' },
       jsonBody: {
+        // Top-level version + files: read by clients before 2.11.0, which
+        // apply them unsigned. That is how they reach a verifying client.
         version: EXTENSION_VERSION,
-        files: {
-          'manifest.json': renderManifest(slug, displayName),
-          'package.json': renderPackageJson(slug),
-          'server/index.js': renderServerJs(origin, slug, keychainService),
-        },
+        files,
+        // The only part 2.11.0 and later read.
+        signed: signExtensionPayload({ version: EXTENSION_VERSION, files }),
       },
     };
   } catch (err) {
@@ -893,6 +934,9 @@ function renderPs1Script(mcpUrl: string, mcpName: string): string {
 // whatever canonical last shipped.
 const SHIM_FILE = 'm365-mcp-shim.js';
 
+// Client-side update verification, inlined into the extension's server/index.js.
+const UPDATE_MODULE_FILE = 'extension-update.js';
+
 async function installShimHandler(
   _request: HttpRequest,
   context: InvocationContext,
@@ -914,12 +958,12 @@ async function installShimHandler(
 }
 
 async function installShHandler(
-  request: HttpRequest,
+  _request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
   try {
-    const origin = getPublicOrigin(request);
-    const slug = getMcpSlug(getHost(request));
+    const origin = configuredPublicOrigin();
+    const slug = getMcpSlug(configuredHost());
     return {
       status: 200,
       headers: {
@@ -936,13 +980,12 @@ async function installShHandler(
 }
 
 async function installPs1Handler(
-  request: HttpRequest,
+  _request: HttpRequest,
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
   try {
-    const origin = getPublicOrigin(request);
-    const host = getHost(request);
-    const slug = getMcpSlug(host);
+    const origin = configuredPublicOrigin();
+    const slug = getMcpSlug(configuredHost());
     const script = renderPs1Script(origin, slug);
 
     return {

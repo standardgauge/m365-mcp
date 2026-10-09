@@ -9,8 +9,11 @@
  *   - GET /install.ps1 — returns rendered PowerShell installer
  *   - GET /install.sh — returns rendered shell installer
  *   - GET /install/m365-mcp-shim.js — serves the stdio shim both installers use
- *   - isNewerVersion logic (extracted from generated template)
+ *   - isNewerVersion logic (the module inlined into the generated extension)
  *   - Generated server.js contains auto-update code
+ *
+ * Update signing, path containment and the configured origin (threat model
+ * G10) are in extensionUpdate.test.ts.
  */
 
 import { jest } from '@jest/globals';
@@ -18,6 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { HttpRequest, InvocationContext } from '@azure/functions';
 import * as zlib from 'zlib';
+import { randomBytes } from 'crypto';
 
 // ── Mock Azure Functions app ─────────────────────────────────────────────────
 
@@ -29,6 +33,10 @@ jest.mock('@azure/functions', () => ({
 
 // Set env vars before import
 process.env.MCP_INSTANCE_NAME = 'Test M365 MCP';
+// The served origin comes from here, not from request headers.
+process.env.OAUTH_REDIRECT_URI = 'https://mcp.example.com/api/auth/callback';
+// Update signing derives its key from the HMAC key.
+process.env.MCP_SESSION_HMAC_KEY = randomBytes(32).toString('hex');
 
 // ── Import after mocks ──────────────────────────────────────────────────────
 
@@ -113,20 +121,12 @@ function parseZipEntries(buf: Buffer): Array<{ name: string; content: string }> 
   return entries;
 }
 
-// ── isNewerVersion (replicated from generated template for direct testing) ──
+// ── isNewerVersion: the real one, from the module inlined into server/index.js ──
 
-function isNewerVersion(remote: string, local: string): boolean {
-  const parse = (v: string) => (v || '').split('.').map(Number);
-  const r = parse(remote);
-  const l = parse(local);
-  for (let i = 0; i < Math.max(r.length, l.length); i++) {
-    const rv = r[i] || 0;
-    const lv = l[i] || 0;
-    if (rv > lv) return true;
-    if (rv < lv) return false;
-  }
-  return false;
-}
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { isNewerVersion } = require('../install/extension-update.js') as {
+  isNewerVersion: (remote: string, local: string) => boolean;
+};
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
