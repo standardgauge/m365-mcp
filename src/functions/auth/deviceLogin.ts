@@ -5,6 +5,7 @@ import type { UserSession } from '../../services/tokenCache.js';
 import { extractTenantId } from '../../services/tenantUtils.js';
 import { randomBytes } from 'crypto';
 import { withSecurity } from '../../services/securityHeaders.js';
+import { withRateLimit } from '../../services/rateLimit.js';
 
 /**
  * GET /api/auth/device
@@ -106,5 +107,5 @@ app.http('deviceLogin', {
   methods: ['GET'],
   authLevel: 'anonymous',
   route: 'api/auth/device',
-  handler: withSecurity(deviceLogin),
+  handler: withSecurity(withRateLimit('device', deviceLogin)),
 });

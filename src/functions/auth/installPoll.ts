@@ -2,6 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/fu
 import { createHash } from 'crypto';
 import { consumeInstallNonce } from '../../services/tableStorage.js';
 import { withSecurity } from '../../services/securityHeaders.js';
+import { withRateLimit } from '../../services/rateLimit.js';
 
 // The verifier is 16 random bytes in hex (32 chars). The CLI keeps the verifier
 // and sends only SHA256(verifier) — the code_challenge — in the login URL.
@@ -75,5 +76,5 @@ app.http('install-poll', {
   methods: ['GET'],
   authLevel: 'anonymous',
   route: 'api/auth/install-poll',
-  handler: withSecurity(installPoll),
+  handler: withSecurity(withRateLimit('install-poll', installPoll)),
 });

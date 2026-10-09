@@ -22,6 +22,7 @@ import { resolveMaxResults, toEnvelope, graphCollectionHasMore } from '../../ser
 import { normalizeGraphDateTime, resolveWindow } from '../../services/calendarWindow.js';
 import { resolveMailboxTimeZone } from '../../services/mailboxTimeZone.js';
 import { withSecurity } from '../../services/securityHeaders.js';
+import { withRateLimit } from '../../services/rateLimit.js';
 import { resolveAuthUrlBase } from '../../services/frontendUrl.js';
 import type { Client } from '@microsoft/microsoft-graph-client';
 import { searchMail, listMessages, toMessageSummary, outcomeMeta, type MessageSummary } from '../../services/mailSearch.js';
@@ -2882,5 +2883,5 @@ app.http('mcpEndpoint', {
   methods: ['POST'],
   authLevel: 'anonymous',
   route: 'api/mcp',
-  handler: withSecurity(mcpEndpoint),
+  handler: withSecurity(withRateLimit('mcp', mcpEndpoint)),
 });
