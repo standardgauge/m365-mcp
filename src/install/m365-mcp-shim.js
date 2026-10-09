@@ -32,9 +32,24 @@
  * Windows) replaces them; include the entry `default` to keep the defaults and
  * add to them.
  *
- * Usage (arguments match supergateway's, so configs change only the command):
- *   node m365-mcp-shim.js --streamableHttp https://host/api/mcp \
- *       --header "Authorization:Bearer <token>"
+ * The session token is not in the MCP client config. The installers hand it to
+ * the shim once, over stdin, and the shim keeps it in the OS credential store,
+ * the same way the desktop extension does:
+ *   macOS    Keychain (service ai.standardgauge.<name>, account shim-session-token)
+ *   Windows  DPAPI blob bound to the Windows login, in ~/.m365-mcp/<name>.token
+ *   Linux    libsecret via secret-tool (same service and account as macOS)
+ * falling back to ~/.m365-mcp/<name>.token at mode 0600 where no store is
+ * available (a headless Linux box, PowerShell missing). M365_MCP_TOKEN_STORE=file
+ * forces the file. On Windows and Linux the token reaches the store over stdin;
+ * the macOS `security` CLI takes it on argv for the moment it runs, which the
+ * extension also accepts.
+ *
+ * Usage:
+ *   printf '%s' "$TOKEN" | node m365-mcp-shim.js --store-token <name>
+ *   node m365-mcp-shim.js --streamableHttp https://host/api/mcp --token-store <name>
+ *
+ * The supergateway-style `--header "Authorization:Bearer <token>"` still works,
+ * so a config written by an older installer keeps running until it is re-run.
  *
  * Node 18+ (global fetch). No dependencies.
  */
@@ -46,7 +61,9 @@ const os = require('os');
 const path = require('path');
 const readline = require('readline');
 
-const SHIM_VERSION = '1.0.0';
+const { execFileSync } = require('child_process');
+
+const SHIM_VERSION = '1.1.0';
 const MAX_LOCAL_FILE_BYTES = 10 * 1024 * 1024;
 const ATTACHMENT_TOOLS = new Set(['create_draft', 'send_mail']);
 const LOCAL_PATH_TOOL = 'write_onedrive_file';
@@ -411,6 +428,130 @@ function rewriteToolsListResult(result, opts) {
   return { ...result, tools: result.tools.map((t) => withLocalPathSchema(t, rootsText)) };
 }
 
+// ── Session token storage ────────────────────────────────────────────────────
+
+const TOKEN_ACCOUNT = 'shim-session-token';
+const STORE_NAME_FORMAT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+
+/**
+ * The OS credential store for one instance's session token. `name` is the MCP
+ * server name the installer configures (one token per instance). Everything
+ * platform-specific is injectable so tests can drive each backend.
+ */
+function createTokenStore(name, opts) {
+  if (typeof name !== 'string' || !STORE_NAME_FORMAT.test(name)) {
+    throw new Error('token store name must be letters, digits, ".", "_" or "-"');
+  }
+  const o = opts || {};
+  const platform = o.platform || process.platform;
+  const home = o.home || os.homedir();
+  const env = o.env || process.env;
+  const run = o.execFileSync || execFileSync;
+  const service = 'ai.standardgauge.' + name;
+  const dir = path.join(home, '.m365-mcp');
+  const file = path.join(dir, name + '.token');
+  const fileOnly = (env.M365_MCP_TOKEN_STORE || '').toLowerCase() === 'file';
+
+  function powerShell(script, input) {
+    let lastErr;
+    for (const exe of ['powershell.exe', 'pwsh']) {
+      try {
+        return run(exe, ['-NoProfile', '-NonInteractive', '-Command', script], {
+          input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim();
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr || new Error('PowerShell not available');
+  }
+
+  function readFile() {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      return null;
+    }
+  }
+
+  function writeFile(data) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const tmp = file + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
+    fs.chmodSync(tmp, 0o600);
+    fs.renameSync(tmp, file);
+  }
+
+  function removeFile() {
+    try { fs.unlinkSync(file); } catch { /* ok */ }
+  }
+
+  /** Store the token, replacing any earlier one. Returns the backend used. */
+  function save(token) {
+    if (typeof token !== 'string' || !token.trim()) throw new Error('empty session token');
+    token = token.trim();
+    if (!fileOnly && platform === 'darwin') {
+      try {
+        run('security', ['add-generic-password', '-U', '-s', service, '-a', TOKEN_ACCOUNT, '-l', name + ' session token', '-w', token], { stdio: 'pipe' });
+        removeFile();
+        return 'keychain';
+      } catch { /* fall through to the file */ }
+    }
+    if (!fileOnly && platform === 'linux') {
+      try {
+        run('secret-tool', ['store', '--label=' + name + ' session token', 'service', service, 'account', TOKEN_ACCOUNT], { input: token, stdio: ['pipe', 'pipe', 'pipe'] });
+        removeFile();
+        return 'libsecret';
+      } catch { /* no secret service: fall through to the file */ }
+    }
+    if (!fileOnly && platform === 'win32') {
+      try {
+        const blob = powerShell(
+          '$t = [Console]::In.ReadToEnd(); ConvertTo-SecureString -String $t -AsPlainText -Force | ConvertFrom-SecureString',
+          token,
+        );
+        if (blob) {
+          writeFile({ enc: 'dpapi', token: blob });
+          return 'dpapi';
+        }
+      } catch { /* PowerShell or DPAPI unavailable: fall through to the file */ }
+    }
+    writeFile({ token });
+    return 'file';
+  }
+
+  /** The stored token, or null when there is none (or it cannot be read). */
+  function load() {
+    if (!fileOnly && platform === 'darwin') {
+      try {
+        const t = run('security', ['find-generic-password', '-s', service, '-a', TOKEN_ACCOUNT, '-w'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        if (t) return t;
+      } catch { /* not in the keychain */ }
+    }
+    if (!fileOnly && platform === 'linux') {
+      try {
+        const t = run('secret-tool', ['lookup', 'service', service, 'account', TOKEN_ACCOUNT], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        if (t) return t;
+      } catch { /* no secret service, or not stored there */ }
+    }
+    const data = readFile();
+    if (!data || typeof data.token !== 'string' || !data.token) return null;
+    if (data.enc === 'dpapi') {
+      try {
+        return powerShell(
+          "$e = [Console]::In.ReadToEnd().Trim(); $s = ConvertTo-SecureString -String $e; [System.Net.NetworkCredential]::new('', $s).Password",
+          data.token,
+        ) || null;
+      } catch {
+        return null; // another Windows user, or a corrupt blob: re-run the installer
+      }
+    }
+    return data.token;
+  }
+
+  return { service, account: TOKEN_ACCOUNT, file, save, load };
+}
+
 // ── Transport ────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
@@ -423,6 +564,10 @@ function parseArgs(argv) {
       const h = argv[++i];
       const idx = h.indexOf(':');
       if (idx > 0) out.headers[h.slice(0, idx).trim()] = h.slice(idx + 1).trim();
+    } else if (a === '--token-store' && i + 1 < argv.length) {
+      out.tokenStore = argv[++i];
+    } else if (a === '--store-token' && i + 1 < argv.length) {
+      out.storeToken = argv[++i];
     } else if (a === '--version') {
       out.version = true;
     }
@@ -522,11 +667,43 @@ function createForwarder(config) {
   return { handle };
 }
 
+function readStdin() {
+  try {
+    return fs.readFileSync(0, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.version) {
     process.stdout.write(SHIM_VERSION + '\n');
     return;
+  }
+  if (args.storeToken) {
+    // Installer hand-off: the token arrives on stdin, never on argv.
+    try {
+      process.stdout.write(createTokenStore(args.storeToken).save(readStdin()) + '\n');
+    } catch (err) {
+      process.stderr.write('m365-mcp-shim: could not store the session token: ' + (err && err.message ? err.message : String(err)) + '\n');
+      process.exit(1);
+    }
+    return;
+  }
+  if (args.tokenStore) {
+    let token = null;
+    try {
+      token = createTokenStore(args.tokenStore).load();
+    } catch (err) {
+      process.stderr.write('m365-mcp-shim: ' + (err && err.message ? err.message : String(err)) + '\n');
+      process.exit(2);
+    }
+    if (!token) {
+      process.stderr.write(`m365-mcp-shim: no session token stored for "${args.tokenStore}"; re-run the installer to sign in again\n`);
+      process.exit(2);
+    }
+    args.headers.Authorization = 'Bearer ' + token;
   }
   if (!args.url) {
     process.stderr.write('m365-mcp-shim: --streamableHttp <server>/api/mcp is required\n');
@@ -583,6 +760,7 @@ module.exports = {
   rewriteToolCall,
   rewriteToolsListResult,
   createForwarder,
+  createTokenStore,
   parseArgs,
   parseSse,
 };
