@@ -10,6 +10,9 @@
     "AZURE_CLIENT_SECRET": "<AAD app registration client secret>",
     "AZURE_TENANT_ID": "<your M365 tenant ID>",
 
+    "MCP_SESSION_HMAC_KEY": "<openssl rand -hex 32>",
+    "MCP_DATA_ENCRYPTION_KEY": "<openssl rand -hex 32>",
+
     "OAUTH_REDIRECT_URI": "http://localhost:7071/api/auth/callback",
     "FRONTEND_URL": "http://localhost:5173",
 

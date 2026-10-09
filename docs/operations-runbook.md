@@ -3,7 +3,7 @@
 **Audience:** Operators managing a live M365 MCP Container App. The worked
 example throughout is the `your-mcp-host.example.com` instance; every command takes
 the same shape for any tenant with the resource names swapped. \
-**Last updated:** September 2026
+**Last updated:** October 2026
 
 
 Standing a tenant up from nothing starts with [`entra-setup.md`](entra-setup.md).
@@ -266,6 +266,15 @@ az containerapp revision restart \
     --query "[?properties.active] | [0].name" -o tsv)
 ```
 
+### Issue: a new revision never becomes ready, previous revision still serving
+
+Check the new revision's console log for `[startup] FATAL`. The container
+refuses to start when `MCP_SESSION_HMAC_KEY` or `MCP_DATA_ENCRYPTION_KEY` is
+missing or malformed, or when a Key Vault reference behind one cannot be
+resolved. See [Application keys](#application-keys): fix the binding and roll a
+new revision. Do not generate a new key to get past it unless you mean to sign
+every user out.
+
 ### Issue: Azure Table Storage connection errors
 ```
 # Verify the connection string secret is set
@@ -420,21 +429,8 @@ az containerapp update -n m365-mcp -g rg-m365-mcp --revision-suffix "$(date +%Y%
 
 ### MCP_SESSION_HMAC_KEY and MCP_DATA_ENCRYPTION_KEY
 
-**Rotating either key invalidates all existing sessions and the MSAL token
-cache.** Every user must re-authenticate afterwards (the extension prompts on
-its next start). Rotate on suspected compromise, or on a scheduled date with
-notice. This is also the fastest kill switch (below).
-```
-NEW_HMAC=$(openssl rand -hex 32)
-NEW_DATA=$(openssl rand -hex 32)
-
-az containerapp secret set -n m365-mcp -g rg-m365-mcp \
-  --secrets \
-    mcp-session-hmac-key="$NEW_HMAC" \
-    mcp-data-encryption-key="$NEW_DATA"
-
-az containerapp update -n m365-mcp -g rg-m365-mcp --revision-suffix "$(date +%Y%m%d%H%M)"
-```
+These have their own section, [Application keys](#application-keys), because
+rotating either one signs every user out.
 
 ### Credential envelope row binding (MCP_ENVELOPE_REQUIRE_AAD)
 
@@ -477,6 +473,201 @@ fork and confirm a green run. Unnecessary once the upstream is public.
 
 * * *
 
+## Application keys
+
+`MCP_SESSION_HMAC_KEY` and `MCP_DATA_ENCRYPTION_KEY` protect what the server
+keeps in Table Storage. Nothing else in the deployment works like them, so read
+this section before touching either.
+
+| Key | Protects | Table |
+|---|---|---|
+| `MCP_SESSION_HMAC_KEY` | Session lookup. Clients hold a random bearer token; storage holds only its HMAC-SHA256, which is also the row key | `mcpSessions` |
+| `MCP_DATA_ENCRYPTION_KEY` | Each session's Microsoft Graph access token, and the MSAL token cache (refresh tokens for every signed-in user), as AES-256-GCM envelopes | `mcpSessions`, `mcpMsalCache` |
+
+Each is 32 random bytes written as 64 hex characters (`openssl rand -hex 32`).
+Use two different keys, and a fresh pair per deployment and per environment.
+
+### Startup validation
+
+The container checks both keys before the Functions host starts
+(`src/startup/checkKeys.ts`, run by the image's `CMD`). A key that is missing,
+empty, the wrong length, or not hex stops the container with a line per bad key:
+
+```
+[startup] FATAL: MCP_DATA_ENCRYPTION_KEY env var is not set. ...
+[startup] Refusing to start. Generate a key with `openssl rand -hex 32`; ...
+```
+
+Surrounding whitespace, such as a trailing newline pasted into Key Vault, is
+ignored. Nothing else is: a value with junk after a valid key is rejected
+rather than quietly truncated. The messages never include key material.
+
+Releases before this check accepted such a value and used its first 64 hex
+characters. If an upgrade is refused for a key that has been working, those 64
+characters are the key in use: bind exactly them and every session survives.
+Binding a new key instead is a rotation.
+
+In single-revision mode, the default here, a revision whose replicas never
+become ready does not take traffic, so the previous revision keeps serving and
+the deploy workflow's smoke check fails on the stale `sha`. To see why:
+
+```
+az containerapp logs show -n m365-mcp -g rg-m365-mcp --type console --tail 50 | grep '\[startup\]'
+```
+
+Before this check existed, a missing key surfaced only at the first sign-in,
+after the revision had passed `/health`.
+
+### Storage: Key Vault references
+
+Keep both keys in Azure Key Vault and bind the Container App secrets to them as
+Key Vault references, so the value lives in one place with access control,
+versioning, soft delete and an access log. The Container App's system-assigned
+identity (present in both Bicep templates) needs **Key Vault Secrets User** on
+the vault.
+
+```
+VAULT=kv-m365-mcp            # an RBAC-mode vault with soft delete and purge protection
+VAULT_ID=$(az keyvault show -n "$VAULT" --query id -o tsv)
+PRINCIPAL=$(az containerapp show -n m365-mcp -g rg-m365-mcp --query identity.principalId -o tsv)
+
+az role assignment create --assignee-object-id "$PRINCIPAL" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Key Vault Secrets User" --scope "$VAULT_ID"
+
+# Store the current values (moving an existing deployment) or fresh ones (a new
+# deployment). Moving the current values keeps everyone signed in; new values
+# are a rotation (below).
+HMAC_URI=$(az keyvault secret set --vault-name "$VAULT" -n mcp-session-hmac-key \
+  --value "$(openssl rand -hex 32)" --query id -o tsv)
+DATA_URI=$(az keyvault secret set --vault-name "$VAULT" -n mcp-data-encryption-key \
+  --value "$(openssl rand -hex 32)" --query id -o tsv)
+
+az containerapp secret set -n m365-mcp -g rg-m365-mcp --secrets \
+  "mcp-session-hmac-key=keyvaultref:${HMAC_URI},identityref:system" \
+  "mcp-data-encryption-key=keyvaultref:${DATA_URI},identityref:system"
+
+az containerapp update -n m365-mcp -g rg-m365-mcp --revision-suffix "$(date +%Y%m%d%H%M)"
+```
+
+`--query id` returns the **versioned** secret URI, and that is deliberate. With
+a versionless reference, writing a new version in the vault rotates the key on
+whichever revision happens to start next, which signs everyone out at a time
+nobody chose. With a versioned reference the key changes only when you change
+the reference.
+
+Two traps:
+
+- **The shipped Bicep writes these secrets as plain values** from its
+  `mcpSessionHmacKey` and `mcpDataEncryptionKey` parameters. Re-running it after
+  switching to Key Vault references replaces the references with whatever the
+  parameters hold. If those differ from the vault, that is an unplanned
+  rotation. Pass the current values, or re-apply the references afterwards.
+- **`az containerapp secret set name=<value>`** with a literal value does the
+  same: it silently turns a reference back into a plain secret.
+
+Confirm what is bound (values are not printed):
+
+```
+az containerapp secret list -n m365-mcp -g rg-m365-mcp \
+  --query "[?starts_with(name,'mcp-')].{name:name,keyVaultUrl:keyVaultUrl}" -o table
+```
+
+### Rotation
+
+There is no dual-key window. The server holds one key of each kind, so data
+written under the old key cannot be read under the new one, and **rotating
+either key signs every user out**. Rotate on suspected compromise, on staff
+changes with vault access, or on a scheduled date with notice to users.
+
+What each rotation does:
+
+| | Sessions | Stored Graph access tokens | MSAL cache (refresh tokens) |
+|---|---|---|---|
+| HMAC key | Every bearer token stops matching its row. Calls return 401 and the user signs in again; the extension prompts at its next start | Unreadable in practice: still decryptable, but nothing can look the row up | Unaffected |
+| Data key | Rows are found, but the access token fails to decrypt, so the session is treated as missing: 401, sign in again | Undecryptable | Undecryptable, treated as empty. Silent refresh fails for everyone until they sign in, and the first new sign-in overwrites the row |
+| Both | Union of the two | Undecryptable | Undecryptable |
+
+Old rows are not deleted by a rotation. They are harmless, but they cost
+something until removed: a request carrying an old bearer token misses the
+direct lookup and falls through to a scan of the whole session table before it
+returns 401, and after a data-key rotation the admin UI's session list fails to
+read storage (it logs the decrypt error and shows only sessions held in that
+replica's memory). So purge after every rotation.
+
+Each replica also holds decrypted sessions in memory. That is why a rotation
+must be a new revision: the new replicas start empty, and the old ones are
+retired once the new revision is ready.
+
+Procedure, both keys (drop the line for the key you are not rotating):
+
+```
+VAULT=kv-m365-mcp
+HMAC_URI=$(az keyvault secret set --vault-name "$VAULT" -n mcp-session-hmac-key \
+  --value "$(openssl rand -hex 32)" --query id -o tsv)
+DATA_URI=$(az keyvault secret set --vault-name "$VAULT" -n mcp-data-encryption-key \
+  --value "$(openssl rand -hex 32)" --query id -o tsv)
+
+az containerapp secret set -n m365-mcp -g rg-m365-mcp --secrets \
+  "mcp-session-hmac-key=keyvaultref:${HMAC_URI},identityref:system" \
+  "mcp-data-encryption-key=keyvaultref:${DATA_URI},identityref:system"
+
+az containerapp update -n m365-mcp -g rg-m365-mcp --revision-suffix "$(date +%Y%m%d%H%M)"
+
+# Once the new revision serves /health and one sign-in works:
+infra/scripts/purge-credentials.sh --resource-group rg-m365-mcp --app-name m365-mcp --dry-run
+infra/scripts/purge-credentials.sh --resource-group rg-m365-mcp --app-name m365-mcp
+```
+
+Until you purge, rollback is possible: point the references back at the
+previous secret versions and roll another revision, and the old sessions
+work again. After the purge they are gone either way. Once you are satisfied,
+disable the previous versions in the vault
+(`az keyvault secret set-attributes --id <old-version-uri> --enabled false`).
+
+A deployment still on plain Container App secrets rotates the same way with
+`--secrets mcp-session-hmac-key="$(openssl rand -hex 32)"` in place of the
+references. Moving to Key Vault at the same time costs nothing extra, since the
+users are signing in again regardless.
+
+### Emergency revocation
+
+The keys protect stored data; they are not Entra credentials. What you do
+depends on what was exposed.
+
+- **A key, but not storage.** Neither key reveals anything on its own. Rotate
+  the exposed key and purge, on your own schedule.
+- **Storage and the HMAC key.** Session tokens are 32 random bytes and storage
+  holds only their HMAC, so the rows cannot be turned back into bearer tokens.
+  Rotate the HMAC key and purge so no stolen row is ever matched again.
+- **Storage and the data key.** Treat this as an incident. The attacker can
+  decrypt every stored Graph access token (valid for about an hour) and the
+  MSAL cache, which holds a refresh token for every signed-in user. Rotating the
+  data key stops the *server* from using those tokens; it does nothing to the
+  copies already taken. In this order:
+  1. Rotate both keys in one revision and purge (procedure above). The
+     server's own hold on every token ends.
+  2. **Revoke sessions in Entra for every user** of the app (Kill switch,
+     step 2). This is what invalidates the stolen refresh tokens.
+  3. Rotate `AZURE_CLIENT_SECRET` and delete the old one. Refresh tokens issued
+     to this app can only be redeemed with its client credentials, which sit in
+     the same Container App as the keys, so assume they went together.
+  4. Read the application audit log and Entra sign-in logs for the exposure
+     window.
+- **The vault itself, or the app's identity.** Both keys, plus
+  `AZURE_CLIENT_SECRET` if it is stored there: do all of the above, and review
+  the vault's role assignments before writing new versions into it.
+
+**A key that is lost** (secret deleted or disabled in the vault) is not an
+outage straight away: running replicas already hold the value. But the next
+revision, and any replica that restarts, cannot resolve the reference and will
+not start. Recover it first: `az keyvault secret recover --vault-name <vault>
+-n <name>` while it is in soft delete, or re-enable the version. If it cannot be
+recovered, everything it protected is lost; generate a new key, which is a
+rotation with the same effect on users.
+
+* * *
+
 ## Users
 
 ### Adding a user
@@ -505,7 +696,7 @@ Ordered by speed. Each step stands alone; in an incident, do 1 and 3 first.
 
   1. **Disable the enterprise application** in Entra (Enterprise applications → the app → Properties → "Enabled for users to sign in?" → No). New sign-ins and refresh-token redemptions stop at once. Existing access tokens keep working until they expire, roughly an hour.
   2. **Revoke sessions** in Entra for the affected users, or for all users. Refresh tokens are invalidated; combined with step 1 no new Graph access is possible after current access tokens expire.
-  3. **Rotate both application keys** (previous section). Every stored session and the MSAL cache become undecryptable in one revision roll; the server's own hold on tokens is gone regardless of what Entra does.
+  3. **Rotate both application keys** ([Application keys](#application-keys)). Every stored session and the MSAL cache become undecryptable in one revision roll; the server's own hold on tokens is gone regardless of what Entra does.
   4. **Purge the credential tables:** `infra/scripts/purge-credentials.sh --resource-group rg-m365-mcp --app-name m365-mcp` (add `--dry-run` first). Same effect as 3, slower, no key change.
   5. **Delete the client secret** on the app registration. The server can no longer redeem authorization codes or refresh tokens.
   6. **Stop traffic:** `az containerapp ingress disable -n m365-mcp -g rg-m365-mcp`, or scale to zero, or delete the app. Storage and keys survive unless deleted.

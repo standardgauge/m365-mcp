@@ -159,6 +159,7 @@ jobs:
   #
   # Builds the image into the runner's daemon (never pushed, read-only token),
   # boots it, and fails unless:
+  #   0. without application keys the container exits instead of serving,
   #   1. GET /health returns the JSON body for this exact build (sha matches),
   #   2. no process in the container runs as uid 0, and
   #   3. trivy's DS-0002 ("image user should not be root") ran against the
@@ -179,11 +180,32 @@ jobs:
       - name: Build image (local daemon only, never pushed)
         run: docker build --build-arg GIT_SHA="$GITHUB_SHA" -t "$IMAGE" .
 
+      # The image refuses to start without valid application keys (the CMD runs
+      # dist/startup/checkKeys.js before the host). Prove that half first: with
+      # no keys the container must exit non-zero and say which key is missing.
+      - name: Assert the image refuses to start without application keys
+        run: |
+          set +e
+          out=$(timeout 120 docker run --rm "$IMAGE" 2>&1)
+          code=$?
+          set -e
+          echo "$out" | tail -n 20
+          [ "$code" -ne 0 ] && [ "$code" -ne 124 ] \
+            || { echo "::error::container without keys exited $code; expected a non-zero exit from the key check"; exit 1; }
+          echo "$out" | grep -q 'MCP_SESSION_HMAC_KEY env var is not set' \
+            && echo "$out" | grep -q 'MCP_DATA_ENCRYPTION_KEY env var is not set' \
+            || { echo "::error::key check did not name both missing keys"; exit 1; }
+
       # No AzureWebJobsStorage, matching infra/container-app.bicep: without it
       # the Functions host keeps secrets and logs on the local filesystem, which
-      # is the path a non-root user might not be able to write.
+      # is the path a non-root user might not be able to write. Throwaway keys,
+      # generated per run, satisfy the startup key check.
       - name: Boot container
-        run: docker run -d --name "$CONTAINER" -p 8080:8080 "$IMAGE"
+        run: |
+          docker run -d --name "$CONTAINER" -p 8080:8080 \
+            -e MCP_SESSION_HMAC_KEY="$(openssl rand -hex 32)" \
+            -e MCP_DATA_ENCRYPTION_KEY="$(openssl rand -hex 32)" \
+            "$IMAGE"
 
       - name: Wait for /health to serve JSON from this build
         run: |

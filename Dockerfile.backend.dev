@@ -46,3 +46,12 @@ RUN groupadd --system --gid 10001 app \
 USER app
 
 EXPOSE 8080
+
+# Validate MCP_SESSION_HMAC_KEY and MCP_DATA_ENCRYPTION_KEY before the Functions
+# host starts. The keys are otherwise read lazily on first use, so a container
+# missing one booted, passed /health, and failed on the first sign-in. With the
+# check in front, a bad key exits the container: the new revision never becomes
+# ready and the previous one keeps serving. The exec keeps the host as the
+# container's main process. /opt/startup/start_nonappservice.sh is the base
+# image's own CMD; src/__tests__/startupKeyCheck.test.ts pins this line.
+CMD ["/bin/sh", "-c", "node dist/startup/checkKeys.js && exec /opt/startup/start_nonappservice.sh"]

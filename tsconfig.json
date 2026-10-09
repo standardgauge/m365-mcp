@@ -15,7 +15,8 @@
   "include": [
     "src/functions/**/*",
     "src/services/**/*",
-    "src/mcp/**/*"
+    "src/mcp/**/*",
+    "src/startup/**/*"
   ],
   "exclude": [
     "node_modules",
