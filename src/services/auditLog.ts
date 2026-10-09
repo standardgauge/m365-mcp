@@ -136,11 +136,16 @@ async function deleteBatch(table: TableClient, partitionKey: string, rowKeys: st
 }
 
 /**
- * Delete audit rows whose `timestamp` is older than `retentionDays` before
+ * Delete audit rows whose `Timestamp` is older than `retentionDays` before
  * `nowMs`, across every tenant partition. Returns the number of rows deleted.
  *
- * Filters on the `timestamp` property rather than the reverse RowKey so rows
- * written under any earlier key format are covered too.
+ * The filter names the service-side `Timestamp` system property with a
+ * `datetime'…'` literal. The SDK serializes the `timestamp` field logAccess
+ * writes as `Timestamp`, which the service owns, so no lowercase `timestamp`
+ * column exists to filter on, and raw filter strings are not rewritten by the
+ * SDK. Rows are written once and never updated, so `Timestamp` is the write
+ * time. Filtering on it rather than the reverse RowKey also covers rows
+ * written under any earlier key format.
  */
 export async function purgeAuditLog(retentionDays: number, nowMs: number = Date.now()): Promise<number> {
   if (retentionDays <= 0) return 0;
@@ -149,7 +154,7 @@ export async function purgeAuditLog(retentionDays: number, nowMs: number = Date.
 
   const cutoff = new Date(nowMs - retentionDays * DAY_MS).toISOString();
   const iterator = table.listEntities<{ partitionKey: string; rowKey: string }>({
-    queryOptions: { filter: `timestamp lt '${cutoff}'`, select: ['partitionKey', 'rowKey'] },
+    queryOptions: { filter: `Timestamp lt datetime'${cutoff}'`, select: ['partitionKey', 'rowKey'] },
   });
 
   const pending = new Map<string, string[]>();

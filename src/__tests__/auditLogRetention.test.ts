@@ -104,11 +104,11 @@ describe('auditRetentionDays', () => {
 });
 
 describe('purgeAuditLog', () => {
-  it('filters on the timestamp cutoff across all partitions', async () => {
+  it('filters on the service-side Timestamp cutoff across all partitions', async () => {
     await purgeAuditLog(90, NOW);
     const opts = mockListEntities.mock.calls[0][0];
     const cutoff = new Date(NOW - 90 * DAY_MS).toISOString();
-    expect(opts.queryOptions?.filter).toBe(`timestamp lt '${cutoff}'`);
+    expect(opts.queryOptions?.filter).toBe(`Timestamp lt datetime'${cutoff}'`);
     expect(opts.queryOptions?.filter).not.toContain('PartitionKey');
   });
 
@@ -173,7 +173,7 @@ describe('maybePurgeAuditLog', () => {
     maybePurgeAuditLog(NOW);
     await flush();
     const cutoff = new Date(NOW - 30 * DAY_MS).toISOString();
-    expect(mockListEntities.mock.calls[0][0].queryOptions?.filter).toBe(`timestamp lt '${cutoff}'`);
+    expect(mockListEntities.mock.calls[0][0].queryOptions?.filter).toBe(`Timestamp lt datetime'${cutoff}'`);
   });
 
   it('is skipped entirely when AUDIT_LOG_RETENTION_DAYS=0', async () => {
