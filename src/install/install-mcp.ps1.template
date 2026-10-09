@@ -16,7 +16,9 @@ re-authenticate, run:
 
 Claude connects through a small local shim served by the same server
 ({{MCP_URL}}/install/m365-mcp-shim.js), saved under %USERPROFILE%\.m365-mcp.
-It forwards MCP traffic and lets mail attachments and OneDrive uploads name a
+The session token is encrypted with DPAPI (bound to your Windows login) and
+kept beside the shim, not in any Claude config file; the shim decrypts it at
+launch. It forwards MCP traffic and lets mail attachments and OneDrive uploads name a
 local file under Downloads, Documents or the OneDrive sync folder. To allow
 other folders, add "env": {"M365_MCP_ATTACH_ROOTS": "default;C:\path\one"}
 to the server entry in your Claude config; re-running this script keeps it.
@@ -297,23 +299,67 @@ function Test-McpConnection {
     }
 }
 
+function Save-SessionToken {
+    param([string]$SessionToken)
+
+    Write-Host ""
+    Write-Host "Step 6: Storing the session token..."
+
+    # Handed to the shim on stdin, never on the command line. It encrypts the
+    # token with DPAPI and reads it back each time Claude starts it.
+    $store = $SessionToken | & $NODE_BIN $SHIM_PATH --store-token $MCP_NAME
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  ✗ Could not store the session token." -ForegroundColor Red
+        throw "Token store failed."
+    }
+    if ("$store".Trim() -eq 'dpapi') {
+        Write-Host "  ✓ Encrypted with DPAPI for your Windows login" -ForegroundColor Green
+    } else {
+        Write-Host "  ⚠ DPAPI unavailable; saved to $SHIM_DIR\$MCP_NAME.token" -ForegroundColor Yellow
+    }
+}
+
+# An earlier installer put the session token in this entry's arguments as
+# a --header Authorization argument. Returns the arguments without it.
+function Remove-TokenArgs {
+    param($Arguments)
+    $out = @()
+    $list = @($Arguments)
+    for ($i = 0; $i -lt $list.Count; $i++) {
+        if ($list[$i] -eq '--header' -and $i + 1 -lt $list.Count -and "$($list[$i + 1])" -match '^(?i)authorization:') {
+            $i++
+            continue
+        }
+        $out += $list[$i]
+    }
+    return ,$out
+}
+
 function Update-ClaudeConfig {
     param(
         [string]$ConfigPath,
-        [string]$SessionToken,
-        [bool]$IncludeStdioType
+        [bool]$IncludeStdioType,
+        [bool]$Backup = $true
     )
 
     if (-not (Test-Path $ConfigPath)) {
         return $false
     }
 
-    # Backup
-    Copy-Item $ConfigPath "$ConfigPath.backup" -Force
-
     # Read existing JSON, mutate the named slot, write back. Other entries
     # in mcpServers and other top-level keys are preserved.
-    $config = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $raw = Get-Content $ConfigPath -Raw -Encoding UTF8
+    $config = $raw | ConvertFrom-Json
+
+    # Backup of the original, minus any session token an earlier installer
+    # left in this entry, so no copy of it is left behind.
+    if ($Backup) {
+        $backupConfig = $raw | ConvertFrom-Json
+        if ($backupConfig.mcpServers -and ($backupConfig.mcpServers.PSObject.Properties.Name -contains $MCP_NAME) -and $backupConfig.mcpServers.$MCP_NAME.args) {
+            $backupConfig.mcpServers.$MCP_NAME.args = Remove-TokenArgs $backupConfig.mcpServers.$MCP_NAME.args
+        }
+        [System.IO.File]::WriteAllText("$ConfigPath.backup", ($backupConfig | ConvertTo-Json -Depth 32), (New-Object System.Text.UTF8Encoding $false))
+    }
 
     if (-not $config.mcpServers) {
         $config | Add-Member -MemberType NoteProperty -Name 'mcpServers' -Value (New-Object PSObject) -Force
@@ -324,8 +370,8 @@ function Update-ClaudeConfig {
         $SHIM_PATH,
         '--streamableHttp',
         "$MCP_URL/api/mcp",
-        '--header',
-        "Authorization:Bearer $SessionToken"
+        '--token-store',
+        $MCP_NAME
     )
 
     # node.exe by absolute path: Claude Desktop spawns the command directly,
@@ -353,24 +399,22 @@ function Update-ClaudeConfig {
 }
 
 function Update-AllConfigs {
-    param([string]$SessionToken)
-
     Write-Host ""
-    Write-Host "Step 6: Configuring Claude..."
+    Write-Host "Step 7: Configuring Claude..."
 
-    if (Update-ClaudeConfig -ConfigPath $CLI_CONFIG -SessionToken $SessionToken -IncludeStdioType $true) {
+    if (Update-ClaudeConfig -ConfigPath $CLI_CONFIG -IncludeStdioType $true) {
         Write-Host "  ✓ Updated $CLI_CONFIG (Claude Code CLI)"
     } else {
         Write-Host "  ⚠ $CLI_CONFIG not found — skipping CLI config"
     }
 
-    if (Update-ClaudeConfig -ConfigPath $SETTINGS_CONFIG -SessionToken $SessionToken -IncludeStdioType $false) {
+    if (Update-ClaudeConfig -ConfigPath $SETTINGS_CONFIG -IncludeStdioType $false) {
         Write-Host "  ✓ Updated $SETTINGS_CONFIG (Claude Code settings)"
     } else {
         Write-Host "  ⚠ $SETTINGS_CONFIG not found — skipping"
     }
 
-    if (Update-ClaudeConfig -ConfigPath $DESKTOP_CONFIG -SessionToken $SessionToken -IncludeStdioType $false) {
+    if (Update-ClaudeConfig -ConfigPath $DESKTOP_CONFIG -IncludeStdioType $false) {
         Write-Host "  ✓ Updated Claude Desktop config"
     } else {
         # Create the directory + file if missing
@@ -379,7 +423,7 @@ function Update-AllConfigs {
             New-Item -ItemType Directory -Path $desktopDir -Force | Out-Null
         }
         [System.IO.File]::WriteAllText($DESKTOP_CONFIG, '{ "mcpServers": {} }', (New-Object System.Text.UTF8Encoding $false))
-        if (Update-ClaudeConfig -ConfigPath $DESKTOP_CONFIG -SessionToken $SessionToken -IncludeStdioType $false) {
+        if (Update-ClaudeConfig -ConfigPath $DESKTOP_CONFIG -IncludeStdioType $false -Backup $false) {
             Write-Host "  ✓ Created Claude Desktop config"
         }
     }
@@ -421,5 +465,7 @@ $challenge = Get-PkceChallenge -Verifier $verifier
 Start-OAuthFlow -Challenge $challenge
 $session = Wait-ForSession -Verifier $verifier
 $toolCount = Test-McpConnection -SessionToken $session.SessionToken
-Update-AllConfigs -SessionToken $session.SessionToken
+Save-SessionToken -SessionToken $session.SessionToken
+$session = $null
+Update-AllConfigs
 Show-Done -ToolCount $toolCount

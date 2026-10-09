@@ -13,8 +13,9 @@
 #   curl -fsSL {{MCP_URL}}/install.sh | bash
 #
 # Claude connects through a small local shim served by the same server
-# ({{MCP_URL}}/install/m365-mcp-shim.js), written to ~/.m365-mcp/. It forwards
-# MCP traffic and lets mail attachments and OneDrive uploads name a local file
+# ({{MCP_URL}}/install/m365-mcp-shim.js), written to ~/.m365-mcp/. The session
+# token goes into your login keychain (libsecret on Linux), not into any Claude
+# config file; the shim reads it from there at launch. It forwards MCP traffic and lets mail attachments and OneDrive uploads name a local file
 # under ~/Downloads, ~/Documents or the OneDrive sync folder. To allow other
 # folders, add "env": {"M365_MCP_ATTACH_ROOTS": "default:/path/one:/path/two"}
 # to the server entry in your Claude config; re-running this script keeps it.
@@ -112,16 +113,25 @@ POLL_URL="${MCP_URL}/api/auth/install-poll?nonce_verifier=${VERIFIER}"
 SESSION_TOKEN=""
 USER_EMAIL=""
 USER_NAME=""
-USER_ID=""
+
+# The poll response carries the session token. It goes to a file only this
+# user can read (mktemp creates it 0600 under a private umask, at an
+# unpredictable name), and the file is removed however the script exits.
+POLL_RESP=$(umask 077 && mktemp "${TMPDIR:-/tmp}/m365-mcp-poll.XXXXXXXX")
+trap 'rm -f "$POLL_RESP"' EXIT
+
+poll_field() {
+    python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$POLL_RESP" "$1" 2>/dev/null || echo ""
+}
 
 for attempt in $(seq 1 ${POLL_MAX_ATTEMPTS}); do
-    HTTP_CODE=$(curl -s -o /tmp/install-poll-resp.json -w "%{http_code}" "${POLL_URL}" || echo "000")
+    HTTP_CODE=$(curl -s -o "$POLL_RESP" -w "%{http_code}" "${POLL_URL}" || echo "000")
 
     if [ "$HTTP_CODE" = "200" ]; then
-        SESSION_TOKEN=$(python3 -c "import json; d=json.load(open('/tmp/install-poll-resp.json')); print(d.get('sessionToken',''))" 2>/dev/null || echo "")
-        USER_EMAIL=$(python3 -c "import json; d=json.load(open('/tmp/install-poll-resp.json')); print(d.get('email',''))" 2>/dev/null || echo "")
-        USER_NAME=$(python3 -c "import json; d=json.load(open('/tmp/install-poll-resp.json')); print(d.get('displayName',''))" 2>/dev/null || echo "")
-        USER_ID=$(python3 -c "import json; d=json.load(open('/tmp/install-poll-resp.json')); print(d.get('userId',''))" 2>/dev/null || echo "")
+        SESSION_TOKEN=$(poll_field sessionToken)
+        USER_EMAIL=$(poll_field email)
+        USER_NAME=$(poll_field displayName)
+        : > "$POLL_RESP"
         echo ""
         echo "  ✓ Signed in as ${USER_NAME} <${USER_EMAIL}>"
         break
@@ -135,20 +145,18 @@ for attempt in $(seq 1 ${POLL_MAX_ATTEMPTS}); do
     elif [ "$HTTP_CODE" = "410" ]; then
         echo ""
         echo "  ✗ Sign-in window expired or was already used. Run this script again."
-        rm -f /tmp/install-poll-resp.json
         exit 1
     else
         echo ""
         echo "  ✗ Unexpected response (HTTP ${HTTP_CODE}) from ${POLL_URL}"
-        if [ -s /tmp/install-poll-resp.json ]; then
-            echo "  Body: $(cat /tmp/install-poll-resp.json)"
+        if [ -s "$POLL_RESP" ]; then
+            echo "  Body: $(head -c 300 "$POLL_RESP")"
         fi
-        rm -f /tmp/install-poll-resp.json
         exit 1
     fi
 done
 
-rm -f /tmp/install-poll-resp.json
+rm -f "$POLL_RESP"
 
 if [ -z "$SESSION_TOKEN" ]; then
     echo ""
@@ -159,9 +167,10 @@ fi
 # ── Step 5: Test connection ──
 echo ""
 echo "Step 5: Testing MCP connection..."
-TEST_RESULT=$(curl -s -X POST \
+# The Authorization header reaches curl as config on stdin, not on argv, so
+# the token does not show in the process list.
+TEST_RESULT=$(printf 'header = "Authorization: Bearer %s"\n' "$SESSION_TOKEN" | curl -s -K - -X POST \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${SESSION_TOKEN}" \
     "${MCP_URL}/api/mcp" \
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' 2>/dev/null)
 
@@ -177,33 +186,83 @@ else
     exit 1
 fi
 
-# ── Step 6: Configure all Claude config files ──
+# ── Step 6: Store the session token ──
 echo ""
-echo "Step 6: Configuring Claude..."
+echo "Step 6: Storing the session token..."
+# Handed to the shim on stdin; it picks the OS credential store and reads the
+# token back from there each time Claude starts it.
+if TOKEN_STORE=$(printf '%s' "$SESSION_TOKEN" | "$NODE_BIN" "$SHIM_PATH" --store-token "$MCP_NAME"); then
+    case "$TOKEN_STORE" in
+        keychain)  echo "  ✓ Saved to your login keychain" ;;
+        libsecret) echo "  ✓ Saved to the desktop keyring (libsecret)" ;;
+        *)         echo "  ⚠ No keychain available; saved to ~/.m365-mcp/${MCP_NAME}.token (readable only by you)" ;;
+    esac
+else
+    echo "  ✗ Could not store the session token."
+    exit 1
+fi
+SESSION_TOKEN=""
 
-# Every config gets the same entry: node runs the shim, which forwards to the
-# server with the session token. Values reach python through the environment,
-# not by splicing them into its source. An existing "env" block on the entry
+# ── Step 7: Configure all Claude config files ──
+echo ""
+echo "Step 7: Configuring Claude..."
+
+# Every config gets the same entry: node runs the shim, which reads the token
+# from the credential store and forwards to the server. No token goes into any
+# config file. Values reach python through the environment, not by splicing
+# them into its source. An existing "env" block on the entry
 # (M365_MCP_ATTACH_ROOTS) is carried over.
+#
+# With BACKUP=1 the original file is copied to <file>.backup first, readable
+# only by you. An earlier installer put the token in this entry's arguments;
+# the backup drops that header so no copy of the token is left behind.
 write_mcp_entry() {
-    CONFIG_PATH="$1" INCLUDE_TYPE="$2" MCP_NAME="$MCP_NAME" MCP_URL="$MCP_URL" \
-    NODE_BIN="$NODE_BIN" SHIM_PATH="$SHIM_PATH" SESSION_TOKEN="$SESSION_TOKEN" \
+    CONFIG_PATH="$1" INCLUDE_TYPE="$2" BACKUP="$3" MCP_NAME="$MCP_NAME" MCP_URL="$MCP_URL" \
+    NODE_BIN="$NODE_BIN" SHIM_PATH="$SHIM_PATH" \
     python3 << 'PYEOF'
-import json, os
+import copy, json, os
 p = os.environ["CONFIG_PATH"]
+name = os.environ["MCP_NAME"]
 try:
     with open(p) as f:
         config = json.load(f)
 except FileNotFoundError:
     config = {}
+
+def without_token(entry):
+    if not isinstance(entry, dict) or not isinstance(entry.get("args"), list):
+        return entry
+    entry = copy.deepcopy(entry)
+    out, args, i = [], entry["args"], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--header" and i + 1 < len(args) and isinstance(args[i + 1], str) \
+                and args[i + 1].lower().startswith("authorization:"):
+            i += 2
+            continue
+        out.append(a)
+        i += 1
+    entry["args"] = out
+    return entry
+
+if os.environ["BACKUP"] == "1" and os.path.exists(p):
+    backup = copy.deepcopy(config)
+    old = backup.get("mcpServers")
+    if isinstance(old, dict) and name in old:
+        old[name] = without_token(old[name])
+    bp = p + ".backup"
+    fd = os.open(bp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(backup, f, indent=2)
+
 servers = config.setdefault("mcpServers", {})
-name = os.environ["MCP_NAME"]
 entry = {}
 if os.environ["INCLUDE_TYPE"] == "1":
     entry["type"] = "stdio"
 entry["command"] = os.environ["NODE_BIN"]
 entry["args"] = [os.environ["SHIM_PATH"], "--streamableHttp", os.environ["MCP_URL"] + "/api/mcp",
-                 "--header", "Authorization:Bearer " + os.environ["SESSION_TOKEN"]]
+                 "--token-store", name]
 previous = servers.get(name)
 if isinstance(previous, dict) and isinstance(previous.get("env"), dict):
     entry["env"] = previous["env"]
@@ -213,32 +272,29 @@ with open(p, "w") as f:
 PYEOF
 }
 
-# 6a. Claude Code CLI config (~/.claude.json)
+# 7a. Claude Code CLI config (~/.claude.json)
 if [ -f "$CLI_CONFIG" ]; then
-    cp "$CLI_CONFIG" "${CLI_CONFIG}.backup"
-    write_mcp_entry "$CLI_CONFIG" 1
+    write_mcp_entry "$CLI_CONFIG" 1 1
     echo "  ✓ Updated ~/.claude.json (Claude Code CLI)"
 else
     echo "  ⚠ ~/.claude.json not found — skipping CLI config (create it manually if needed)"
 fi
 
-# 6b. Claude Code settings (~/.claude/settings.json)
+# 7b. Claude Code settings (~/.claude/settings.json)
 if [ -f "$SETTINGS_CONFIG" ]; then
-    cp "$SETTINGS_CONFIG" "${SETTINGS_CONFIG}.backup"
-    write_mcp_entry "$SETTINGS_CONFIG" 0
+    write_mcp_entry "$SETTINGS_CONFIG" 0 1
     echo "  ✓ Updated ~/.claude/settings.json (Claude Code settings)"
 else
     echo "  ⚠ ~/.claude/settings.json not found — skipping"
 fi
 
-# 6c. Claude Desktop config
+# 7c. Claude Desktop config
 if [ -f "$DESKTOP_CONFIG" ]; then
-    cp "$DESKTOP_CONFIG" "${DESKTOP_CONFIG}.backup"
-    write_mcp_entry "$DESKTOP_CONFIG" 0
+    write_mcp_entry "$DESKTOP_CONFIG" 0 1
     echo "  ✓ Updated Claude Desktop config"
 else
     mkdir -p "$(dirname "$DESKTOP_CONFIG")"
-    write_mcp_entry "$DESKTOP_CONFIG" 0
+    write_mcp_entry "$DESKTOP_CONFIG" 0 0
     echo "  ✓ Created Claude Desktop config"
 fi
 

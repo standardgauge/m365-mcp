@@ -25,8 +25,8 @@ const VERIFIER_FORMAT = /^[a-f0-9]{32}$/;
  *   - 400 if the nonce_verifier parameter is missing or malformed.
  *   - 410 if the nonce is unknown, expired, or already consumed.
  *
- * The script writes the returned sessionToken into the stdio shim's args as
- *   --header Authorization:Bearer <token>
+ * The script hands the returned sessionToken to the stdio shim, which keeps it
+ * in the OS credential store; the MCP client config names only the store.
  * No further use of the userId is needed for auth — the token is the credential.
  */
 async function installPoll(

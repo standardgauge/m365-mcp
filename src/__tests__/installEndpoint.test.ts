@@ -439,3 +439,25 @@ describe('installers configure the shim, not supergateway', () => {
   });
 });
 
+describe('installers keep the session token out of config files and /tmp', () => {
+  it.each([
+    ['install.sh', () => installSh(makeRequest(), makeContext())],
+    ['install.ps1', () => installPs1(makeRequest(), makeContext())],
+  ])('%s hands the token to the shim credential store', async (_name, render) => {
+    const script = (await render()).body as string;
+    expect(script).toContain('--store-token');
+    expect(script).toContain('--token-store');
+    // The config entry no longer carries a bearer header.
+    expect(script).not.toMatch(/Authorization:Bearer/);
+  });
+
+  it('install.sh writes the poll response to a private mktemp file, removed on exit', async () => {
+    const script = (await installSh(makeRequest(), makeContext())).body as string;
+    expect(script).not.toContain('/tmp/install-poll-resp.json');
+    expect(script).toMatch(/POLL_RESP=\$\(umask 077 && mktemp /);
+    expect(script).toContain(`trap 'rm -f "$POLL_RESP"' EXIT`);
+    // The connection test reads the header from stdin, not argv.
+    expect(script).toContain('curl -s -K -');
+  });
+});
+

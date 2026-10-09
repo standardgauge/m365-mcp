@@ -270,6 +270,97 @@ describe('parseArgs', () => {
       url: 'https://h/api/mcp', headers: { Authorization: 'Bearer a:b' },
     });
   });
+
+  it('accepts --token-store and --store-token', () => {
+    expect(shim.parseArgs(['--streamableHttp', 'https://h/api/mcp', '--token-store', 'test-m365'])).toEqual({
+      url: 'https://h/api/mcp', headers: {}, tokenStore: 'test-m365',
+    });
+    expect(shim.parseArgs(['--store-token', 'test-m365']).storeToken).toBe('test-m365');
+  });
+});
+
+describe('createTokenStore', () => {
+  type Call = { cmd: string; args: string[]; input?: string };
+
+  function fakeExec(handler: (c: Call) => string) {
+    const calls: Call[] = [];
+    const exec = (cmd: string, args: string[], o?: { input?: string }) => {
+      const c = { cmd, args, input: o?.input };
+      calls.push(c);
+      return handler(c);
+    };
+    return { calls, exec };
+  }
+
+  const fail = () => { throw Object.assign(new Error('not found'), { code: 'ENOENT' }); };
+
+  it('macOS: stores in the login keychain under the instance service, and reads it back', () => {
+    let stored = '';
+    const { calls, exec } = fakeExec((c) => {
+      if (c.args[0] === 'add-generic-password') { stored = c.args[c.args.indexOf('-w') + 1]; return ''; }
+      if (c.args[0] === 'find-generic-password') return stored + '\n';
+      return '';
+    });
+    const store = shim.createTokenStore('test-m365', { platform: 'darwin', home, env: {}, execFileSync: exec });
+    expect(store.save('tok-mac')).toBe('keychain');
+    expect(calls[0].cmd).toBe('security');
+    expect(calls[0].args).toEqual(expect.arrayContaining(['-s', 'ai.standardgauge.test-m365', '-a', 'shim-session-token', '-U']));
+    expect(store.load()).toBe('tok-mac');
+    expect(fs.existsSync(store.file)).toBe(false);
+  });
+
+  it('Linux: hands the token to secret-tool on stdin, never argv', () => {
+    let stored = '';
+    const { calls, exec } = fakeExec((c) => {
+      if (c.args[0] === 'store') { stored = c.input!; return ''; }
+      if (c.args[0] === 'lookup') return stored;
+      return '';
+    });
+    const store = shim.createTokenStore('test-m365', { platform: 'linux', home, env: {}, execFileSync: exec });
+    expect(store.save('tok-linux')).toBe('libsecret');
+    expect(calls[0]).toMatchObject({ cmd: 'secret-tool', input: 'tok-linux' });
+    expect(calls[0].args.join(' ')).not.toContain('tok-linux');
+    expect(store.load()).toBe('tok-linux');
+  });
+
+  it('Windows: keeps only a DPAPI blob on disk, with the token passed on stdin', () => {
+    const { calls, exec } = fakeExec((c) => {
+      if (c.args[3].includes('ConvertFrom-SecureString')) return 'BLOB(' + c.input + ')';
+      return c.input!.replace(/^BLOB\((.*)\)$/, '$1');
+    });
+    const store = shim.createTokenStore('test-m365', { platform: 'win32', home, env: {}, execFileSync: exec });
+    expect(store.save('tok-win')).toBe('dpapi');
+    expect(calls.every((c) => !c.args.join(' ').includes('tok-win'))).toBe(true);
+    expect(JSON.parse(fs.readFileSync(store.file, 'utf8'))).toEqual({ enc: 'dpapi', token: 'BLOB(tok-win)' });
+    expect(store.load()).toBe('tok-win');
+  });
+
+  it('falls back to a 0600 file when no store is available, and replaces it later', () => {
+    const { exec } = fakeExec(fail);
+    const store = shim.createTokenStore('test-m365', { platform: 'linux', home, env: {}, execFileSync: exec });
+    expect(store.save('tok-1')).toBe('file');
+    expect(store.save('tok-2')).toBe('file');
+    expect(store.load()).toBe('tok-2');
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(store.file).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(path.dirname(store.file)).mode & 0o077).toBe(0);
+    }
+  });
+
+  it('M365_MCP_TOKEN_STORE=file skips the OS store', () => {
+    const { calls, exec } = fakeExec(() => '');
+    const store = shim.createTokenStore('test-m365', { platform: 'darwin', home, env: { M365_MCP_TOKEN_STORE: 'file' }, execFileSync: exec });
+    expect(store.save('tok')).toBe('file');
+    expect(store.load()).toBe('tok');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('returns null when nothing is stored, and refuses names that could escape the directory', () => {
+    const { exec } = fakeExec(fail);
+    expect(shim.createTokenStore('test-m365', { platform: 'linux', home, env: {}, execFileSync: exec }).load()).toBeNull();
+    expect(() => shim.createTokenStore('../x', { home })).toThrow(/token store name/);
+    expect(() => shim.createTokenStore('', { home })).toThrow(/token store name/);
+  });
 });
 
 // ── End to end: the real shim process against a fake server ────────────────
@@ -307,10 +398,12 @@ function startFakeServer(): Promise<{ url: string; captured: Captured[]; close: 
   });
 }
 
-function runShim(url: string, messages: unknown[]): Promise<any[]> {
+const shimEnv = () => ({ ...process.env, HOME: home, USERPROFILE: home, M365_MCP_ATTACH_ROOTS: '', M365_MCP_TOKEN_STORE: 'file' });
+
+function runShim(url: string, messages: unknown[], auth: string[] = ['--header', 'Authorization:Bearer tok-123']): Promise<any[]> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [SHIM_PATH, '--streamableHttp', url, '--header', 'Authorization:Bearer tok-123'], {
-      env: { ...process.env, HOME: home, USERPROFILE: home, M365_MCP_ATTACH_ROOTS: '' },
+    const child = spawn(process.execPath, [SHIM_PATH, '--streamableHttp', url, ...auth], {
+      env: shimEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let out = '';
@@ -362,5 +455,45 @@ describe('shim process (acceptance)', () => {
     } finally {
       await server.close();
     }
+  }, 20000);
+});
+
+describe('shim process: token from the credential store', () => {
+  function storeToken(name: string, token: string): Promise<{ code: number | null; out: string }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [SHIM_PATH, '--store-token', name], { env: shimEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+      let out = '';
+      child.stdout.on('data', (c) => (out += c));
+      child.on('error', reject);
+      child.on('close', (code) => resolve({ code, out }));
+      child.stdin.end(token + '\n');
+    });
+  }
+
+  it('stores the token from stdin, then forwards with it when started with --token-store', async () => {
+    const server = await startFakeServer();
+    try {
+      const stored = await storeToken('test-m365', 'tok-from-store');
+      expect(stored).toEqual({ code: 0, out: 'file\n' });
+
+      const replies = await runShim(server.url, [{ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }], ['--token-store', 'test-m365']);
+      expect(replies).toHaveLength(1);
+      expect(server.captured[0].headers.authorization).toBe('Bearer tok-from-store');
+    } finally {
+      await server.close();
+    }
+  }, 20000);
+
+  it('exits with a re-install hint when no token is stored', async () => {
+    const result = await new Promise<{ code: number | null; err: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, [SHIM_PATH, '--streamableHttp', 'http://127.0.0.1:9/api/mcp', '--token-store', 'missing'], { env: shimEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+      let err = '';
+      child.stderr.on('data', (c) => (err += c));
+      child.on('error', reject);
+      child.on('close', (code) => resolve({ code, err }));
+      child.stdin.end();
+    });
+    expect(result.code).toBe(2);
+    expect(result.err).toMatch(/re-run the installer/);
   }, 20000);
 });

@@ -250,7 +250,7 @@ Copy `.env.example` to `.env` for local work, or set these as Container App secr
 
 ## Connecting a client
 
-Each instance serves its own installers. They sign you in through the browser, save a small local shim, and write the Claude Desktop and Claude Code configs:
+Each instance serves its own installers. They sign you in through the browser, save a small local shim, store the session token in the OS credential store (macOS Keychain, Windows DPAPI, libsecret on Linux, or a 0600 file under `~/.m365-mcp/` where none is available), and write the Claude Desktop and Claude Code configs. The configs name the store, not the token:
 
 ```bash
 curl -fsSL https://<your-host>/install.sh | bash        # macOS
@@ -264,7 +264,11 @@ Claude Desktop users can install the extension from `https://<your-host>/install
 
 The shim (`src/install/m365-mcp-shim.js`, served at `/install/m365-mcp-shim.js`) is the stdio process the MCP client launches. It forwards JSON-RPC to `/api/mcp` with your session token, and needs only Node.js 18 or later. It also lets `create_draft` and `send_mail` attachments, and `write_onedrive_file`, name a local file by path instead of carrying base64, so the file never passes through the model's context. Local reads are limited to `~/Downloads`, `~/Documents` and the OneDrive sync folders, refuse hidden files, and cap at 10 MB. Set `M365_MCP_ATTACH_ROOTS` in the entry's `env` to change the folders.
 
-To configure a client by hand, download the shim and point the client at it:
+To configure a client by hand, download the shim, give it the session token on stdin, and point the client at the store by name:
+
+```bash
+printf '%s' "$SESSION_TOKEN" | node /path/to/m365-mcp-shim.js --store-token m365
+```
 
 ```json
 {
@@ -274,12 +278,14 @@ To configure a client by hand, download the shim and point the client at it:
       "args": [
         "/path/to/m365-mcp-shim.js",
         "--streamableHttp", "https://<your-host>/api/mcp",
-        "--header", "Authorization:Bearer <session-token>"
+        "--token-store", "m365"
       ]
     }
   }
 }
 ```
+
+The shim also accepts `"--header", "Authorization:Bearer <session-token>"` in place of `--token-store`, but that puts the token in the config file in plaintext. Set `M365_MCP_TOKEN_STORE=file` to skip the OS store and use the 0600 file.
 
 ---
 

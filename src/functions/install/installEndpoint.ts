@@ -835,9 +835,10 @@ function renderPs1Script(mcpUrl: string, mcpName: string): string {
 }
 
 // The local stdio process the installers configure in place of
-// `npx -y supergateway`. Served verbatim: the server URL and token
-// reach it as arguments in the MCP client config, so one file serves every
-// tenant and a re-install picks up whatever canonical last shipped.
+// `npx -y supergateway`. Served verbatim: the server URL and the name of the
+// credential-store entry holding the token reach it as arguments in the MCP
+// client config, so one file serves every tenant and a re-install picks up
+// whatever canonical last shipped.
 const SHIM_FILE = 'm365-mcp-shim.js';
 
 async function installShimHandler(

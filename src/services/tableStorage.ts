@@ -3,11 +3,13 @@ import { createHash } from 'crypto';
 import {
   hashSessionToken,
   encryptWithDek,
+  decryptWithDek,
   decryptWithDekMigrating,
   envelopeAad,
 } from './credentialCrypto.js';
 
 const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+const INSTALL_NONCES_TABLE = 'mcpInstallNonces';
 
 let sessionsTable: TableClient | null = null;
 let msalCacheTable: TableClient | null = null;
@@ -22,11 +24,11 @@ async function ensureTables(): Promise<void> {
   // Create tables if they don't exist
   try { await serviceClient.createTable('mcpSessions'); } catch { /* already exists */ }
   try { await serviceClient.createTable('mcpMsalCache'); } catch { /* already exists */ }
-  try { await serviceClient.createTable('mcpInstallNonces'); } catch { /* already exists */ }
+  try { await serviceClient.createTable(INSTALL_NONCES_TABLE); } catch { /* already exists */ }
 
   sessionsTable = TableClient.fromConnectionString(connectionString, 'mcpSessions');
   msalCacheTable = TableClient.fromConnectionString(connectionString, 'mcpMsalCache');
-  installNoncesTable = TableClient.fromConnectionString(connectionString, 'mcpInstallNonces');
+  installNoncesTable = TableClient.fromConnectionString(connectionString, INSTALL_NONCES_TABLE);
   initialized = true;
 }
 
@@ -73,8 +75,9 @@ function getInstallNoncesTable(): TableClient {
 // Backward compatibility: legacy rows use RowKey = userId. These are read
 // transparently but new sessions always use the tokenHash RowKey format.
 //
-// We do NOT store the original sessionToken anywhere — it lives only in the
-// client config files after install. Loss of the HMAC key means every user
+// We do NOT store the original sessionToken in this table. After install it
+// lives only on the client, in the OS credential store; during the install
+// handoff it sits briefly, encrypted, in mcpInstallNonces (below). Loss of the HMAC key means every user
 // must re-OAuth, but that's the desired property: the secret-at-rest material
 // is recoverable only via Key Vault, not via storage exfiltration.
 
@@ -221,6 +224,7 @@ export async function saveSession(
   mode: 'create' | 'update' = 'create',
 ): Promise<void> {
   await ensureTables();
+  maybePurgeExpiredInstallNonces();
 
   if (mode === 'update' && session._storageKey) {
     const accessEnvelope = encryptWithDek(
@@ -330,6 +334,7 @@ export async function loadSession(userId: string): Promise<StoredSession | null>
  */
 export async function loadSessionByToken(token: string): Promise<StoredSession | null> {
   await ensureTables();
+  maybePurgeExpiredInstallNonces();
   const targetHash = hashSessionToken(token);
   const rowKey = targetHash.slice(0, 32);
 
@@ -406,6 +411,22 @@ export async function listAllSessions(): Promise<StoredSession[]> {
 // session here keyed by sha256(nonce); the poll endpoint reads and atomically
 // deletes (one-time-use, race-safe via ETag). Records have a 5-minute TTL.
 //
+// The session token is the one value in this table that authenticates, and it
+// is the only place the server ever holds it in a recoverable form. It is
+// stored as an AES-256-GCM envelope bound to its row (sessionToken* columns,
+// AAD names this table, partition, row and column), the same as access tokens
+// in mcpSessions, so a copy of the table yields nothing usable without the
+// data encryption key. Rows written before encryption carried a plaintext
+// `sessionToken` column; those are never handed out, only deleted.
+//
+// A row nobody polls (the installer was closed mid-flow) would otherwise sit
+// in the table forever. Expired rows are deleted by purgeExpiredInstallNonces,
+// which session saves, token lookups, attach and consume start at most once per
+// NONCE_PURGE_INTERVAL_MS per process. Like the audit purge, this is not a
+// timer trigger: the Container App runs without AzureWebJobsStorage (see
+// auditLog.ts), so rows are purged while the server is in use, which is also
+// the only time new ones are written.
+//
 // Key design point: a "not found" lookup means the user's browser hasn't
 // finished OAuth yet (or never will). The poll endpoint treats not-found as
 // 'pending' and lets the client's own timeout handle the never-completes case.
@@ -424,27 +445,44 @@ export interface InstallNonceRecord {
   expiresAt: number;
 }
 
+const INSTALL_NONCE_PARTITION = 'nonce';
+const NONCE_PURGE_INTERVAL_MS = 10 * 60 * 1000;
+// Bounds one run. A backlog larger than this is finished by later runs.
+const NONCE_PURGE_MAX_ROWS_PER_RUN = 5_000;
+
+let lastNoncePurgeStartedAt = 0;
+let noncePurgeInFlight: Promise<number> | null = null;
+
 function hashNonce(nonce: string): string {
   return createHash('sha256').update(nonce).digest('hex');
 }
 
+function installNonceTokenAad(rowKey: string): string {
+  return envelopeAad(INSTALL_NONCES_TABLE, INSTALL_NONCE_PARTITION, rowKey, 'sessionToken');
+}
+
 /**
  * Upsert a completed session under the given nonce. Called from the OAuth
- * callback after the session has been created. Always returns true on
- * successful write — there is no pre-reservation to fail against.
+ * callback after the session has been created. Returns false if the write
+ * (or encrypting the token) fails — there is no pre-reservation to fail
+ * against. The plaintext token never reaches storage.
  */
 export async function attachSessionToInstallNonce(
   nonce: string,
   record: InstallNonceRecord
 ): Promise<boolean> {
   await ensureTables();
+  maybePurgeExpiredInstallNonces();
   const rowKey = hashNonce(nonce);
   try {
+    const envelope = encryptWithDek(record.sessionToken, installNonceTokenAad(rowKey));
     await getInstallNoncesTable().upsertEntity(
       {
-        partitionKey: 'nonce',
+        partitionKey: INSTALL_NONCE_PARTITION,
         rowKey,
-        sessionToken: record.sessionToken,
+        sessionTokenCiphertext: envelope.ciphertext,
+        sessionTokenIv: envelope.iv,
+        sessionTokenAuthTag: envelope.authTag,
         userId: record.userId,
         email: record.email,
         displayName: record.displayName,
@@ -469,7 +507,9 @@ export async function attachSessionToInstallNonce(
  *     have completed OAuth yet, or this poll lost the consumption race to
  *     another concurrent client. The caller's own polling timeout decides
  *     when to give up.
- *   - null               — found but expired (record cleaned up best-effort).
+ *   - null               — found but expired, or its token envelope is
+ *     missing or does not decrypt for this row (a pre-encryption plaintext
+ *     row, or one tampered with). The row is deleted best-effort.
  *
  * The poll endpoint maps:
  *   InstallNonceRecord → 200
@@ -480,10 +520,11 @@ export async function consumeInstallNonce(
   nonce: string
 ): Promise<InstallNonceRecord | 'pending' | null> {
   await ensureTables();
+  maybePurgeExpiredInstallNonces();
   const rowKey = hashNonce(nonce);
   let entity;
   try {
-    entity = await getInstallNoncesTable().getEntity('nonce', rowKey);
+    entity = await getInstallNoncesTable().getEntity(INSTALL_NONCE_PARTITION, rowKey);
   } catch {
     // Not in storage — either the OAuth callback hasn't fired yet, or this
     // nonce was consumed by another concurrent poll. Either way, the safe
@@ -491,16 +532,34 @@ export async function consumeInstallNonce(
     return 'pending';
   }
 
-  const expiresAt = entity.expiresAt as number;
-  if (expiresAt < Date.now()) {
+  const discard = async (): Promise<null> => {
     try {
-      await getInstallNoncesTable().deleteEntity('nonce', rowKey);
+      await getInstallNoncesTable().deleteEntity(INSTALL_NONCE_PARTITION, rowKey);
     } catch { /* race ok */ }
     return null;
+  };
+
+  const expiresAt = entity.expiresAt as number;
+  if (!(expiresAt >= Date.now())) return discard();
+
+  let sessionToken: string;
+  try {
+    sessionToken = decryptWithDek(
+      {
+        ciphertext: entity.sessionTokenCiphertext as string,
+        iv: entity.sessionTokenIv as string,
+        authTag: entity.sessionTokenAuthTag as string,
+      },
+      installNonceTokenAad(rowKey),
+    );
+  } catch {
+    // No envelope (a row written before encryption) or one that does not
+    // belong to this row. The installer is told to start again.
+    return discard();
   }
 
   const record: InstallNonceRecord = {
-    sessionToken: entity.sessionToken as string,
+    sessionToken,
     userId: entity.userId as string,
     email: entity.email as string,
     displayName: entity.displayName as string,
@@ -513,13 +572,74 @@ export async function consumeInstallNonce(
   // session to a second client (which then can't actually authenticate, since
   // the session is bound to this one nonce flow).
   try {
-    await getInstallNoncesTable().deleteEntity('nonce', rowKey, {
+    await getInstallNoncesTable().deleteEntity(INSTALL_NONCE_PARTITION, rowKey, {
       etag: entity.etag,
     });
   } catch {
     return 'pending';
   }
   return record;
+}
+
+/**
+ * Delete install-nonce rows whose expiresAt has passed, and rows with no
+ * expiresAt at all (nothing could ever consume them). Returns the number of
+ * rows deleted. Each delete carries the row's ETag, so a row re-attached
+ * between the scan and the delete is left alone.
+ */
+export async function purgeExpiredInstallNonces(nowMs: number = Date.now()): Promise<number> {
+  await ensureTables();
+  const table = getInstallNoncesTable();
+  const iterator = table.listEntities<{ expiresAt?: number }>({
+    queryOptions: {
+      filter: `PartitionKey eq '${INSTALL_NONCE_PARTITION}'`,
+      select: ['expiresAt'],
+    },
+  });
+
+  let deleted = 0;
+  let seen = 0;
+  for await (const entity of iterator) {
+    if (++seen > NONCE_PURGE_MAX_ROWS_PER_RUN) break;
+    const expiresAt = entity.expiresAt;
+    if (typeof expiresAt === 'number' && expiresAt >= nowMs) continue;
+    try {
+      await table.deleteEntity(INSTALL_NONCE_PARTITION, entity.rowKey as string, { etag: entity.etag });
+      deleted++;
+    } catch {
+      /* consumed, re-attached, or deleted by another replica meanwhile */
+    }
+  }
+  if (deleted > 0) {
+    console.log(`[installNonce] Purged ${deleted} expired install-nonce row(s)`);
+  }
+  return deleted;
+}
+
+/**
+ * Start a purge of expired install-nonce rows if none is running in this
+ * process and the last one started more than NONCE_PURGE_INTERVAL_MS ago.
+ * Fire-and-forget; never throws.
+ */
+export function maybePurgeExpiredInstallNonces(nowMs: number = Date.now()): void {
+  if (!connectionString || noncePurgeInFlight) return;
+  if (nowMs - lastNoncePurgeStartedAt < NONCE_PURGE_INTERVAL_MS) return;
+  lastNoncePurgeStartedAt = nowMs;
+  noncePurgeInFlight = purgeExpiredInstallNonces(nowMs)
+    .catch((err: unknown) => {
+      console.error('[installNonce] Expired-row purge failed:', err instanceof Error ? err.message : err);
+      return 0;
+    })
+    .finally(() => {
+      noncePurgeInFlight = null;
+    });
+}
+
+/** Test hook: wait for an in-flight purge, then forget it so the next call runs. */
+export async function resetInstallNoncePurgeStateForTests(): Promise<void> {
+  if (noncePurgeInFlight) await noncePurgeInFlight;
+  lastNoncePurgeStartedAt = 0;
+  noncePurgeInFlight = null;
 }
 
 // ── MSAL cache persistence ──
