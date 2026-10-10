@@ -51,7 +51,12 @@ import { extensionPublicKey, signExtensionPayload } from '../../services/extensi
 // accept the update unsigned, which is how they become 2.11.0; every update
 // after that has to be signed. 2.11.0 keeps the 2.10.1 legacy keychain
 // fallback, so the signed server/index.js carries it.
-const EXTENSION_VERSION = '2.11.0';
+// Bumped 2.11.0 -> 2.12.0: a launch that had to sign in blocked before
+// connecting stdio, so a client's connect timeout killed it along with its
+// polling verifier and the next launch opened another sign-in page. The bridge
+// now connects first and signs in from a tool call, sharing the sign-in in
+// flight across launches.
+const EXTENSION_VERSION = '2.12.0';
 
 // Keychain service an earlier release of the extension saved the session
 // under, or '' when the deployment never had one. Only a deployment that
@@ -262,7 +267,8 @@ function renderServerJs(
  * Bridges stdio (Claude Desktop) <-> HTTP (MCP server) with:
  *   - OS-native encrypted token storage (macOS Keychain / Windows DPAPI /
  *     Linux libsecret), with a 0600-file fallback
- *   - Nonce-based OAuth flow for first-time sign-in
+ *   - Nonce-based OAuth flow for sign-in, started by the first tool call that
+ *     needs a session and never ahead of connecting stdio
  *   - Auto re-auth on session expiry
  *   - No secrets in process argv
  *
@@ -288,7 +294,6 @@ const EXTENSION_VERSION = '${EXTENSION_VERSION}';
 // Updates must be signed by the matching private key.
 const UPDATE_PUBLIC_KEY = '${extensionPublicKey()}';
 const POLL_INTERVAL = 2000;
-const POLL_MAX = 150; // 5 minutes
 
 // -- Auto-update --
 // On startup, checks the server for a newer extension version. If strictly
@@ -296,8 +301,8 @@ const POLL_MAX = 150; // 5 minutes
 // UPDATE_PUBLIC_KEY, checks every path stays inside the extension directory,
 // and only then overwrites files in place. Anything that fails a check is
 // refused and the current version keeps running. Next Claude Desktop restart
-// picks up the new code. Bounded by timeouts so a stalled server never blocks
-// startup.
+// picks up the new code. Runs alongside the bridge, never ahead of it, and
+// each request is bounded.
 
 ${renderUpdateModule()}
 const { isNewerVersion } = extensionUpdate;
@@ -599,44 +604,147 @@ function openInBrowser(target) {
   } catch { /* user will open manually */ }
 }
 
-async function authenticate() {
-  const verifier = crypto.randomBytes(16).toString('hex');
-  const challenge = crypto.createHash('sha256').update(verifier).digest('hex');
-  const loginUrl = MCP_URL + '/api/auth/login?install_nonce=' + challenge + '&device_label=' + encodeURIComponent(deviceLabel());
-  const code = confirmationCode(challenge);
+// -- Sign-in, off the connect path --
+// A launch never waits for sign-in. MCP clients drop a server that has not
+// answered initialize within their connect timeout (30s in Claude Code), and
+// dropping the process used to drop the polling verifier with it: the sign-in
+// page it had opened could never complete, and every new session opened
+// another. So the bridge connects at once, a tool call made without a session
+// answers with a sign-in-required error, and the sign-in runs in the
+// background. Nothing opens a browser until a tool call needs a session.
+//
+// The sign-in in flight is shared through a 0600 file in the home directory,
+// so a relaunch or a second client session adopts it and polls with the same
+// verifier instead of opening another page. The verifier only yields a session
+// if the user finishes signing in under its nonce, and only to someone who can
+// already read the user's home directory: the same reach as the token file
+// fallback.
 
-  process.stderr.write('\\n[' + MCP_NAME + '] Opening browser to sign in with Microsoft 365...\\n');
-  process.stderr.write('[' + MCP_NAME + '] Confirmation code: ' + code + '\\n');
-  process.stderr.write('[' + MCP_NAME + '] If the browser does not open, visit: ' + loginUrl + '\\n\\n');
+const SIGNIN_WINDOW_MS = 10 * 60 * 1000; // the login route's install_nonce cookie lives 600s
 
-  let pageFile = null;
-  try { pageFile = writeSignInPage(loginUrl, code); } catch { /* fall back to the bare URL */ }
-  openInBrowser(pageFile || loginUrl);
-  const cleanup = () => {
-    if (pageFile) { try { fs.rmSync(path.dirname(pageFile), { recursive: true, force: true }); } catch { /* ok */ } }
-  };
+let sessionToken = null;
+let signIn = null; // { loginUrl, code, adopted } while this process polls
+let stdinOpen = true;
+let clientInitialized = false;
 
+function getPendingFile() {
+  return path.join(os.homedir(), '.' + MCP_NAME + '-signin.json');
+}
+
+function readPendingSignIn() {
+  try {
+    const data = JSON.parse(fs.readFileSync(getPendingFile(), 'utf8'));
+    const age = Date.now() - data.startedAt;
+    if (typeof data.verifier === 'string' && /^[a-f0-9]{32}$/.test(data.verifier) &&
+        typeof data.startedAt === 'number' && age >= 0 && age < SIGNIN_WINDOW_MS) {
+      return data;
+    }
+  } catch { /* none, or unreadable */ }
+  return null;
+}
+
+// Takes the shared slot for a new sign-in. False when another process took it
+// first, so the caller adopts that one instead.
+function claimPendingSignIn(record) {
+  const file = getPendingFile();
+  if (!readPendingSignIn()) { try { fs.unlinkSync(file); } catch { /* none */ } }
+  try {
+    fs.writeFileSync(file, JSON.stringify(record), { mode: 0o600, flag: 'wx' });
+    return true;
+  } catch (err) {
+    return !(err && err.code === 'EEXIST'); // unwritable home: sign in unshared
+  }
+}
+
+function clearPendingSignIn(verifier) {
+  try {
+    const data = JSON.parse(fs.readFileSync(getPendingFile(), 'utf8'));
+    if (data.verifier === verifier) fs.unlinkSync(getPendingFile());
+  } catch { /* already gone */ }
+}
+
+// Polls until the sign-in hands over a session. Every pass first reads the
+// store: a process sharing this sign-in may have collected the session, and the
+// server reads a consumed verifier as pending, not gone.
+async function pollForSession(verifier, deadline) {
   const pollUrl = MCP_URL + '/api/auth/install-poll?nonce_verifier=' + verifier;
-  for (let i = 0; i < POLL_MAX; i++) {
+  while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, POLL_INTERVAL));
+    const stored = loadToken();
+    if (stored) return stored;
     try {
-      const res = await httpRequest(pollUrl, 'GET');
+      const res = await withTimeout(httpRequest(pollUrl, 'GET'), 15000);
       if (res.status === 200) {
         const data = JSON.parse(res.body);
-        cleanup();
+        try { saveToken(data.sessionToken); } catch { /* kept in memory for this run */ }
         process.stderr.write('[' + MCP_NAME + '] Signed in as ' + data.displayName + ' <' + data.email + '>\\n');
         return data.sessionToken;
       }
       if (res.status === 410) {
-        cleanup();
-        process.stderr.write('[' + MCP_NAME + '] Sign-in expired. Restart to try again.\\n');
-        process.exit(1);
+        process.stderr.write('[' + MCP_NAME + '] Sign-in expired. The next tool call starts a new one.\\n');
+        return null;
       }
     } catch { /* network error, retry */ }
   }
-  cleanup();
-  process.stderr.write('[' + MCP_NAME + '] Timed out waiting for sign-in.\\n');
-  process.exit(1);
+  process.stderr.write('[' + MCP_NAME + '] Timed out waiting for sign-in. The next tool call starts a new one.\\n');
+  return null;
+}
+
+// Starts a sign-in, or adopts the one already in flight on this machine.
+// Returns what a tool call needs to tell the user; never waits for the result.
+function beginSignIn() {
+  if (signIn) return signIn;
+
+  let pending = readPendingSignIn();
+  let adopted = !!pending;
+  if (!pending) {
+    const record = { verifier: crypto.randomBytes(16).toString('hex'), startedAt: Date.now() };
+    if (claimPendingSignIn(record)) {
+      pending = record;
+    } else {
+      pending = readPendingSignIn() || record;
+      adopted = pending !== record;
+    }
+  }
+
+  const verifier = pending.verifier;
+  const challenge = crypto.createHash('sha256').update(verifier).digest('hex');
+  const loginUrl = MCP_URL + '/api/auth/login?install_nonce=' + challenge + '&device_label=' + encodeURIComponent(deviceLabel());
+  const code = confirmationCode(challenge);
+
+  let pageFile = null;
+  if (adopted) {
+    process.stderr.write('[' + MCP_NAME + '] A sign-in is already in progress (confirmation code ' + code + '). Waiting for it.\\n');
+  } else {
+    process.stderr.write('\\n[' + MCP_NAME + '] Opening browser to sign in with Microsoft 365...\\n');
+    process.stderr.write('[' + MCP_NAME + '] Confirmation code: ' + code + '\\n');
+    process.stderr.write('[' + MCP_NAME + '] If the browser does not open, visit: ' + loginUrl + '\\n\\n');
+    try { pageFile = writeSignInPage(loginUrl, code); } catch { /* fall back to the bare URL */ }
+    openInBrowser(pageFile || loginUrl);
+  }
+
+  const current = { loginUrl, code, adopted };
+  signIn = current;
+  pollForSession(verifier, pending.startedAt + SIGNIN_WINDOW_MS).then((token) => {
+    if (pageFile) { try { fs.rmSync(path.dirname(pageFile), { recursive: true, force: true }); } catch { /* ok */ } }
+    clearPendingSignIn(verifier);
+    signIn = null;
+    if (token) {
+      sessionToken = token;
+      notifyToolsChanged();
+    }
+  });
+  return current;
+}
+
+function signInRequired(id, current) {
+  const text = 'Not signed in to ' + MCP_NAME + '. ' +
+    (current.adopted
+      ? 'A Microsoft 365 sign-in is already open in your browser.'
+      : 'A browser page has opened to sign in with Microsoft 365.') +
+    ' Confirmation code: ' + current.code + '. If the page is not open, visit ' + current.loginUrl +
+    ' and enter that code when asked. Retry this request once sign-in finishes.';
+  return JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }], isError: true } });
 }
 
 // The label the confirmation page shows. Same character set the login route accepts.
@@ -645,42 +753,93 @@ function deviceLabel() {
   return label || 'Claude Desktop';
 }
 
-// -- Verify token --
+// -- Session checks --
 // /api/mcp always answers HTTP 200: an expired or missing session is reported
 // INSIDE the JSON-RPC body as an isError result whose text asks the user to
 // re-authenticate, never as an HTTP 401. And tools/list answers 200 even
-// unauthenticated, so the old 'tools/list + status === 200' check treated a
-// dead token as live — the extension then limped on, every real call failing.
-// Make an AUTHENTICATED tools/call and inspect the body. Key on the re-auth
-// signal specifically (not any isError) so a service-disabled or transient
-// tool error on an otherwise-valid token never forces a pointless re-auth loop.
+// unauthenticated. So a dead session shows up on a tools/call, and the bridge
+// reads every tools/call result for it rather than probing at launch. Key on
+// the re-auth signal specifically (not any isError) so a service-disabled or
+// transient tool error on a valid session never forces a pointless sign-in.
 
-async function verifyToken(token) {
+function asksToReauthenticate(body) {
   try {
-    const res = await httpRequest(
-      MCP_URL + '/api/mcp', 'POST',
-      JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_folders_mail', arguments: {} } }),
-      { 'Authorization': 'Bearer ' + token }
-    );
-    if (res.status !== 200) return false;
-    let data;
-    try { data = JSON.parse(res.body); } catch { return false; }
-    const result = data && data.result;
+    const result = JSON.parse(body).result;
     const text = result && Array.isArray(result.content)
       ? result.content.map((c) => (c && c.text) || '').join(' ')
       : '';
-    if (result && result.isError && /re-authenticate|session expired/i.test(text)) {
-      return false;
-    }
-    return true;
+    return !!(result && result.isError && /re-authenticate|session expired/i.test(text));
   } catch {
     return false;
   }
 }
 
+function currentSession() {
+  if (!sessionToken) sessionToken = loadToken();
+  return sessionToken;
+}
+
+// Drops a session the server refused. If another process has already stored a
+// different one, that one is kept rather than deleted.
+function forgetSession(dead) {
+  sessionToken = null;
+  const stored = loadToken();
+  if (stored && stored !== dead) {
+    sessionToken = stored;
+    return;
+  }
+  deleteToken();
+}
+
+// The server does not change its catalog per session, but the unauthenticated
+// tools/list is unfiltered and the signed-in one honors the tenant's enabled
+// services. Advertise listChanged so a sign-in that finishes mid-session can
+// tell the client to list again.
+function advertiseListChanged(body) {
+  try {
+    const data = JSON.parse(body);
+    if (!data.result || !data.result.capabilities) return body;
+    data.result.capabilities.tools = Object.assign({}, data.result.capabilities.tools, { listChanged: true });
+    clientInitialized = true;
+    return JSON.stringify(data);
+  } catch {
+    return body;
+  }
+}
+
+function notifyToolsChanged() {
+  if (!stdinOpen || !clientInitialized) return;
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }) + '\\n');
+}
+
 // -- MCP stdio <-> HTTP bridge --
 
-async function bridgeMcp(token) {
+function forward(msg, token) {
+  return httpRequest(
+    MCP_URL + '/api/mcp', 'POST',
+    JSON.stringify(msg),
+    token ? { 'Authorization': 'Bearer ' + token } : {}
+  );
+}
+
+async function handleMessage(msg) {
+  const isToolCall = msg.method === 'tools/call';
+  const token = currentSession();
+  if (isToolCall && !token) return signInRequired(msg.id ?? null, beginSignIn());
+
+  let res = await forward(msg, token);
+  if (token && (res.status === 401 || (isToolCall && res.status === 200 && asksToReauthenticate(res.body)))) {
+    process.stderr.write('[' + MCP_NAME + '] Session expired.\\n');
+    forgetSession(token);
+    if (isToolCall && !sessionToken) return signInRequired(msg.id ?? null, beginSignIn());
+    res = await forward(msg, sessionToken);
+  }
+
+  if (msg.method === 'initialize') return advertiseListChanged(res.body);
+  return res.body;
+}
+
+async function bridgeMcp() {
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
   for await (const line of rl) {
@@ -699,26 +858,7 @@ async function bridgeMcp(token) {
     // JSON-RPC notifications carry no id and must not receive a response.
     const isNotification = msg.id === undefined || msg.id === null;
     try {
-      const res = await httpRequest(
-        MCP_URL + '/api/mcp', 'POST',
-        JSON.stringify(msg),
-        { 'Authorization': 'Bearer ' + token }
-      );
-
-      let body = res.body;
-      if (res.status === 401) {
-        process.stderr.write('[' + MCP_NAME + '] Session expired. Re-authenticating...\\n');
-        deleteToken();
-        token = await authenticate();
-        saveToken(token);
-        const retry = await httpRequest(
-          MCP_URL + '/api/mcp', 'POST',
-          JSON.stringify(msg),
-          { 'Authorization': 'Bearer ' + token }
-        );
-        body = retry.body;
-      }
-
+      const body = await handleMessage(msg);
       if (isNotification) continue;
       if (body && body.trim()) process.stdout.write(body + '\\n');
     } catch (err) {
@@ -735,26 +875,20 @@ async function bridgeMcp(token) {
 // -- Main --
 
 async function main() {
-  await autoUpdate();
+  // A client that has gone away must not crash a sign-in still finishing.
+  process.stdout.on('error', () => { /* client gone */ });
 
-  let token = loadToken();
+  // The update applies on the next launch, so nothing waits for it.
+  autoUpdate();
 
-  if (token) {
-    const valid = await verifyToken(token);
-    if (!valid) {
-      process.stderr.write('[' + MCP_NAME + '] Session expired. Re-authenticating...\\n');
-      deleteToken();
-      token = null;
-    }
+  process.stderr.write('[' + MCP_NAME + '] MCP bridge running.' +
+    (currentSession() ? '' : ' Not signed in: the first tool call starts sign-in.') + '\\n');
+  await bridgeMcp();
+
+  stdinOpen = false;
+  if (signIn) {
+    process.stderr.write('[' + MCP_NAME + '] Client disconnected. Finishing the sign-in in progress so the next launch has a session.\\n');
   }
-
-  if (!token) {
-    token = await authenticate();
-    saveToken(token);
-  }
-
-  process.stderr.write('[' + MCP_NAME + '] Connected. MCP bridge running.\\n');
-  await bridgeMcp(token);
 }
 
 main().catch((err) => {

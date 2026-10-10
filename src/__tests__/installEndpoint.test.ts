@@ -207,18 +207,20 @@ describe('GET /api/extension-update', () => {
     expect(serverJs).not.toContain("install-poll?nonce=' + nonce");
   });
 
-  it('server/index.js verifyToken() makes an authenticated tools/call and reads the body', async () => {
+  it('server/index.js reads every tools/call result for the re-auth signal, not a launch probe', async () => {
     const res = await extensionUpdate(makeRequest(), makeContext());
     const body = res.jsonBody as { files: Record<string, string> };
     const serverJs = body.files['server/index.js'];
     // /api/mcp always returns HTTP 200 (auth failure is an isError body, not a
-    // 401), and unauthenticated tools/list also returns 200 — so the old
-    // 'tools/list + status === 200' check could never detect a dead token.
-    expect(serverJs).toContain("method: 'tools/call'");
-    expect(serverJs).toContain("name: 'list_folders_mail'");
+    // 401), and unauthenticated tools/list also returns 200 — so a dead session
+    // only shows up in a tools/call body. The bridge checks each one instead of
+    // probing at launch, which would have to sign in before connecting stdio.
     expect(serverJs).toContain('/re-authenticate|session expired/i');
-    // The verify path must no longer rely on tools/list.
-    expect(serverJs).not.toContain("method: 'tools/list', params: {} }),\n      { 'Authorization'");
+    expect(serverJs).toContain('asksToReauthenticate(res.body)');
+    expect(serverJs).not.toContain('verifyToken');
+    // Nothing between launch and the stdio bridge may wait on a sign-in.
+    const main = serverJs.slice(serverJs.indexOf('async function main()'));
+    expect(main).not.toMatch(/await (authenticate|beginSignIn|autoUpdate)/);
   });
 
   it('server/index.js encrypts the token at rest on every platform', async () => {
