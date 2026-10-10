@@ -20,11 +20,11 @@
 # Why this is ignored rather than bumped:
 #   MessagePack.dll is a .NET assembly vendored inside the Azure Functions host
 #   runtime that ships in our stage-2 base image
-#   (mcr.microsoft.com/azure-functions/node:4-node20). It is NOT an npm
+#   (mcr.microsoft.com/azure-functions/node:4-node22). It is NOT an npm
 #   dependency of this app (grep the package-lock: there is no messagepack), and
 #   it is NOT part of our application code under /home/site/wwwroot — it belongs
 #   to the Microsoft-maintained host. We do not build the host and cannot bump
-#   the assembly independently. `4-node20` is a rolling tag and CI rebuilds fresh
+#   the assembly independently. `4-node22` is a rolling tag and CI rebuilds fresh
 #   on every main push, yet the image still ships 2.5.192, so Microsoft has not
 #   yet published a host image carrying MessagePack >= 2.5.301. The scan job
 #   already runs with `ignore-unfixed: true`; these advisories surface only

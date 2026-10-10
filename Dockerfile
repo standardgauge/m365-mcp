@@ -1,11 +1,11 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-# Keep this Node major aligned with the azure-functions/node:4-node20 runtime in
+# Keep this Node major aligned with the azure-functions/node:4-node22 runtime in
 # stage 2. Dependabot major bumps of the node image are ignored (.github/dependabot.yml)
 # so the builder never drifts ahead of the runtime; move both together on an LTS bump.
 # Pulled from the ECR Public mirror of the Docker Official Image, not Docker
 # Hub: CI builds this file anonymously and Docker Hub rate-limits anonymous
 # pulls, which turned main red on a merge burst. Same image, same digest.
-FROM public.ecr.aws/docker/library/node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
+FROM public.ecr.aws/docker/library/node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS builder
 WORKDIR /build
 
 COPY package*.json ./
@@ -27,7 +27,7 @@ ENV AZURE_CLIENT_ID=${AZURE_CLIENT_ID} \
 RUN npm run build:admin
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM mcr.microsoft.com/azure-functions/node:4-node20
+FROM mcr.microsoft.com/azure-functions/node:4-node22
 
 # The Azure Functions host defaults to binding privileged port 80. A non-root
 # user (see USER below, F8 /) cannot bind ports < 1024, so point
@@ -39,7 +39,7 @@ ENV AzureWebJobsScriptRoot=/home/site/wwwroot \
     AzureFunctionsJobHost__Logging__Console__IsEnabled=true \
     AzureFunctionsJobHost__Logging__LogLevel__Default=Information \
     FUNCTIONS_EXTENSION_VERSION=~4 \
-    WEBSITE_NODE_DEFAULT_VERSION=~20 \
+    WEBSITE_NODE_DEFAULT_VERSION=~22 \
     ASPNETCORE_URLS=http://+:8080
 
 WORKDIR /home/site/wwwroot
@@ -71,13 +71,16 @@ COPY host.json ./
 # always carries `?code=`, so when the host cannot create that directory every
 # sign-in gets an empty 500 and the callback function never runs. Create it
 # here and hand it to the app user.
-RUN groupadd --system --gid 10001 app \
-    && useradd --system --uid 10001 --gid app --home-dir /home/site --shell /usr/sbin/nologin app \
-    && chown -R app:app /home/site \
+#
+# The user is named mcp, not app: the node22 base image already carries its own
+# `app` user and group (uid/gid 1654), and a second groupadd of that name fails.
+RUN groupadd --system --gid 10001 mcp \
+    && useradd --system --uid 10001 --gid mcp --home-dir /home/site --shell /usr/sbin/nologin mcp \
+    && chown -R mcp:mcp /home/site \
     && mkdir -p /azure-functions-host/Secrets \
-    && chown app:app /azure-functions-host/Secrets
+    && chown mcp:mcp /azure-functions-host/Secrets
 
-USER app
+USER mcp
 
 EXPOSE 8080
 
