@@ -118,7 +118,7 @@ const FOREIGN = 'tenant-xyz';
 const USER_ID = 'user-1';
 const STATE = 'state-123';
 const NONCE = 'a'.repeat(64);
-// The cookies /api/auth/login sets beside oauth_state (AC-429).
+// The cookies /api/auth/login sets beside oauth_state (PKCE verifier and nonce).
 const FLOW = `oauth_state=${STATE}; oauth_pkce=verifier; oauth_nonce=n`;
 
 const ctx = { error: jest.fn(), warn: jest.fn(), log: jest.fn() } as unknown as InvocationContext;
