@@ -18,11 +18,20 @@ const INSTALL_NONCES_TABLE = 'mcpInstallNonces';
 let sessionsTable: TableClient | null = null;
 let msalCacheTable: TableClient | null = null;
 let installNoncesTable: TableClient | null = null;
-let initialized = false;
+let initPromise: Promise<void> | null = null;
 
-async function ensureTables(): Promise<void> {
-  if (initialized || !storageConfigured) return;
+function ensureTables(): Promise<void> {
+  if (!storageConfigured) return Promise.resolve();
+  if (!initPromise) {
+    initPromise = initTables().catch((err) => {
+      initPromise = null;
+      throw err;
+    });
+  }
+  return initPromise;
+}
 
+async function initTables(): Promise<void> {
   const serviceClient = getTableServiceClient();
 
   // Create tables if they don't exist
@@ -33,7 +42,10 @@ async function ensureTables(): Promise<void> {
   sessionsTable = getTableClient('mcpSessions');
   msalCacheTable = getTableClient('mcpMsalCache');
   installNoncesTable = getTableClient(INSTALL_NONCES_TABLE);
-  initialized = true;
+
+  // Before any session lookup is served: token lookups are a single point
+  // read, so a row not keyed by its token hash would be unreachable.
+  await migrateLegacySessionRows();
 }
 
 function getSessionsTable(): TableClient {
@@ -82,8 +94,10 @@ function getInstallNoncesTable(): TableClient {
 //   unbound ones, MCP_ENVELOPE_REQUIRE_AAD) is unset, and are rewritten fully
 //   bound on first read.
 //
-// Backward compatibility: legacy rows use RowKey = userId. These are read
-// transparently but new sessions always use the tokenHash RowKey format.
+// Legacy rows (RowKey = userId, from before multi-session support) are
+// re-keyed to the tokenHash format once per process start, before the first
+// lookup (migrateLegacySessionRows). Rows no Bearer token can reach are
+// dropped. An unknown token therefore costs one point read, never a scan.
 //
 // We do NOT store the original sessionToken in this table. After install it
 // lives only on the client, in the OS credential store; during the install
@@ -153,6 +167,24 @@ function decryptAccessTokenFromEntity(
   entity: Record<string, unknown>,
   identity: SessionIdentity,
 ): string {
+  const rowKey = entity.rowKey as string;
+  const { plaintext, legacy } = decryptAccessTokenEnvelope(entity, rowKey, identity);
+  if (legacy) void rebindLegacyAccessToken(rowKey, identity, plaintext, entity.etag as string | undefined);
+  return plaintext;
+}
+
+/**
+ * Decrypt a row's access-token envelope against the AAD of `rowKey` and
+ * `identity`, with no side effects. `legacy` is true when the envelope is
+ * row-bound or unbound and should be rewritten fully bound. Empty plaintext
+ * when the row has no envelope (refused once identity binding is required);
+ * throws when the envelope does not decrypt.
+ */
+function decryptAccessTokenEnvelope(
+  entity: Record<string, unknown>,
+  rowKey: string,
+  identity: SessionIdentity,
+): { plaintext: string; legacy: boolean } {
   const ct = entity.accessTokenCiphertext as string | undefined;
   const iv = entity.accessTokenIv as string | undefined;
   const tag = entity.accessTokenAuthTag as string | undefined;
@@ -160,25 +192,22 @@ function decryptAccessTokenFromEntity(
     if (!isLegacyIdentityBindingAllowed()) {
       throw new Error('Session row has no access token envelope to authenticate it');
     }
-    return '';
+    return { plaintext: '', legacy: false };
   }
-  const rowKey = entity.rowKey as string;
   const envelope = { ciphertext: ct, iv, authTag: tag };
-  let plaintext: string;
   try {
-    plaintext = decryptWithDek(envelope, sessionAccessTokenAad(rowKey, identity));
+    return { plaintext: decryptWithDek(envelope, sessionAccessTokenAad(rowKey, identity)), legacy: false };
   } catch (err) {
     if (!isLegacyIdentityBindingAllowed()) throw err;
     try {
       // Row-bound or unbound envelope; the latter only while
       // MCP_ENVELOPE_REQUIRE_AAD is unset.
-      plaintext = decryptWithDekMigrating(envelope, sessionAccessTokenRowAad(rowKey)).plaintext;
+      const { plaintext } = decryptWithDekMigrating(envelope, sessionAccessTokenRowAad(rowKey));
+      return { plaintext, legacy: true };
     } catch {
       throw err;
     }
-    void rebindLegacyAccessToken(rowKey, identity, plaintext, entity.etag as string | undefined);
   }
-  return plaintext;
 }
 
 /**
@@ -215,6 +244,16 @@ async function rebindLegacyAccessToken(
   }
 }
 
+/** The identity columns of a session row, as bound into its envelope AAD. */
+function entityIdentity(entity: Record<string, unknown>): SessionIdentity {
+  // Current rows store userId as a column; legacy rows use RowKey as userId.
+  return {
+    userId: (entity.userId as string) || (entity.rowKey as string),
+    homeAccountId: entity.homeAccountId as string,
+    tenantId: entity.tenantId as string,
+  };
+}
+
 /**
  * Helper: convert a Table Storage entity to a StoredSession.
  * Handles both legacy (RowKey = userId) and new (RowKey = tokenHash[:32],
@@ -224,12 +263,7 @@ function entityToSession(
   entity: Record<string, unknown>,
   sessionToken?: string,
 ): StoredSession {
-  // New format stores userId as a column; legacy uses RowKey as userId.
-  const identity: SessionIdentity = {
-    userId: (entity.userId as string) || (entity.rowKey as string),
-    homeAccountId: entity.homeAccountId as string,
-    tenantId: entity.tenantId as string,
-  };
+  const identity = entityIdentity(entity);
   return {
     ...identity,
     displayName: entity.displayName as string,
@@ -356,19 +390,12 @@ export async function sessionRowExists(storageKey: string): Promise<boolean> {
 }
 
 /**
- * Load the most recent session for a user. Checks both legacy (RowKey = userId)
- * and new (RowKey = tokenHash[:32]) row formats.
+ * Load the most recent session for a user.
  */
 export async function loadSession(userId: string): Promise<StoredSession | null> {
   await ensureTables();
 
-  // Try legacy format first (direct lookup, O(1))
-  try {
-    const entity = await getSessionsTable().getEntity('session', userId);
-    return entityToSession(entity as Record<string, unknown>);
-  } catch { /* not found — try new format */ }
-
-  // Scan for new-format rows with matching userId column, return most recent
+  // Scan for rows with matching userId column, return most recent
   let best: StoredSession | null = null;
   const entities = getSessionsTable().listEntities({
     queryOptions: { filter: "PartitionKey eq 'session'" },
@@ -385,8 +412,9 @@ export async function loadSession(userId: string): Promise<StoredSession | null>
 }
 
 /**
- * Look up a session by Bearer token. First tries direct RowKey lookup (O(1))
- * using the tokenHash prefix, then falls back to a partition scan for legacy rows.
+ * Look up a session by Bearer token: one point read on RowKey =
+ * tokenHash[:32]. A miss is a miss; there is no scan fallback, so an
+ * unknown token costs the same as a known one.
  */
 export async function loadSessionByToken(token: string): Promise<StoredSession | null> {
   await ensureTables();
@@ -394,24 +422,106 @@ export async function loadSessionByToken(token: string): Promise<StoredSession |
   const targetHash = hashSessionToken(token);
   const rowKey = targetHash.slice(0, 32);
 
-  // Fast path: direct RowKey lookup (new format)
+  let entity: Record<string, unknown>;
   try {
-    const entity = await getSessionsTable().getEntity('session', rowKey);
-    if (entity.sessionTokenHash === targetHash) {
-      return entityToSession(entity as Record<string, unknown>, token);
-    }
-  } catch { /* not found — fall through to scan */ }
-
-  // Slow path: scan for legacy rows (RowKey = userId)
-  const entities = getSessionsTable().listEntities({
-    queryOptions: { filter: "PartitionKey eq 'session'" },
-  });
-  for await (const entity of entities) {
-    if (entity.sessionTokenHash === targetHash) {
-      return entityToSession(entity as Record<string, unknown>, token);
-    }
+    entity = await getSessionsTable().getEntity('session', rowKey);
+  } catch (err) {
+    // Only a missing row is a token miss. A throttle, outage or auth failure
+    // has to surface as a server error, not as an unknown token.
+    if (isNotFound(err)) return null;
+    throw err;
   }
-  return null;
+  if (entity.sessionTokenHash !== targetHash) return null;
+  return entityToSession(entity, token);
+}
+
+/**
+ * Re-key every session row that is not stored under RowKey =
+ * sessionTokenHash[:32]. Those are legacy rows (RowKey = userId) written
+ * before multi-session support; the token lookup no longer scans for them.
+ *
+ * A row carrying a sessionTokenHash is copied to its tokenHash RowKey, with
+ * the access-token envelope re-bound to the new row and its identity
+ * columns, and the old row is deleted. A row without one can never
+ * authenticate a Bearer token and is dropped. So is a row whose envelope no
+ * longer decrypts, or that has no envelope once identity binding is
+ * required: its user signs in again.
+ *
+ * Safe to run on several replicas at once: the copy is an insert, so a row
+ * already at the new key (another replica, or a newer sign-in) wins, and the
+ * delete is conditional on the ETag read. Best-effort per row: a failure is
+ * logged and retried on the next process start.
+ */
+export async function migrateLegacySessionRows(): Promise<{ migrated: number; dropped: number }> {
+  let migrated = 0;
+  let dropped = 0;
+  const table = getSessionsTable();
+  const entities = table.listEntities({ queryOptions: { filter: "PartitionKey eq 'session'" } });
+  try {
+    for await (const raw of entities) {
+      const entity = raw as Record<string, unknown>;
+      const oldKey = entity.rowKey as string;
+      const hash = entity.sessionTokenHash as string | undefined;
+      if (hash && oldKey === hash.slice(0, 32)) continue;
+      const etag = entity.etag as string | undefined;
+
+      try {
+        const newKey = hash ? hash.slice(0, 32) : null;
+        let copied = false;
+        if (newKey) {
+          const identity = entityIdentity(entity);
+          let accessToken: string | null = null;
+          try {
+            accessToken = decryptAccessTokenEnvelope(entity, oldKey, identity).plaintext;
+          } catch {
+            accessToken = null;
+          }
+          if (accessToken !== null) {
+            const envelope = accessToken
+              ? encryptWithDek(accessToken, sessionAccessTokenAad(newKey, identity))
+              : null;
+            try {
+              await table.createEntity({
+                partitionKey: 'session',
+                rowKey: newKey,
+                userId: identity.userId,
+                homeAccountId: entity.homeAccountId ?? null,
+                displayName: entity.displayName ?? null,
+                email: entity.email ?? null,
+                tenantId: entity.tenantId ?? null,
+                expiresAt: entity.expiresAt ?? null,
+                sessionCreatedAt: entity.sessionCreatedAt ?? null,
+                sessionAbsoluteCreatedAt: entity.sessionAbsoluteCreatedAt ?? null,
+                deviceLabel: entity.deviceLabel ?? null,
+                accessTokenCiphertext: envelope?.ciphertext ?? null,
+                accessTokenIv: envelope?.iv ?? null,
+                accessTokenAuthTag: envelope?.authTag ?? null,
+                sessionTokenHash: hash,
+              });
+            } catch (err) {
+              // 409: a row already holds this key. It is at least as current.
+              if ((err as { statusCode?: number }).statusCode !== 409) throw err;
+            }
+            copied = true;
+          }
+        }
+        await table.deleteEntity('session', oldKey, etag ? { etag } : undefined);
+        if (copied) migrated++;
+        else dropped++;
+      } catch (err) {
+        console.warn(
+          '[tableStorage] Could not migrate legacy session row; retried on next start:',
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  } catch (err) {
+    console.error('[tableStorage] Legacy session migration stopped early:', err);
+  }
+  if (migrated || dropped) {
+    console.log(`[tableStorage] Legacy session rows: ${migrated} re-keyed, ${dropped} dropped`);
+  }
+  return { migrated, dropped };
 }
 
 /**
@@ -425,16 +535,10 @@ export async function removeSessionByKey(storageKey: string): Promise<void> {
 }
 
 /**
- * Remove all sessions for a user (both legacy and new format rows).
+ * Remove all sessions for a user.
  */
 export async function removeSession(userId: string): Promise<void> {
   await ensureTables();
-  // Delete legacy row
-  try {
-    await getSessionsTable().deleteEntity('session', userId);
-  } catch { /* not found is fine */ }
-
-  // Scan and delete new-format rows
   const entities = getSessionsTable().listEntities({
     queryOptions: { filter: "PartitionKey eq 'session'" },
   });

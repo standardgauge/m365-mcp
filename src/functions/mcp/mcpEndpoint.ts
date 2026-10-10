@@ -2911,26 +2911,52 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
 
 // ── Azure Function handler ──
 
+/**
+ * Most JSON-RPC messages accepted in one batch. MCP clients send one message
+ * per request; a batch exists for spec compliance, not throughput. Without a
+ * cap one request could queue any number of tool calls, each a Graph round
+ * trip, behind a single rate-limit token.
+ */
+export const MAX_JSONRPC_BATCH = 20;
+
 async function mcpEndpoint(
   request: HttpRequest,
   context: InvocationContext
 ): Promise<HttpResponseInit> {
-  // Authenticate via session token (Bearer header, x-session-token, or mcp_session cookie)
-  let auth: Awaited<ReturnType<typeof authenticateRequest>>;
-  try {
-    auth = await authenticateRequest(request);
-  } catch (err: unknown) {
-    if (!(err instanceof SessionStoreUnavailableError)) throw err;
-    context.error('MCP endpoint: session store unavailable:', err.cause);
-    return {
-      status: 503,
-      headers: { 'Retry-After': String(SESSION_STORE_RETRY_AFTER_S) },
-      jsonBody: { jsonrpc: '2.0', id: null, error: { code: -32603, message: 'Session store unavailable, retry shortly' } },
-    };
-  }
-
   try {
     const body = await request.json();
+
+    // Refuse an empty or oversized batch before authenticating, so it costs
+    // no session lookup.
+    if (Array.isArray(body) && (body.length === 0 || body.length > MAX_JSONRPC_BATCH)) {
+      return {
+        status: 400,
+        jsonBody: {
+          jsonrpc: '2.0',
+          id: null,
+          error: {
+            code: -32600,
+            message: body.length === 0
+              ? 'Invalid Request: empty batch'
+              : `Invalid Request: batch exceeds ${MAX_JSONRPC_BATCH} messages`,
+          },
+        },
+      };
+    }
+
+    // Authenticate via session token (Bearer header, x-session-token, or mcp_session cookie)
+    let auth: Awaited<ReturnType<typeof authenticateRequest>>;
+    try {
+      auth = await authenticateRequest(request);
+    } catch (err: unknown) {
+      if (!(err instanceof SessionStoreUnavailableError)) throw err;
+      context.error('MCP endpoint: session store unavailable:', err.cause);
+      return {
+        status: 503,
+        headers: { 'Retry-After': String(SESSION_STORE_RETRY_AFTER_S) },
+        jsonBody: { jsonrpc: '2.0', id: null, error: { code: -32603, message: 'Session store unavailable, retry shortly' } },
+      };
+    }
 
     // Handle batch (array) or single message
     if (Array.isArray(body)) {
