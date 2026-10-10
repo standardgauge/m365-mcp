@@ -171,12 +171,12 @@ administrator for the whole permission set ([`entra-setup.md`](entra-setup.md)).
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
 | 1.1 | S | Login CSRF: an attacker completes the callback in a victim's browser with the attacker's code, so the victim works inside the attacker's account. | Random `state` in an HttpOnly, Secure, `SameSite=Lax` cookie, compared with the query value; mismatch is a 403. | None found. |
-| 1.2 | S, E | Authorization-code interception or injection. | Confidential client: redeeming a code needs the client secret. Redirect URI must match the registration. | No PKCE on the code flow, and the server does not check an ID-token nonce. RFC 9700 recommends PKCE for confidential clients too. **G12** |
+| 1.2 | S, E | Authorization-code interception or injection. | Confidential client: redeeming a code needs the client secret. Redirect URI must match the registration. PKCE with S256 on every sign-in: `login` keeps the verifier in an HttpOnly, Secure, `SameSite=Lax` cookie beside `state`, and the callback refuses to redeem without it, so a code issued to another browser's flow does not redeem here. `login` also sends a random `nonce`, kept the same way, and MSAL rejects an ID token whose `nonce` claim is missing or different. | None found. |
 | 1.3 | E | Over-broad consent: the registration grants more than the enabled tools need, so a stolen token reaches more. | All permissions delegated; no application permissions. Setup guide tells operators to drop permissions for services they do not enable. | Sites and Files are granted ReadWrite tenant-wide because Graph has no narrower delegated scope that fits; tracked separately. `Directory.Read.All` is carried only for the admin check; a narrower role-read scope is tracked separately. |
 | 1.4 | S | Device-code phishing through the anonymous `GET /api/auth/device` route. | Single-tenant authority; foreign-tenant accounts rejected. The route never returns the session token it creates, so a phisher gains no session. | The route is dead weight: an anonymous endpoint that starts a 15-minute background flow per call and offers a sign-in path Conditional Access may treat differently. Removal is tracked separately. |
 | 1.5 | I | Consent prompt hides scope from users. | Admin consent once, so users see no prompt and cannot be tricked into granting more. | Accepted: users are not asked, by design. The operator is the consent authority. |
 | 1.6 | D | Client secret expiry takes every user out at once. | Documented rotation in the [runbook](operations-runbook.md). | Expiry alerting is tracked separately. |
-| 1.7 | I | Error text leaks configuration. | Callback returns a generic error. | `login` returns the exception message in `detail` on failure. Low value to an attacker; folded into **G12**. |
+| 1.7 | I | Error text leaks configuration. | `login` and the callback return generic errors; the exception text goes to the log only. | None found. |
 
 ---
 
@@ -380,7 +380,6 @@ separately" in the tables and are not repeated here.
 | G9 | Medium | 7 Admin | The MCP client's session token is also an admin-API credential for Global Administrators; admin CSP allows inline script; CSRF defence is SameSite alone. |
 | G10 | Medium | 4 Client update | Extension auto-update is unsigned, writes payload paths without containment, and bakes in an origin from forwarded headers. |
 | G11 | Medium | 6 Storage | Account-key storage access with public network reach; app keys are Container App secrets beside the storage key, not Key Vault; code comment says otherwise. |
-| G12 | Low | 1 OAuth | No PKCE or ID-token nonce check on the code flow; login error leaks exception text. |
 | G13 | Low | 3 Session | The 7-day idle window renews silently instead of ending the session; sessions with no timestamps skip the 30-day cap; runbook overstates the idle timeout. |
 | G14 | Low | 10 Availability | An unknown bearer token triggers full-partition scans (up to three per request); JSON-RPC batch size is unbounded. |
 

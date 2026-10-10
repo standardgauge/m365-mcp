@@ -9,8 +9,9 @@
  * Table Storage row the cache plugin reads and writes is an in-memory string.
  *
  * Covered:
- *   - authorization code: the auth URL, the code redemption, and the cache
- *     write that follows it
+ *   - authorization code: the auth URL (with PKCE challenge and nonce), the
+ *     code redemption (verifier presented, ID-token nonce checked), and the
+ *     cache write that follows it
  *   - token cache persistence: what the plugin saves is what the next access
  *     loads, and a cache serialized by msal-node 2.16.3 (the version deployed
  *     before the move to 7) still yields its account and refresh token, so
@@ -23,7 +24,7 @@
  *     authorization_pending, and stores a session once the grant succeeds
  */
 
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
@@ -143,6 +144,18 @@ const LEGACY_CACHE = readFileSync(
   'utf8'
 ).replace('"__FAKE_ID_TOKEN__"', JSON.stringify(idToken()));
 
+// A PKCE pair and nonce as /api/auth/login makes them.
+const CODE_VERIFIER = randomBytes(32).toString('base64url');
+const CODE_CHALLENGE = createHash('sha256').update(CODE_VERIFIER).digest('base64url');
+const NONCE = 'test-nonce-0123456789abcdef';
+const BINDING = { codeVerifier: CODE_VERIFIER, nonce: NONCE };
+
+/** Arm FakeEntra as if the authorize request carried CODE_CHALLENGE and NONCE. */
+function armAuthorize(): void {
+  mockEntraRef.current.codeChallenge = CODE_CHALLENGE;
+  mockEntraRef.current.authorizeNonce = NONCE;
+}
+
 function persistedRefreshTokens(): string[] {
   const cache = JSON.parse(mockCacheRow.value ?? '{}') as {
     RefreshToken?: Record<string, { secret: string }>;
@@ -165,8 +178,10 @@ afterEach(() => {
 });
 
 describe('authorization code flow', () => {
-  it('builds an auth URL for the tenant, client, scopes and state', async () => {
-    const url = new URL(await getAuthCodeUrl('opaque-state'));
+  it('builds an auth URL for the tenant, client, scopes, state, PKCE challenge and nonce', async () => {
+    const url = new URL(
+      await getAuthCodeUrl('opaque-state', { codeChallenge: CODE_CHALLENGE, nonce: NONCE })
+    );
 
     expect(url.origin + url.pathname).toBe(
       `https://login.microsoftonline.com/${FAKE_TENANT_ID}/oauth2/v2.0/authorize`
@@ -177,10 +192,14 @@ describe('authorization code flow', () => {
     const scopes = url.searchParams.get('scope')!.split(' ');
     for (const scope of GRAPH_SCOPES) expect(scopes).toContain(scope);
     expect(scopes).toContain('offline_access');
+    expect(url.searchParams.get('code_challenge')).toBe(CODE_CHALLENGE);
+    expect(url.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(url.searchParams.get('nonce')).toBe(NONCE);
   });
 
   it('redeems the code and persists the refresh token through the cache plugin', async () => {
-    const result = await acquireTokenByCode('fake-auth-code');
+    armAuthorize();
+    const result = await acquireTokenByCode('fake-auth-code', BINDING);
 
     expect(result.accessToken).toBe('fake-access-token-1');
     expect(result.homeAccountId).toBe(FAKE_HOME_ACCOUNT_ID);
@@ -190,15 +209,45 @@ describe('authorization code flow', () => {
     expect(req.form.get('grant_type')).toBe('authorization_code');
     expect(req.form.get('code')).toBe('fake-auth-code');
     expect(req.form.get('client_secret')).toBe('fake-client-secret');
+    expect(req.form.get('code_verifier')).toBe(CODE_VERIFIER);
 
     expect(mockCacheRow.saves).toBeGreaterThan(0);
     expect(persistedRefreshTokens()).toEqual(['fake-refresh-token-1']);
+  });
+
+  it('fails when the verifier does not match the challenge, and caches nothing', async () => {
+    armAuthorize();
+
+    await expect(
+      acquireTokenByCode('fake-auth-code', {
+        codeVerifier: randomBytes(32).toString('base64url'),
+        nonce: NONCE,
+      })
+    ).rejects.toThrow(/invalid_grant/);
+    expect(persistedRefreshTokens()).toEqual([]);
+  });
+
+  it('rejects an ID token whose nonce differs from the one sent at login', async () => {
+    armAuthorize();
+    mockEntraRef.current.authorizeNonce = 'nonce-from-another-flow';
+
+    await expect(acquireTokenByCode('fake-auth-code', BINDING)).rejects.toThrow(/nonce/i);
+    expect(persistedRefreshTokens()).toEqual([]);
+  });
+
+  it('rejects an ID token that carries no nonce', async () => {
+    armAuthorize();
+    mockEntraRef.current.authorizeNonce = null;
+
+    await expect(acquireTokenByCode('fake-auth-code', BINDING)).rejects.toThrow(/nonce/i);
+    expect(persistedRefreshTokens()).toEqual([]);
   });
 });
 
 describe('silent refresh from the persisted cache', () => {
   it('renews an expired access token with the cached refresh token and persists the rotation', async () => {
-    await acquireTokenByCode('fake-auth-code');
+    armAuthorize();
+    await acquireTokenByCode('fake-auth-code', BINDING);
     const tokensBefore = mockEntraRef.current.tokenRequests.length;
 
     // FakeEntra issues 60s access tokens, inside MSAL's refresh buffer, so the
@@ -215,7 +264,8 @@ describe('silent refresh from the persisted cache', () => {
 
   it('serves a still-valid access token from the cache without a network call', async () => {
     mockEntraRef.current.accessTokenLifetimeSeconds = 3600;
-    await acquireTokenByCode('fake-auth-code');
+    armAuthorize();
+    await acquireTokenByCode('fake-auth-code', BINDING);
     const tokensBefore = mockEntraRef.current.tokenRequests.length;
 
     const result = await acquireTokenSilent(FAKE_HOME_ACCOUNT_ID);
@@ -258,7 +308,8 @@ describe('silent refresh from the persisted cache', () => {
   it('leaves a cache written by the installed msal-node unchanged when re-keying', async () => {
     // If this fails after an MSAL upgrade, the credential key format moved
     // again: update currentCredentialKey in msalCacheKeys.ts to match.
-    await acquireTokenByCode('fake-auth-code');
+    armAuthorize();
+    await acquireTokenByCode('fake-auth-code', BINDING);
     await acquireTokenSilent(FAKE_HOME_ACCOUNT_ID);
     const written = mockCacheRow.value!;
 

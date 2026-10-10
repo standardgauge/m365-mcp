@@ -166,17 +166,44 @@ export function getPublicMsalApp(config?: MsalConfig): PublicClientApplication {
   return publicMsalApps.get(key)!;
 }
 
-export async function getAuthCodeUrl(state: string): Promise<string> {
+/**
+ * What binds one authorization-code redemption to the browser that started it,
+ * beyond `state`. `login` generates both halves and keeps the secret ones in
+ * HttpOnly cookies; `callback` reads them back.
+ *
+ * - PKCE (RFC 7636, S256): the authorize URL carries SHA-256(verifier); the
+ *   token request must present the verifier, so a code intercepted or injected
+ *   from elsewhere cannot be redeemed against this browser's flow.
+ * - `nonce`: sent on the authorize URL, echoed by Entra in the ID token, and
+ *   compared by MSAL in acquireTokenByCode; a mismatch throws.
+ */
+export interface AuthCodeUrlBinding {
+  codeChallenge: string;
+  nonce: string;
+}
+
+export interface AuthCodeRedemptionBinding {
+  codeVerifier: string;
+  nonce: string;
+}
+
+export async function getAuthCodeUrl(state: string, binding: AuthCodeUrlBinding): Promise<string> {
   const msalApp = getMsalApp();
   const params: AuthorizationUrlRequest = {
     scopes: GRAPH_SCOPES,
     redirectUri: getMsalConfig().redirectUri,
     state,
+    codeChallenge: binding.codeChallenge,
+    codeChallengeMethod: 'S256',
+    nonce: binding.nonce,
   };
   return msalApp.getAuthCodeUrl(params);
 }
 
-export async function acquireTokenByCode(code: string): Promise<{
+export async function acquireTokenByCode(
+  code: string,
+  binding: AuthCodeRedemptionBinding
+): Promise<{
   accessToken: string;
   homeAccountId: string;
   expiresOn: Date | null;
@@ -188,6 +215,9 @@ export async function acquireTokenByCode(code: string): Promise<{
     code,
     scopes: GRAPH_SCOPES,
     redirectUri: cfg.redirectUri,
+    codeVerifier: binding.codeVerifier,
+    // With nonce set, MSAL requires the ID token's nonce claim to match it.
+    nonce: binding.nonce,
   };
 
   const response = await msalApp.acquireTokenByCode(request);

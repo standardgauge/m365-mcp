@@ -15,7 +15,8 @@ const NONCE_TTL_MS = 5 * 60 * 1000;
  *
  * Handles the redirect from the Microsoft identity platform after the user
  * authenticates. Validates the OAuth state parameter (CSRF protection),
- * exchanges the authorization code for tokens, fetches the user profile
+ * exchanges the authorization code for tokens with the PKCE verifier and nonce
+ * that /api/auth/login left in cookies, fetches the user profile
  * via Graph, generates a session token, stores the session, then redirects
  * to the admin UI.
  */
@@ -58,13 +59,30 @@ async function callback(
     const deviceLabelMatch = cookieHeader.match(/(?:^|;\s*)device_label=([^;]+)/);
     const deviceLabel = deviceLabelMatch ? decodeURIComponent(deviceLabelMatch[1]) : undefined;
 
+    // PKCE verifier and nonce from /api/auth/login. Both are set beside
+    // oauth_state with the same lifetime, so one missing means the flow was
+    // not started here (or has expired): refuse rather than redeem unbound.
+    const verifierMatch = cookieHeader.match(/(?:^|;\s*)oauth_pkce=([^;]+)/);
+    const oauthNonceMatch = cookieHeader.match(/(?:^|;\s*)oauth_nonce=([^;]+)/);
+    if (!verifierMatch || !oauthNonceMatch) {
+      context.error('OAuth PKCE verifier or nonce cookie missing');
+      return {
+        status: 403,
+        jsonBody: { error: 'Sign-in session expired. Please try logging in again.' },
+      };
+    }
+
     const code = request.query.get('code');
     if (!code) {
       return { status: 400, jsonBody: { error: 'Missing authorization code in callback' } };
     }
 
-    // Exchange the code for tokens
-    const { accessToken, homeAccountId, expiresOn } = await acquireTokenByCode(code);
+    // Exchange the code for tokens. Entra checks the verifier against the
+    // challenge sent at login; MSAL checks the ID token's nonce claim.
+    const { accessToken, homeAccountId, expiresOn } = await acquireTokenByCode(code, {
+      codeVerifier: verifierMatch[1],
+      nonce: oauthNonceMatch[1],
+    });
     const tenantId = extractTenantId(homeAccountId);
 
     // Enforce single-tenant: reject users from foreign tenants
@@ -168,6 +186,24 @@ async function callback(
         },
         {
           name: 'oauth_state',
+          value: '',
+          httpOnly: true,
+          secure: true,
+          sameSite: 'Lax' as const,
+          path: '/',
+          maxAge: 0,
+        },
+        {
+          name: 'oauth_pkce',
+          value: '',
+          httpOnly: true,
+          secure: true,
+          sameSite: 'Lax' as const,
+          path: '/',
+          maxAge: 0,
+        },
+        {
+          name: 'oauth_nonce',
           value: '',
           httpOnly: true,
           secure: true,
