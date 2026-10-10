@@ -3,9 +3,10 @@
 # {{INSTANCE_NAME}} Installer
 # Sets up the M365 MCP connector for Claude Desktop + Claude Code on macOS.
 #
-# Hands-free flow: the script generates a one-time nonce, opens your browser
-# to complete OAuth, then polls the server until the session is ready. You
-# never see, copy, or paste a token.
+# Browser sign-in: the script generates a one-time nonce, prints a
+# confirmation code, opens your browser to complete OAuth, then polls the
+# server until the session is ready. The browser asks for the code before it
+# hands the session over. You never see, copy, or paste a token.
 #
 # This script is served live from {{MCP_URL}}/install.sh — to install or
 # re-authenticate, run:
@@ -98,6 +99,15 @@ CHALLENGE=$(printf '%s' "$VERIFIER" | openssl dgst -sha256 | awk '{print $NF}')
 DEVICE_LABEL=$(hostname)
 LOGIN_URL="${MCP_URL}/api/auth/login?install_nonce=${CHALLENGE}&device_label=${DEVICE_LABEL}"
 
+# After sign-in the browser asks for this code before it hands the session to
+# this script. Only someone looking at this terminal has it, so a sign-in link
+# that someone else wrote cannot deliver your session to them.
+CONFIRM_HEX=$(printf '%s' "m365-mcp-install-confirm:${CHALLENGE}" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-8 | tr 'a-f' 'A-F')
+CONFIRM_CODE="$(printf '%s' "$CONFIRM_HEX" | cut -c1-4)-$(printf '%s' "$CONFIRM_HEX" | cut -c5-8)"
+
+echo ""
+echo "  Your confirmation code:  ${CONFIRM_CODE}"
+echo "  Enter it in the browser after you sign in."
 echo ""
 echo "  Opening your browser to sign in..."
 echo "  (If the browser doesn't open, visit this URL manually:)"

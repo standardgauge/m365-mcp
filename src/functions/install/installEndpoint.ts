@@ -30,7 +30,11 @@ import { withSecurity, installLandingHeaders } from '../../services/securityHead
 // extension. Their auto-update only fires when the server advertises a STRICTLY
 // newer version, so the version had to move for the corrected server/index.js
 // (PKCE authenticate + real-auth verifyToken) to reach them.
-const EXTENSION_VERSION = '2.9.0';
+// Bumped 2.9.0 -> 2.10.0: the server now asks the browser for a confirmation
+// code before it hands a session to an installer, and 2.9.0 never shows one, so
+// a 2.9.0 extension that has to sign in again cannot finish. The bump is what
+// delivers the code-showing authenticate() to those installs.
+const EXTENSION_VERSION = '2.10.0';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -474,24 +478,63 @@ function httpRequest(url, method, body, headers) {
 // The browser URL carries only SHA256(verifier). The raw verifier stays in
 // memory and is sent only to install-poll. An attacker who intercepts the
 // login URL cannot poll — SHA256 is preimage-resistant.
+//
+// After sign-in the server asks the browser for a confirmation code before it
+// hands the session to this extension, so a sign-in link someone else wrote
+// cannot deliver a user's session to them. The extension has no window of its
+// own, so it shows the code on a local page it writes and opens; that page
+// links on to the sign-in.
+
+function confirmationCode(challenge) {
+  const hex = crypto.createHash('sha256').update('m365-mcp-install-confirm:' + challenge).digest('hex').slice(0, 8).toUpperCase();
+  return hex.slice(0, 4) + '-' + hex.slice(4);
+}
+
+function writeSignInPage(loginUrl, code) {
+  const html = '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+    '<title>' + MCP_NAME + ' sign-in</title>' +
+    '<style>body{font:16px/1.5 system-ui,sans-serif;max-width:560px;margin:3em auto;padding:0 1.5em}' +
+    '.code{font:2em monospace;letter-spacing:.15em;background:#f4f4f6;border-radius:6px;padding:.4em .8em;display:inline-block}' +
+    'a{display:inline-block;margin-top:1em;padding:.6em 1.6em;background:#0078d4;color:#fff;border-radius:6px;text-decoration:none}</style>' +
+    '</head><body><h1>Connect Claude to ' + MCP_NAME + '</h1>' +
+    '<p>Your confirmation code:</p><p class="code">' + code + '</p>' +
+    '<p>Sign in, then enter this code when the page asks for it. Keep this tab open until then.</p>' +
+    '<a href="' + loginUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;') + '" target="_blank" rel="noopener">Sign in with Microsoft 365</a>' +
+    '</body></html>';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), MCP_NAME + '-signin-'));
+  const file = path.join(dir, 'sign-in.html');
+  fs.writeFileSync(file, html, { encoding: 'utf8', mode: 0o600 });
+  return file;
+}
+
+function openInBrowser(target) {
+  try {
+    if (process.platform === 'darwin') {
+      execFileSync('open', [target], { stdio: 'ignore' });
+    } else if (process.platform === 'win32') {
+      execFileSync('cmd.exe', ['/c', 'start', '', target], { stdio: 'ignore' });
+    } else {
+      execFileSync('xdg-open', [target], { stdio: 'ignore' });
+    }
+  } catch { /* user will open manually */ }
+}
 
 async function authenticate() {
   const verifier = crypto.randomBytes(16).toString('hex');
   const challenge = crypto.createHash('sha256').update(verifier).digest('hex');
-  const loginUrl = MCP_URL + '/api/auth/login?install_nonce=' + challenge;
+  const loginUrl = MCP_URL + '/api/auth/login?install_nonce=' + challenge + '&device_label=' + encodeURIComponent(deviceLabel());
+  const code = confirmationCode(challenge);
 
   process.stderr.write('\\n[' + MCP_NAME + '] Opening browser to sign in with Microsoft 365...\\n');
+  process.stderr.write('[' + MCP_NAME + '] Confirmation code: ' + code + '\\n');
   process.stderr.write('[' + MCP_NAME + '] If the browser does not open, visit: ' + loginUrl + '\\n\\n');
 
-  try {
-    if (process.platform === 'darwin') {
-      execFileSync('open', [loginUrl], { stdio: 'ignore' });
-    } else if (process.platform === 'win32') {
-      execFileSync('cmd.exe', ['/c', 'start', '', loginUrl], { stdio: 'ignore' });
-    } else {
-      execFileSync('xdg-open', [loginUrl], { stdio: 'ignore' });
-    }
-  } catch { /* user will open manually */ }
+  let pageFile = null;
+  try { pageFile = writeSignInPage(loginUrl, code); } catch { /* fall back to the bare URL */ }
+  openInBrowser(pageFile || loginUrl);
+  const cleanup = () => {
+    if (pageFile) { try { fs.rmSync(path.dirname(pageFile), { recursive: true, force: true }); } catch { /* ok */ } }
+  };
 
   const pollUrl = MCP_URL + '/api/auth/install-poll?nonce_verifier=' + verifier;
   for (let i = 0; i < POLL_MAX; i++) {
@@ -500,17 +543,26 @@ async function authenticate() {
       const res = await httpRequest(pollUrl, 'GET');
       if (res.status === 200) {
         const data = JSON.parse(res.body);
+        cleanup();
         process.stderr.write('[' + MCP_NAME + '] Signed in as ' + data.displayName + ' <' + data.email + '>\\n');
         return data.sessionToken;
       }
       if (res.status === 410) {
+        cleanup();
         process.stderr.write('[' + MCP_NAME + '] Sign-in expired. Restart to try again.\\n');
         process.exit(1);
       }
     } catch { /* network error, retry */ }
   }
+  cleanup();
   process.stderr.write('[' + MCP_NAME + '] Timed out waiting for sign-in.\\n');
   process.exit(1);
+}
+
+// The label the confirmation page shows. Same character set the login route accepts.
+function deviceLabel() {
+  const label = ('Claude Desktop on ' + os.hostname()).replace(/[^a-zA-Z0-9._\\- ]/g, '').slice(0, 64);
+  return label || 'Claude Desktop';
 }
 
 // -- Verify token --
@@ -693,12 +745,12 @@ function renderLandingPage(origin: string, slug: string): string {
     <li>Open Claude Desktop and go to <strong>Settings</strong> (gear icon).</li>
     <li>Navigate to <strong>Desktop App</strong>, then <strong>Extensions</strong>.</li>
     <li>Click "Install from file" and select the downloaded <span class="filename">.mcpb</span> file.</li>
-    <li>On first use, a browser window will open for Microsoft 365 sign-in. Sign in and the extension will connect automatically.</li>
+    <li>On first use, a browser window will open showing a confirmation code and a sign-in link. Sign in, enter the code when asked, and the extension will connect.</li>
   </ol>
 
   <h2>What it does</h2>
   <p>The extension runs a lightweight bridge between Claude Desktop and this server. Your session token is stored locally — in macOS Keychain on Mac, or in a private file in your home directory on Windows and Linux.</p>
-  <p>If your session expires, the extension will automatically open a browser window to re-authenticate.</p>
+  <p>If your session expires, the extension will open a browser window to sign in again, with a new confirmation code.</p>
 
   <p class="meta">Per-user authentication. No shared API keys. Server-side sessions stored encrypted at rest. To re-authenticate, restart the extension or reinstall.</p>
 </body>

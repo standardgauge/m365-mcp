@@ -163,6 +163,15 @@ describe('expired install nonce rows are purged by the server', () => {
     expect([...nonceRows().keys()]).toEqual([`nonce|${rowKeyFor(live)}`]);
   });
 
+  it('also deletes abandoned install-confirm handoffs', async () => {
+    const now = Date.now();
+    nonceRows().set('handoff|stale', { partitionKey: 'handoff', rowKey: 'stale', expiresAt: now - 1, etag: 'a' });
+    nonceRows().set('handoff|live', { partitionKey: 'handoff', rowKey: 'live', expiresAt: now + 60_000, etag: 'b' });
+
+    expect(await purgeExpiredInstallNonces(now)).toBe(1);
+    expect([...nonceRows().keys()]).toEqual(['handoff|live']);
+  });
+
   it('a callback starts the purge, so an abandoned row goes without anyone polling it', async () => {
     const abandoned = challenge();
     await attachSessionToInstallNonce(abandoned, record('abandoned', Date.now() - 1));

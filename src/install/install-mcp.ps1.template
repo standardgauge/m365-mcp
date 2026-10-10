@@ -5,9 +5,10 @@
 
 .DESCRIPTION
 Sets up the M365 MCP connector for Claude Desktop and Claude Code on Windows.
-Hands-free flow: generates a one-time nonce, opens your browser to complete
-OAuth, then polls the server until the session is ready. You never see, copy,
-or paste a token.
+Browser sign-in: generates a one-time nonce, prints a confirmation code, opens
+your browser to complete OAuth, then polls the server until the session is
+ready. The browser asks for the code before it hands the session over. You
+never see, copy, or paste a token.
 
 This script is served live from {{MCP_URL}}/install.ps1 — to install or
 re-authenticate, run:
@@ -189,6 +190,14 @@ function Get-PkceChallenge {
     return ($hash | ForEach-Object { $_.ToString('x2') }) -join ''
 }
 
+function Get-ConfirmationCode {
+    param([string]$Challenge)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $hash = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("m365-mcp-install-confirm:$Challenge"))
+    $hex = (($hash | ForEach-Object { $_.ToString('x2') }) -join '').Substring(0, 8).ToUpper()
+    return $hex.Substring(0, 4) + '-' + $hex.Substring(4, 4)
+}
+
 function Start-OAuthFlow {
     # PKCE-style binding: browser URL carries only the challenge; the raw
     # verifier stays in memory and is sent only to the poll endpoint. An attacker
@@ -201,6 +210,14 @@ function Start-OAuthFlow {
     $deviceLabel = $env:COMPUTERNAME
     $loginUrl = "$MCP_URL/api/auth/login?install_nonce=$Challenge&device_label=$deviceLabel"
 
+    # After sign-in the browser asks for this code before it hands the session
+    # to this script. Only someone looking at this window has it, so a sign-in
+    # link that someone else wrote cannot deliver your session to them.
+    $confirmCode = Get-ConfirmationCode -Challenge $Challenge
+
+    Write-Host ""
+    Write-Host "  Your confirmation code:  $confirmCode" -ForegroundColor Cyan
+    Write-Host "  Enter it in the browser after you sign in."
     Write-Host ""
     Write-Host "  Opening your browser to sign in..."
     Write-Host "  (If the browser doesn't open, visit this URL manually:)"
