@@ -3,7 +3,10 @@
  * AES-GCM additional authenticated data. Exercises tableStorage.ts against an
  * in-memory table to show (1) an access-token envelope copied from user A's
  * row into user B's row no longer decrypts, and (2) envelopes written before
- * the binding are still read and get rewritten bound on that read.
+ * the binding are still read and get rewritten bound on that read, and (3) the
+ * identity columns beside the envelope (userId, homeAccountId, tenantId) are
+ * covered by the same tag, so a row whose identity was edited fails
+ * authentication instead of steering a silent refresh at another user.
  */
 
 import { jest } from '@jest/globals';
@@ -42,7 +45,7 @@ function makeTableClient(name: string) {
     async updateEntity(entity: Entity, mode: string, opts?: { etag?: string }) {
       const existing = rows().get(key(entity.partitionKey, entity.rowKey));
       if (!existing) throw Object.assign(new Error('not found'), { statusCode: 404 });
-      if (opts?.etag && opts.etag !== existing.etag) {
+      if (opts?.etag && opts.etag !== '*' && opts.etag !== existing.etag) {
         throw Object.assign(new Error('precondition failed'), { statusCode: 412 });
       }
       const merged = mode === 'Merge' ? { ...existing, ...entity } : { ...entity };
@@ -108,6 +111,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 beforeEach(() => {
   tables.clear();
   delete process.env.MCP_ENVELOPE_REQUIRE_AAD;
+  delete process.env.MCP_SESSION_REQUIRE_IDENTITY_BINDING;
 });
 
 describe('session access token envelope binding', () => {
@@ -166,6 +170,126 @@ describe('session access token envelope binding', () => {
     });
 
     process.env.MCP_ENVELOPE_REQUIRE_AAD = 'true';
+    await expect(loadSessionByToken('tok-A')).rejects.toThrow();
+  });
+});
+
+describe('session identity column binding', () => {
+  /** Edit plaintext columns on a stored row, leaving the envelope alone. */
+  function tamper(userId: string, edits: Record<string, unknown>): void {
+    const row = sessionRow(userId);
+    tableFor('mcpSessions').set(`session|${row.rowKey}`, { ...row, ...edits });
+  }
+
+  /** The row-only envelope shape written before identity binding. */
+  function rowBoundRow(userId: string, accessToken: string): Entity {
+    const row = sessionRow(userId);
+    const envelope = encryptWithDek(
+      accessToken,
+      envelopeAad('mcpSessions', 'session', row.rowKey, 'accessToken'),
+    );
+    const updated = {
+      ...row,
+      accessTokenCiphertext: envelope.ciphertext,
+      accessTokenIv: envelope.iv,
+      accessTokenAuthTag: envelope.authTag,
+    };
+    tableFor('mcpSessions').set(`session|${row.rowKey}`, updated);
+    return updated;
+  }
+
+  test("repointing homeAccountId at another user's MSAL account fails authentication", async () => {
+    await saveSession(session('victim', 'tok-V', 'graph-token-V'));
+    await saveSession(session('attacker', 'tok-X', 'graph-token-X'));
+
+    // The attack from threat model row 2.3: the attacker holds a valid session
+    // and storage write, and points their row at the victim's MSAL account so
+    // the next silent refresh would mint the victim's token into it.
+    tamper('attacker', { homeAccountId: sessionRow('victim').homeAccountId });
+
+    await expect(loadSessionByToken('tok-X')).rejects.toThrow();
+  });
+
+  test.each([
+    ['userId', 'someone-else'],
+    ['tenantId', 'other-tenant'],
+    ['homeAccountId', 'someone-else.home'],
+  ])('editing %s fails authentication', async (column, value) => {
+    await saveSession(session('userA', 'tok-A', 'graph-token-A'));
+    tamper('userA', { [column]: value });
+    await expect(loadSessionByToken('tok-A')).rejects.toThrow();
+  });
+
+  test('profile columns outside the binding can still change', async () => {
+    await saveSession(session('userA', 'tok-A', 'graph-token-A'));
+    tamper('userA', { displayName: 'Renamed' });
+    const loaded = await loadSessionByToken('tok-A');
+    expect(loaded?.displayName).toBe('Renamed');
+    expect(loaded?.accessToken).toBe('graph-token-A');
+  });
+
+  test('a refresh write keeps the row authenticating', async () => {
+    await saveSession(session('userA', 'tok-A', 'graph-token-A'));
+    const loaded = (await loadSessionByToken('tok-A'))!;
+    await saveSession({ ...loaded, sessionToken: '', accessToken: 'graph-token-A2' }, 'update');
+
+    process.env.MCP_SESSION_REQUIRE_IDENTITY_BINDING = 'true';
+    expect((await loadSessionByToken('tok-A'))?.accessToken).toBe('graph-token-A2');
+  });
+
+  test('a row-bound envelope is read and rewritten identity-bound', async () => {
+    await saveSession(session('userA', 'tok-A', 'placeholder'));
+    const legacy = rowBoundRow('userA', 'row-bound-token');
+
+    expect((await loadSessionByToken('tok-A'))?.accessToken).toBe('row-bound-token');
+    await flush();
+    expect(sessionRow('userA').accessTokenCiphertext).not.toBe(legacy.accessTokenCiphertext);
+
+    process.env.MCP_SESSION_REQUIRE_IDENTITY_BINDING = 'true';
+    expect((await loadSessionByToken('tok-A'))?.accessToken).toBe('row-bound-token');
+
+    // Once rebound, editing the identity fails even with legacy reads on.
+    delete process.env.MCP_SESSION_REQUIRE_IDENTITY_BINDING;
+    tamper('userA', { homeAccountId: 'someone-else.home' });
+    await expect(loadSessionByToken('tok-A')).rejects.toThrow();
+  });
+
+  test('MCP_SESSION_REQUIRE_IDENTITY_BINDING=true refuses a replayed row-bound envelope', async () => {
+    await saveSession(session('victim', 'tok-V', 'graph-token-V'));
+    await saveSession(session('attacker', 'tok-X', 'placeholder'));
+    // An envelope the attacker kept from before the rebind, put back with a
+    // repointed identity.
+    rowBoundRow('attacker', 'graph-token-X');
+    tamper('attacker', { homeAccountId: sessionRow('victim').homeAccountId });
+
+    process.env.MCP_SESSION_REQUIRE_IDENTITY_BINDING = 'true';
+    await expect(loadSessionByToken('tok-X')).rejects.toThrow();
+  });
+
+  test('MCP_SESSION_REQUIRE_IDENTITY_BINDING=true also refuses unbound envelopes', async () => {
+    await saveSession(session('userA', 'tok-A', 'placeholder'));
+    const legacy = encryptUnbound('legacy-graph-token');
+    tamper('userA', {
+      accessTokenCiphertext: legacy.ciphertext,
+      accessTokenIv: legacy.iv,
+      accessTokenAuthTag: legacy.authTag,
+    });
+
+    process.env.MCP_SESSION_REQUIRE_IDENTITY_BINDING = 'true';
+    await expect(loadSessionByToken('tok-A')).rejects.toThrow();
+  });
+
+  test('MCP_SESSION_REQUIRE_IDENTITY_BINDING=true refuses a row with no envelope', async () => {
+    await saveSession(session('userA', 'tok-A', 'graph-token-A'));
+    tamper('userA', {
+      accessTokenCiphertext: undefined,
+      accessTokenIv: undefined,
+      accessTokenAuthTag: undefined,
+      homeAccountId: 'someone-else.home',
+    });
+
+    expect((await loadSessionByToken('tok-A'))?.accessToken).toBe('');
+    process.env.MCP_SESSION_REQUIRE_IDENTITY_BINDING = 'true';
     await expect(loadSessionByToken('tok-A')).rejects.toThrow();
   });
 });

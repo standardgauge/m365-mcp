@@ -159,6 +159,23 @@ export function envelopeAad(
   return `m365-mcp/v1/${table}/${partitionKey}/${rowKey}/${column}`;
 }
 
+/**
+ * Extend a location AAD with plaintext columns that sit beside the envelope on
+ * the same row. Those columns are then integrity-protected by the envelope's
+ * GCM tag: editing any of them makes the envelope fail to decrypt, so the row
+ * fails authentication as a whole.
+ *
+ * The values are JSON-encoded in the order given, so no value can smuggle a
+ * separator and make two different column sets produce the same AAD.
+ */
+export function boundColumnsAad(
+  locationAad: string,
+  columns: ReadonlyArray<readonly [name: string, value: string]>,
+): string {
+  if (!columns.length) throw new Error('boundColumnsAad: at least one column is required');
+  return `${locationAad}#bound=${JSON.stringify(columns)}`;
+}
+
 function aadBytes(aad: string): Buffer {
   // Empty AAD is cryptographically identical to no AAD in GCM, so an empty
   // value would silently produce an unbound envelope.
@@ -218,6 +235,22 @@ export function decryptWithDek(envelope: EnvelopeCiphertext, aad: string): strin
  */
 export function isLegacyEnvelopeReadAllowed(): boolean {
   return (process.env.MCP_ENVELOPE_REQUIRE_AAD ?? '').toLowerCase() !== 'true';
+}
+
+/**
+ * Whether a session access-token envelope bound only to its row (before the
+ * row's identity columns were added to the AAD) may still be read.
+ * On by default so a deploy does not log every user out; set
+ * MCP_SESSION_REQUIRE_IDENTITY_BINDING=true once existing rows have been
+ * rebound (they are rewritten on first read, see tableStorage.ts). While these
+ * reads are allowed, a storage writer can still edit the identity columns of a
+ * row that has not been rebound, or of a row whose older envelope they kept.
+ *
+ * Requiring identity binding also refuses unbound envelopes, whatever
+ * MCP_ENVELOPE_REQUIRE_AAD says: an unbound envelope binds nothing either.
+ */
+export function isLegacyIdentityBindingAllowed(): boolean {
+  return (process.env.MCP_SESSION_REQUIRE_IDENTITY_BINDING ?? '').toLowerCase() !== 'true';
 }
 
 export interface DecryptResult {

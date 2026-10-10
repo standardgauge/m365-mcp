@@ -14,6 +14,7 @@ import {
   decryptWithDek,
   decryptWithDekMigrating,
   envelopeAad,
+  boundColumnsAad,
   isCryptoConfigured,
 } from '../services/credentialCrypto.js';
 import { createCipheriv } from 'crypto';
@@ -194,6 +195,27 @@ describe('credentialCrypto', () => {
     test('an unbound legacy envelope does not decrypt through the strict path', () => {
       const unbound = encryptUnbound('legacy');
       expect(() => crypto.decryptWithDek(unbound, AAD)).toThrow();
+    });
+  });
+
+  describe('boundColumnsAad', () => {
+    const bound = (home: string, tenant: string) =>
+      boundColumnsAad(AAD, [['homeAccountId', home], ['tenantId', tenant]]);
+
+    test('an envelope bound to one column set does not decrypt under another', () => {
+      const envelope = crypto.encryptWithDek('token', bound('a.t', 't'));
+      expect(crypto.decryptWithDek(envelope, bound('a.t', 't'))).toBe('token');
+      expect(() => crypto.decryptWithDek(envelope, bound('b.t', 't'))).toThrow();
+      expect(() => crypto.decryptWithDek(envelope, AAD)).toThrow();
+    });
+
+    test('a separator inside a value cannot shift the boundary between columns', () => {
+      expect(bound('a","t', '')).not.toBe(bound('a', 't'));
+      expect(bound('a.t', '')).not.toBe(bound('a', '.t'));
+    });
+
+    test('requires at least one column', () => {
+      expect(() => boundColumnsAad(AAD, [])).toThrow(/at least one/);
     });
   });
 

@@ -639,16 +639,28 @@ row and column through GCM additional authenticated data, so an envelope
 copied from one user's session row into another's fails to decrypt instead of
 handing the second session the first user's Graph token.
 
-Envelopes written by releases before that change carry no binding. The server
-still reads them, and rewrites each one bound the first time it reads it. To
-finish the migration and close the swap window for good:
+A session row's access-token envelope also binds that row's `userId`,
+`homeAccountId` and `tenantId`. `homeAccountId` picks the MSAL account a silent
+refresh draws on, so without this a storage writer holding any session could
+point it at another user's account. With it, an edited row fails to decrypt and
+the session fails authentication.
+
+Envelopes written by older releases carry no binding, or bind the row but not
+its identity columns. The server still reads them, and rewrites each one fully
+bound the first time it reads it. To finish the migration and close the window
+for good:
 
   1. Deploy the release and leave it running long enough for active sessions to be read (an hour covers every active user, since access tokens refresh hourly).
   2. Open the user list in the admin UI once. Listing reads every session row, which rebinds the dormant ones too.
-  3. Turn off legacy reads: `az containerapp update -n m365-mcp -g rg-m365-mcp --set-env-vars MCP_ENVELOPE_REQUIRE_AAD=true`
+  3. Turn off legacy reads: `az containerapp update -n m365-mcp -g rg-m365-mcp --set-env-vars MCP_ENVELOPE_REQUIRE_AAD=true MCP_SESSION_REQUIRE_IDENTITY_BINDING=true`
 
-After step 3 an unbound envelope is treated like a tampered one: that session
-fails authentication and the user signs in again. If you would rather not wait,
+After step 3 an unbound or row-only envelope is treated like a tampered one:
+that session fails authentication and the user signs in again. So does a
+session row with no envelope at all. `MCP_SESSION_REQUIRE_IDENTITY_BINDING=true`
+on its own already refuses unbound session envelopes; `MCP_ENVELOPE_REQUIRE_AAD`
+is still what covers the MSAL cache. If you set `MCP_ENVELOPE_REQUIRE_AAD=true`
+under an earlier release, repeat steps 1 and 2 after upgrading before you add
+the second variable. If you would rather not wait,
 skip to step 3 directly and accept that every user re-authenticates once, or run
 `infra/scripts/purge-credentials.sh` for the same effect.
 

@@ -6,6 +6,8 @@ import {
   decryptWithDek,
   decryptWithDekMigrating,
   envelopeAad,
+  boundColumnsAad,
+  isLegacyIdentityBindingAllowed,
 } from './credentialCrypto.js';
 
 const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
@@ -67,10 +69,16 @@ function getInstallNoncesTable(): TableClient {
 //   accessTokenCiphertext    = AES-256-GCM ciphertext of the Graph access token
 //   accessTokenIv            = 12-byte IV (base64)
 //   accessTokenAuthTag       = 16-byte GCM auth tag (base64)
-//   The envelope is bound to its row via GCM AAD (sessionAccessTokenAad):
-//   copying it into another row makes it fail to decrypt. Envelopes written
-//   before row binding carry no AAD; they are still readable while
-//   MCP_ENVELOPE_REQUIRE_AAD is unset and are rewritten bound on first read.
+//   The envelope is bound via GCM AAD (sessionAccessTokenAad) to its row
+//   and to the row's userId, homeAccountId and tenantId columns: copying it
+//   into another row, or editing any of those three columns, makes it fail to
+//   decrypt, and the session fails authentication. homeAccountId selects the
+//   MSAL account a silent refresh uses, so an unprotected one would let a
+//   storage writer repoint a session at another user's refresh token.
+//   Older envelopes are bound to the row only, or carry no AAD at all; they
+//   are still readable while MCP_SESSION_REQUIRE_IDENTITY_BINDING (and, for
+//   unbound ones, MCP_ENVELOPE_REQUIRE_AAD) is unset, and are rewritten fully
+//   bound on first read.
 //
 // Backward compatibility: legacy rows use RowKey = userId. These are read
 // transparently but new sessions always use the tokenHash RowKey format.
@@ -109,42 +117,82 @@ export interface StoredSession {
   _storageKey?: string;
 }
 
-function sessionAccessTokenAad(rowKey: string): string {
+/** The session row columns that say whose session it is. */
+interface SessionIdentity {
+  userId: string;
+  homeAccountId: string;
+  tenantId: string;
+}
+
+/** Row-only binding, as written before the identity columns were bound. */
+function sessionAccessTokenRowAad(rowKey: string): string {
   return envelopeAad('mcpSessions', 'session', rowKey, 'accessToken');
+}
+
+function sessionAccessTokenAad(rowKey: string, identity: SessionIdentity): string {
+  return boundColumnsAad(sessionAccessTokenRowAad(rowKey), [
+    ['userId', identity.userId ?? ''],
+    ['homeAccountId', identity.homeAccountId ?? ''],
+    ['tenantId', identity.tenantId ?? ''],
+  ]);
 }
 
 /**
  * Internal helper: pull the encrypted access token off a Table Storage row
- * and decrypt it. Returns empty string if the columns are missing (which
- * indicates a pre- plaintext row that needs to be migrated).
+ * and decrypt it, authenticating the row's identity columns on the way.
+ * Throws if the envelope or any of those columns was tampered with.
+ *
+ * Returns empty string if the envelope columns are missing (a row from before
+ * envelopes existed). Such a row authenticates nothing, so it is refused once
+ * MCP_SESSION_REQUIRE_IDENTITY_BINDING=true.
  */
-function decryptAccessTokenFromEntity(entity: Record<string, unknown>): string {
+function decryptAccessTokenFromEntity(
+  entity: Record<string, unknown>,
+  identity: SessionIdentity,
+): string {
   const ct = entity.accessTokenCiphertext as string | undefined;
   const iv = entity.accessTokenIv as string | undefined;
   const tag = entity.accessTokenAuthTag as string | undefined;
-  if (!ct || !iv || !tag) return '';
+  if (!ct || !iv || !tag) {
+    if (!isLegacyIdentityBindingAllowed()) {
+      throw new Error('Session row has no access token envelope to authenticate it');
+    }
+    return '';
+  }
   const rowKey = entity.rowKey as string;
-  const { plaintext, legacy } = decryptWithDekMigrating(
-    { ciphertext: ct, iv, authTag: tag },
-    sessionAccessTokenAad(rowKey),
-  );
-  if (legacy) void rebindLegacyAccessToken(rowKey, plaintext, entity.etag as string | undefined);
+  const envelope = { ciphertext: ct, iv, authTag: tag };
+  let plaintext: string;
+  try {
+    plaintext = decryptWithDek(envelope, sessionAccessTokenAad(rowKey, identity));
+  } catch (err) {
+    if (!isLegacyIdentityBindingAllowed()) throw err;
+    try {
+      // Row-bound or unbound envelope; the latter only while
+      // MCP_ENVELOPE_REQUIRE_AAD is unset.
+      plaintext = decryptWithDekMigrating(envelope, sessionAccessTokenRowAad(rowKey)).plaintext;
+    } catch {
+      throw err;
+    }
+    void rebindLegacyAccessToken(rowKey, identity, plaintext, entity.etag as string | undefined);
+  }
   return plaintext;
 }
 
 /**
- * Re-encrypt a pre-binding access token envelope with its row's AAD. Merges
- * only the three envelope columns, conditional on the ETag we read, so a
- * concurrent refresh write wins and this becomes a no-op. Best-effort: a
- * failure leaves the legacy envelope for the next read to retry.
+ * Re-encrypt an older access token envelope bound to the row and its identity
+ * columns as currently stored. Merges only the three envelope columns,
+ * conditional on the ETag we read, so a concurrent refresh write wins and this
+ * becomes a no-op. Best-effort: a failure leaves the legacy envelope for the
+ * next read to retry.
  */
 async function rebindLegacyAccessToken(
   rowKey: string,
+  identity: SessionIdentity,
   plaintext: string,
   etag: string | undefined,
 ): Promise<void> {
   try {
-    const envelope = encryptWithDek(plaintext, sessionAccessTokenAad(rowKey));
+    const envelope = encryptWithDek(plaintext, sessionAccessTokenAad(rowKey, identity));
     await getSessionsTable().updateEntity(
       {
         partitionKey: 'session',
@@ -174,14 +222,16 @@ function entityToSession(
   sessionToken?: string,
 ): StoredSession {
   // New format stores userId as a column; legacy uses RowKey as userId.
-  const userId = (entity.userId as string) || (entity.rowKey as string);
-  return {
-    userId,
+  const identity: SessionIdentity = {
+    userId: (entity.userId as string) || (entity.rowKey as string),
     homeAccountId: entity.homeAccountId as string,
+    tenantId: entity.tenantId as string,
+  };
+  return {
+    ...identity,
     displayName: entity.displayName as string,
     email: entity.email as string,
-    tenantId: entity.tenantId as string,
-    accessToken: decryptAccessTokenFromEntity(entity),
+    accessToken: decryptAccessTokenFromEntity(entity, identity),
     expiresAt: entity.expiresAt as number,
     sessionToken: sessionToken || '',
     sessionCreatedAt: (entity.sessionCreatedAt as number) || 0,
@@ -229,7 +279,7 @@ export async function saveSession(
   if (mode === 'update' && session._storageKey) {
     const accessEnvelope = encryptWithDek(
       session.accessToken,
-      sessionAccessTokenAad(session._storageKey),
+      sessionAccessTokenAad(session._storageKey, session),
     );
     try {
       await getSessionsTable().updateEntity({
@@ -257,7 +307,10 @@ export async function saveSession(
     // Each device/login gets its own row; no more overwriting.
     const tokenHash = hashSessionToken(session.sessionToken);
     const rowKey = tokenHash.slice(0, 32);
-    const accessEnvelope = encryptWithDek(session.accessToken, sessionAccessTokenAad(rowKey));
+    const accessEnvelope = encryptWithDek(
+      session.accessToken,
+      sessionAccessTokenAad(rowKey, session),
+    );
     await getSessionsTable().upsertEntity({
       partitionKey: 'session',
       rowKey,
