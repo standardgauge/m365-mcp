@@ -14,10 +14,10 @@ interface Props {
 /**
  * Tenant-wide enforced draft mode.
  *
- * The self-service email output mode can be flipped by the user, or by an
- * agent acting as the user through set_email_output_mode. This switch pins
- * every user in the tenant to draft mode so that neither path can lift it;
- * only an administrator can, here.
+ * The self-service email output mode can be loosened to send by the user in
+ * the web UI; set_email_output_mode only tightens it to draft. This switch pins
+ * every user in the tenant to draft mode so that neither path can change it;
+ * only an administrator can lift it, here.
  */
 export default function EmailOutputPolicy({ userId }: Props) {
   const [policy, setPolicy] = useState<Policy | null>(null);
@@ -78,8 +78,9 @@ export default function EmailOutputPolicy({ userId }: Props) {
     <>
       <p className="section-hint">
         Draft mode keeps a person between an AI-composed email and its delivery. Users can
-        switch their own mode to "send immediately", and so can an agent acting for them, which
-        is what a prompt-injected agent would do. Enforcing draft mode here pins every user in
+        switch their own mode to "send immediately" under My Email Settings; an agent acting for
+        them cannot, since <code>set_email_output_mode</code> only switches to draft. Enforcing
+        draft mode here takes that choice away from users too, and pins every user in
         the organization to draft mode: <code>send_mail</code> always saves to Drafts,{' '}
         <code>send_draft</code> refuses, and <code>set_email_output_mode</code> is refused and
         logged. Per-user enforcement is under User Management.
