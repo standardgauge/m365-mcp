@@ -112,11 +112,13 @@ Entra side and the server's own hold on tokens.
    Entra.
 4. **Purge the credential tables**: `infra/scripts/purge-credentials.sh
    --resource-group rg-m365-mcp --app-name m365-mcp`, with `--dry-run` first.
-   Same effect on storage as step 3, with no key change. On its own it is not
-   enough: replicas keep decrypted sessions in memory, and a cached session that
-   refreshes writes its deleted row back. Roll a new revision afterwards
-   (`az containerapp update -n m365-mcp -g rg-m365-mcp --revision-suffix
-   "$(date +%Y%m%d%H%M)"`).
+   Same effect on storage as step 3, with no key change. Replicas re-check a
+   cached session against storage at most every 30 seconds and drop it once its
+   row is gone, so purged sessions stop working everywhere within 30 seconds
+   ([threat model](threat-model.md) row 3.3). If storage is unreachable, a
+   replica keeps serving a cached session for up to 5 minutes. To end that
+   window at once, roll a new revision afterwards (`az containerapp update -n
+   m365-mcp -g rg-m365-mcp --revision-suffix "$(date +%Y%m%d%H%M)"`).
 5. **Delete the client secret** on the app registration. The server, and anyone
    holding a copy of the secret, can no longer redeem codes or refresh tokens.
    The instance cannot sign anyone in until you add a new one.
