@@ -9,7 +9,9 @@
  *     no Origin, and a GET with neither header are all refused
  *   - authenticateConsoleRequest: the MCP client's session token is not an
  *     admin credential, whether presented as bearer, x-session-token or a
- *     forged mcp_session cookie, without the console cookie bound to it
+ *     forged mcp_session cookie, without the console cookie bound to it, and
+ *     not with a stolen console cookie either: only a browser session backs a
+ *     console session (threat model G15)
  *   - every /api/manage/* route authenticates through authenticateConsoleRequest
  *   - logout is POST only, refuses a cross-origin request, clears mcp_console,
  *     and never sends Microsoft back to a host-reserved path
@@ -75,6 +77,7 @@ const SESSION: UserSession = {
   sessionToken: SESSION_TOKEN,
   sessionCreatedAt: Date.now(),
   sessionAbsoluteCreatedAt: Date.now(),
+  kind: 'browser',
 };
 
 function req(method: string, headers: Record<string, string>): HttpRequest {
@@ -190,6 +193,31 @@ describe('authenticateConsoleRequest', () => {
     const auth = await authenticateConsoleRequest(req('POST', browserHeaders(`mcp_session=${SESSION_TOKEN}`, 'POST')));
     expect(auth).toBeNull();
     expect(mockGetSessionByToken).not.toHaveBeenCalled();
+  });
+
+  it('refuses a client session, even with a console cookie MAC\'d to its token', async () => {
+    mockGetSessionByToken.mockImplementation(async () => ({ ...SESSION, kind: 'client' }));
+    const auth = await authenticateConsoleRequest(
+      req('GET', browserHeaders(`mcp_session=${SESSION_TOKEN}; mcp_console=${consoleCookie()}`)),
+    );
+    expect(auth).toBeNull();
+  });
+
+  it('refuses a session from before session kinds, whose token an installed client may share', async () => {
+    mockGetSessionByToken.mockImplementation(async () => ({ ...SESSION, kind: undefined }));
+    const auth = await authenticateConsoleRequest(
+      req('GET', browserHeaders(`mcp_session=${SESSION_TOKEN}; mcp_console=${consoleCookie()}`)),
+    );
+    expect(auth).toBeNull();
+  });
+
+  it('refuses the client token beside a stolen console cookie minted for the browser', async () => {
+    // The install flow gives the client OTHER_TOKEN; the console cookie is bound to SESSION_TOKEN.
+    mockGetSessionByToken.mockImplementation(async (t) => (t === OTHER_TOKEN ? { ...SESSION, sessionToken: OTHER_TOKEN, kind: 'client' } : undefined));
+    const auth = await authenticateConsoleRequest(
+      req('GET', browserHeaders(`mcp_session=${OTHER_TOKEN}; mcp_console=${consoleCookie()}`)),
+    );
+    expect(auth).toBeNull();
   });
 
   it('refuses a console cookie next to a different session', async () => {

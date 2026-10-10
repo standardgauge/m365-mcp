@@ -61,6 +61,13 @@ jest.mock('../services/graphClient.js', () => ({
 
 jest.mock('../services/tokenCache.js', () => ({
   storeSession: async () => undefined,
+  // install-confirm reads the browser session to mint the installer's own.
+  getSessionByToken: async (token: string) => ({
+    userId: USER_ID, homeAccountId: `${USER_ID}.${TENANT}`, displayName: 'Adele Vance',
+    email: 'adele@fabrikam.com', tenantId: TENANT, accessToken: 'at', expiresAt: Date.now() + 3_600_000,
+    sessionToken: token, sessionCreatedAt: Date.now(), sessionAbsoluteCreatedAt: Date.now(), kind: 'browser',
+  }),
+  deleteSessionByKey: async () => undefined,
   deleteAllUserSessions: () => mockDeleteAllUserSessions(),
   getTenantId: async () => TENANT,
   SESSION_TTL_MS: 7 * 24 * 60 * 60 * 1000,

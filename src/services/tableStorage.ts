@@ -126,6 +126,8 @@ export interface StoredSession {
   sessionAbsoluteCreatedAt?: number;
   /** Human-readable label for the device/client that created this session. */
   deviceLabel?: string;
+  /** 'browser' (interactive sign-in cookie) or 'client' (handed to an MCP client). Immutable. */
+  kind?: 'browser' | 'client';
   /**
    * Table Storage RowKey for this session. Used by the refresh path to update
    * the correct row when the original sessionToken is not available.
@@ -274,6 +276,7 @@ function entityToSession(
     sessionCreatedAt: (entity.sessionCreatedAt as number) || 0,
     sessionAbsoluteCreatedAt: (entity.sessionAbsoluteCreatedAt as number) || undefined,
     deviceLabel: entity.deviceLabel as string | undefined,
+    kind: entity.kind === 'browser' || entity.kind === 'client' ? entity.kind : undefined,
     _storageKey: entity.rowKey as string,
   };
 }
@@ -331,6 +334,7 @@ export async function saveSession(
         sessionCreatedAt: session.sessionCreatedAt || Date.now(),
         sessionAbsoluteCreatedAt: session.sessionAbsoluteCreatedAt ?? null,
         deviceLabel: session.deviceLabel ?? null,
+        ...(session.kind ? { kind: session.kind } : {}),
         accessTokenCiphertext: accessEnvelope.ciphertext,
         accessTokenIv: accessEnvelope.iv,
         accessTokenAuthTag: accessEnvelope.authTag,
@@ -360,6 +364,7 @@ export async function saveSession(
       sessionCreatedAt: session.sessionCreatedAt || Date.now(),
       sessionAbsoluteCreatedAt: session.sessionAbsoluteCreatedAt ?? null,
       deviceLabel: session.deviceLabel ?? null,
+      kind: session.kind ?? null,
       accessTokenCiphertext: accessEnvelope.ciphertext,
       accessTokenIv: accessEnvelope.iv,
       accessTokenAuthTag: accessEnvelope.authTag,

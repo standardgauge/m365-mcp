@@ -102,6 +102,7 @@ async function deviceLogin(
         sessionToken,
         sessionCreatedAt: Date.now(),
         sessionAbsoluteCreatedAt: Date.now(),
+        kind: 'client',
       };
 
       await storeSession(session);

@@ -46,6 +46,8 @@ export { SessionRowMissingError };
 /** Thrown by getSessionByToken when storage cannot answer. */
 export { SessionStoreUnavailableError };
 
+export type SessionKind = 'browser' | 'client';
+
 export interface UserSession {
   userId: string;
   homeAccountId: string;
@@ -82,6 +84,14 @@ export interface UserSession {
    * Set at install time via the device_label query parameter.
    */
   deviceLabel?: string;
+  /**
+   * Who holds the token: 'browser' for the cookie an interactive sign-in sets,
+   * 'client' for a token handed to an MCP client (install flow, device login).
+   * Only a browser session can back a console session (/api/manage/*), so the
+   * token in a client's keychain is not half of an admin credential. Absent on
+   * rows written before the field existed; those count as neither.
+   */
+  kind?: SessionKind;
   /**
    * Table Storage RowKey for this session. Used by the refresh path to
    * update the correct row without needing the original sessionToken.
