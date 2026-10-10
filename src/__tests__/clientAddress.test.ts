@@ -143,6 +143,16 @@ describe('per-request scope', () => {
     expect(routes).toBeGreaterThan(50);
   });
 
+  // An explicit ip on a row wins over the scope, so a call site that reads the
+  // header itself would record the client-written entries again.
+  it('reads X-Forwarded-For only in clientAddress.ts', () => {
+    const root = join(__dirname, '..');
+    const files = readdirSync(root, { recursive: true, encoding: 'utf8' })
+      .filter((f) => f.endsWith('.ts') && !f.startsWith('__tests__'));
+    const readers = files.filter((f) => /x-forwarded-for['"]\s*\)/i.test(readFileSync(join(root, f), 'utf8')));
+    expect(readers).toEqual([join('services', 'clientAddress.ts')]);
+  });
+
   it('stores before and after on the row', async () => {
     logAccess({ ...ENTRY, operation: 'policy.services.set', before: '["mail"]', after: '["mail","calendar"]' });
     for (let i = 0; i < 5 && mockUpsertEntity.mock.calls.length === 0; i++) await flush();
