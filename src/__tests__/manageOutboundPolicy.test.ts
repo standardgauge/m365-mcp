@@ -2,9 +2,9 @@
  * Tests for the /api/manage/outbound-policy endpoint.
  *
  * Covers:
- *   - 401 when unauthenticated; 403 for non-admins on GET and POST, nothing read or written
+ *   - 401 when unauthenticated; 403 for non-admins on GET and POST, nothing read or written, refusal audited
  *   - GET without userId: the tenant row; with userId: both rows and the effective modes
- *   - POST scope=tenant / scope=user: writes only the channels given, stamps the admin, logs it
+ *   - POST scope=tenant / scope=user: writes only the channels given, stamps the admin, logs it with before/after
  *   - POST validation: bad scope, missing userId, unknown mode, unknown field, no channel given
  */
 
@@ -19,11 +19,17 @@ const mockCheckGlobalAdmin = jest.fn<(userId: string) => Promise<boolean>>();
 const mockGetOutboundPolicy = jest.fn<(tenantId: string, target: Scope) => Promise<unknown>>();
 const mockGetOutboundEnforcement = jest.fn<(tenantId: string, userId: string) => Promise<unknown>>();
 const mockSetOutboundPolicy = jest.fn<(tenantId: string, target: Scope, modes: Record<string, string>, setBy: string) => Promise<unknown>>();
+const mockAuditAdminRefusal = jest.fn<(operation: string) => void>();
 const mockLogAccess = jest.fn<(entry: Record<string, unknown>) => void>();
 
 jest.mock('../services/authMiddleware.js', () => ({
   authenticateConsoleRequest: () => mockAuthenticateRequest(),
   checkGlobalAdmin: (userId: unknown) => mockCheckGlobalAdmin(userId as string),
+  authorizeAdmin: async (auth: unknown, operation: unknown) => {
+    const isAdmin = await mockCheckGlobalAdmin((auth as AuthResult).userId);
+    if (!isAdmin) mockAuditAdminRefusal(operation as string);
+    return isAdmin;
+  },
 }));
 jest.mock('../services/tokenCache.js', () => ({ getTenantId: async () => TENANT }));
 jest.mock('../services/outboundPolicy.js', () => ({
@@ -33,7 +39,10 @@ jest.mock('../services/outboundPolicy.js', () => ({
   setOutboundPolicy: (t: unknown, s: unknown, m: unknown, b: unknown) =>
     mockSetOutboundPolicy(t as string, s as Scope, m as Record<string, string>, b as string),
 }));
-jest.mock('../services/auditLog.js', () => ({ logAccess: (e: unknown) => mockLogAccess(e as Record<string, unknown>) }));
+jest.mock('../services/auditLog.js', () => ({
+  ...jest.requireActual<object>('../services/auditLog.js'),
+  logAccess: (e: unknown) => mockLogAccess(e as Record<string, unknown>),
+}));
 jest.mock('@azure/functions', () => ({ app: { http: jest.fn() } }));
 jest.mock('../services/securityHeaders.js', () => ({ withSecurity: (h: unknown) => h }));
 
@@ -93,6 +102,7 @@ it('403 for a non-admin on GET and POST, touching nothing', async () => {
   expect((await post({ scope: 'tenant', teamsMessages: 'block' })).status).toBe(403);
   expect(mockGetOutboundPolicy).not.toHaveBeenCalled();
   expect(mockSetOutboundPolicy).not.toHaveBeenCalled();
+  expect(mockAuditAdminRefusal.mock.calls).toEqual([['admin.outbound_policy.read'], ['set_outbound_policy']]);
 });
 
 it('GET returns the tenant row', async () => {
@@ -115,6 +125,8 @@ it('POST scope=tenant writes the channels given and logs the change', async () =
   expect(mockSetOutboundPolicy).toHaveBeenCalledWith(TENANT, { scope: 'tenant' }, { calendarInvites: 'internal', teamsMessages: 'block' }, ADMIN);
   expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({
     operation: 'set_outbound_policy', resource: 'tenant', reason: 'calendarInvites=internal teamsMessages=block',
+    before: JSON.stringify(ALLOW),
+    after: JSON.stringify({ calendarInvites: 'internal', eventResponses: 'allow', teamsMessages: 'block' }),
   }));
 });
 

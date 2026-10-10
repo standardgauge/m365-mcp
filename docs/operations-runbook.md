@@ -207,7 +207,8 @@ Events that are not tool calls:
 | `policy.services.set`, `policy.read_only.set`, `policy.allowed_sites.set` | Tenant service settings change | The admin; `resource` `tenant` |
 | `policy.user_services.set`, `policy.mail_config.set` | A user's service overrides or mail config change | The caller; `resource` `user:<id>` |
 | `set_email_output_policy`, `set_email_output_mode` | Draft-mode policy, or a user's own output mode, changes | The caller; `resource` `tenant`, `user:<id>` or the user id |
-| `admin.*.read` | Refusals only: a non-admin asked for the audit log, sessions, tenant users, mail config, draft-mode policy, or another user's deny list or overrides | The caller |
+| `set_outbound_policy` | The outbound policy for calendar invitations, response comments or Teams sends changes | The admin; `resource` `tenant` or `user:<id>`; `reason` lists the channels set |
+| `admin.*.read` | Refusals only: a non-admin asked for the audit log, sessions, tenant users, mail config, draft-mode policy, outbound policy, or another user's deny list or overrides | The caller |
 
 Every policy operation is also written, `denied` with reason `Global
 Administrator role required`, when a caller fails the admin check. `before` and

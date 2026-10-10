@@ -9,9 +9,9 @@ import {
   type OutboundModes,
 } from '../../services/outboundPolicy.js';
 import { getTenantId } from '../../services/tokenCache.js';
-import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, authorizeAdmin } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
-import { logAccess } from '../../services/auditLog.js';
+import { auditActor, auditSnapshot, logAccess } from '../../services/auditLog.js';
 
 /**
  * Admin endpoint for the outbound policy: calendar invitations, comments on
@@ -34,6 +34,11 @@ import { logAccess } from '../../services/auditLog.js';
  * see or lift a restriction that applies to them. Every change is written to
  * the audit log table and echoed to the console audit stream.
  */
+/** The channel modes of a policy row, without its updatedAt / updatedBy stamp. */
+function channelsOf({ calendarInvites, eventResponses, teamsMessages }: OutboundModes): OutboundModes {
+  return { calendarInvites, eventResponses, teamsMessages };
+}
+
 async function manageOutboundPolicy(
   request: HttpRequest,
   context: InvocationContext,
@@ -44,7 +49,10 @@ async function manageOutboundPolicy(
       return { status: 401, jsonBody: { error: 'Authentication required' } };
     }
 
-    const isAdmin = await checkGlobalAdmin(auth.userId);
+    const isAdmin = await authorizeAdmin(
+      auth,
+      request.method === 'GET' ? 'admin.outbound_policy.read' : 'set_outbound_policy',
+    );
     if (!isAdmin) {
       return { status: 403, jsonBody: { error: 'Global Administrator role required' } };
     }
@@ -90,20 +98,20 @@ async function manageOutboundPolicy(
     const target = body.scope === 'tenant'
       ? { scope: 'tenant' as const }
       : { scope: 'user' as const, userId: body.userId as string };
+    const before = await getOutboundPolicy(tenantId, target);
     const policy = await setOutboundPolicy(tenantId, target, modes, auth.userId);
 
     const resource = target.scope === 'tenant' ? 'tenant' : `user:${target.userId}`;
     const change = Object.entries(modes).map(([k, v]) => `${k}=${v}`).join(' ');
     logAccess({
-      tenantId,
-      userId: auth.userId,
-      userEmail: auth.session.email,
-      deviceLabel: auth.session.deviceLabel,
+      ...auditActor(auth.session),
       operation: 'set_outbound_policy',
       resource,
       result: 'allowed',
       reason: change,
       source: 'http',
+      before: auditSnapshot(channelsOf(before)),
+      after: auditSnapshot(channelsOf(policy)),
     });
     console.log(`[audit] outbound-policy-set admin=${auth.userId} target=${resource} ${change} ts=${policy.updatedAt}`);
     context.log(`[admin] outbound policy updated: admin=${auth.userId} target=${resource} ${change}`);

@@ -8,9 +8,13 @@
  * per-request scope and is covered in clientAddress.test.ts.
  */
 
+import { randomBytes } from 'crypto';
 import { jest } from '@jest/globals';
 import type { HttpRequest, InvocationContext } from '@azure/functions';
 import type { AuthResult } from '../services/authMiddleware.js';
+
+// The callback mints a console session, which is MAC'd under the session key.
+process.env.MCP_SESSION_HMAC_KEY = randomBytes(32).toString('hex');
 
 type Row = Record<string, unknown>;
 
@@ -67,6 +71,7 @@ jest.mock('../services/tableStorage.js', () => ({
 
 jest.mock('../services/authMiddleware.js', () => ({
   authenticateRequest: () => mockAuthenticate(),
+  authenticateConsoleRequest: () => mockAuthenticate(),
   authenticateRequestAllowExpired: () => mockAuthenticateAllowExpired(),
   checkGlobalAdmin: () => mockIsAdmin(),
   auditAdminRefusal: (_auth: unknown, operation: unknown, resource?: unknown) =>
@@ -113,6 +118,7 @@ function handlerFor(name: string): Handler {
   return reg[1].handler;
 }
 
+const HOST = 'mcp.example.test';
 const TENANT = 'tenant-abc';
 const FOREIGN = 'tenant-xyz';
 const USER_ID = 'user-1';
@@ -139,7 +145,8 @@ function request(opts: {
   cookie?: string;
   body?: unknown;
 }): HttpRequest {
-  const headers = new Map<string, string>();
+  // A same-origin browser request, so logout's Origin check passes.
+  const headers = new Map<string, string>([['host', HOST], ['origin', `https://${HOST}`]]);
   if (opts.cookie) headers.set('cookie', opts.cookie);
   return {
     method: opts.method ?? 'GET',
@@ -273,20 +280,20 @@ describe('logout', () => {
 
   it('records a logout that ended a session', async () => {
     mockAuthenticate.mockResolvedValue(AUTH);
-    await logout(request({}), ctx);
+    await logout(request({ method: 'POST' }), ctx);
     expect(rows('auth.logout')).toEqual([expect.objectContaining({ userId: USER_ID, result: 'allowed' })]);
   });
 
   it('records a failed cleanup as denied', async () => {
     mockAuthenticate.mockResolvedValue(AUTH);
     mockDeleteAllUserSessions.mockRejectedValue(new Error('storage down'));
-    await logout(request({}), ctx);
+    await logout(request({ method: 'POST' }), ctx);
     expect(rows('auth.logout')[0]).toMatchObject({ result: 'denied' });
   });
 
   it('records nothing for an anonymous logout', async () => {
     mockAuthenticate.mockResolvedValue(null);
-    await logout(request({}), ctx);
+    await logout(request({ method: 'POST' }), ctx);
     expect(mockLogAccess).not.toHaveBeenCalled();
   });
 });
