@@ -16,9 +16,12 @@
  */
 
 import { jest } from '@jest/globals';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import type { HttpRequest, InvocationContext } from '@azure/functions';
 import type { InstallHandoffRecord, InstallNonceRecord } from '../services/tableStorage.js';
+
+// The callback also mints a console session, which is MAC'd under the session key.
+process.env.MCP_SESSION_HMAC_KEY = randomBytes(32).toString('hex');
 
 const mockAcquireTokenByCode = jest.fn<() => Promise<unknown>>();
 const mockCreateGraphClient = jest.fn<() => unknown>();
@@ -46,6 +49,9 @@ jest.mock('../services/tableStorage.js', () => ({
 
 const fakeHash = (t: string) => createHash('sha256').update('k:' + t).digest('hex');
 jest.mock('../services/credentialCrypto.js', () => ({
+  ...jest.requireActual<typeof import('../services/credentialCrypto.js')>(
+    '../services/credentialCrypto.js'
+  ),
   hashSessionToken: (t: string) => fakeHash(t),
 }));
 
@@ -132,6 +138,9 @@ describe('callback — installer sign-in', () => {
     expect(cookie?.httpOnly).toBe(true);
     expect(cookie?.path).toBe('/api/auth/install-confirm');
     expect(cookie?.maxAge).toBe(300);
+    // An installer sign-in is still an interactive sign-in, so it gets the
+    // console session like any other.
+    expect(res.cookies?.find((c) => c.name === 'mcp_console')?.httpOnly).toBe(true);
   });
 
   it('leaves an ordinary sign-in alone', async () => {
