@@ -11,14 +11,16 @@
  *   - send_mail in draft mode: respects the Drafts deny list
  *   - send_mail in send mode: delivers immediately (/me/sendMail), returns sent
  *   - get_email_output_mode: returns the calling user's stored mode
- *   - set_email_output_mode: persists a new mode for the calling user
+ *   - set_email_output_mode: persists 'draft' for the calling user
+ *   - set_email_output_mode: refuses 'send' without enforcement, writes nothing,
+ *     points at the web UI, and the dispatcher logs the refusal as denied
  *   - set_email_output_mode: rejects an invalid mode value
  *
  * Enforced draft mode:
  *   - set_email_output_mode: refuses when a tenant or user policy enforces draft,
  *     writes nothing, and the dispatcher logs the refusal as denied
  *   - get_email_output_mode: reports enforced / enforcedBy
- *   - send_draft in enforced draft mode: refuses without telling the agent to flip the mode
+ *   - send_draft in draft mode: refuses without telling the agent to flip the mode
  *   - send_mail honours the effective mode the service resolves (draft while enforced)
  */
 
@@ -225,15 +227,47 @@ describe('MCP get_email_output_mode', () => {
 
 describe('MCP set_email_output_mode', () => {
   beforeEach(() => {
-    mockGetUserEmailSettings.mockResolvedValue({ emailOutputMode: 'draft', enforced: false, enforcedBy: null });
+    mockGetUserEmailSettings.mockResolvedValue({ emailOutputMode: 'send', enforced: false, enforcedBy: null });
   });
 
-  it('persists a new mode for the calling user', async () => {
-    const res = await callTool('set_email_output_mode', { emailOutputMode: 'send' });
+  it("tightens the calling user's mode to draft and logs it as allowed", async () => {
+    const res = await callTool('set_email_output_mode', { emailOutputMode: 'draft' });
     const { parsed } = toolResult(res);
 
-    expect(parsed).toMatchObject({ status: 'updated', emailOutputMode: 'send' });
-    expect(mockSetUserEmailSettings).toHaveBeenCalledWith(TENANT, USER, { emailOutputMode: 'send' });
+    expect(parsed).toMatchObject({ status: 'updated', emailOutputMode: 'draft' });
+    expect(mockSetUserEmailSettings).toHaveBeenCalledWith(TENANT, USER, { emailOutputMode: 'draft' });
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ operation: 'set_email_output_mode', result: 'allowed' }));
+  });
+
+  it("refuses 'send' without any policy, writes nothing, points at the web UI, and logs denied", async () => {
+    mockGetUserEmailSettings.mockResolvedValue({ emailOutputMode: 'draft', enforced: false, enforcedBy: null });
+
+    const res = await callTool('set_email_output_mode', { emailOutputMode: 'send' });
+    const { isError, text } = toolResult(res);
+
+    expect(isError).toBe(true);
+    expect(text).toContain('cannot switch to send mode');
+    expect(text).toContain('web UI');
+    // Not an administrator lock, so the message must not claim one.
+    expect(text).not.toContain('enforced');
+    expect(mockSetUserEmailSettings).not.toHaveBeenCalled();
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({
+      tenantId: TENANT,
+      userId: USER,
+      operation: 'set_email_output_mode',
+      result: 'denied',
+      source: 'mcp',
+      reason: expect.stringContaining('cannot switch to send mode'),
+    }));
+    expect(mockLogAccess).not.toHaveBeenCalledWith(expect.objectContaining({ result: 'allowed' }));
+  });
+
+  it("refuses 'send' even when the user is already in send mode", async () => {
+    const res = await callTool('set_email_output_mode', { emailOutputMode: 'send' });
+    const { isError } = toolResult(res);
+
+    expect(isError).toBe(true);
+    expect(mockSetUserEmailSettings).not.toHaveBeenCalled();
   });
 
   it('rejects an invalid mode value without writing', async () => {
@@ -290,16 +324,6 @@ describe('MCP set_email_output_mode — enforced draft mode', () => {
     expect(mockSetUserEmailSettings).not.toHaveBeenCalled();
   });
 
-  it('logs the successful change as allowed when no policy applies', async () => {
-    mockGetUserEmailSettings.mockResolvedValue({ emailOutputMode: 'draft', enforced: false, enforcedBy: null });
-
-    const res = await callTool('set_email_output_mode', { emailOutputMode: 'send' });
-    const { isError } = toolResult(res);
-
-    expect(isError).toBe(false);
-    expect(mockSetUserEmailSettings).toHaveBeenCalledWith(TENANT, USER, { emailOutputMode: 'send' });
-    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ operation: 'set_email_output_mode', result: 'allowed' }));
-  });
 });
 
 describe('MCP send paths — enforced draft mode', () => {
@@ -329,7 +353,7 @@ describe('MCP send paths — enforced draft mode', () => {
     expect(mockGraphApi).not.toHaveBeenCalledWith('/me/messages/draft-2/send');
   });
 
-  it('send_draft still points an unenforced draft-mode user at set_email_output_mode', async () => {
+  it('send_draft points an unenforced draft-mode user at the web UI, not set_email_output_mode', async () => {
     mockGetUserEmailSettings.mockResolvedValue({ emailOutputMode: 'draft', enforced: false, enforcedBy: null });
     mockGraphGet.mockResolvedValue({ isDraft: true, parentFolderId: null, subject: 'Hi', webLink: 'https://outlook/draft-3' });
 
@@ -337,6 +361,7 @@ describe('MCP send paths — enforced draft mode', () => {
     const { isError, text } = toolResult(res);
 
     expect(isError).toBe(true);
-    expect(text).toContain("set_email_output_mode('send')");
+    expect(text).toContain('web UI');
+    expect(text).not.toContain('set_email_output_mode');
   });
 });

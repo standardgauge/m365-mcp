@@ -437,15 +437,15 @@ export const TOOLS: McpTool[] = [
   {
     name: 'set_email_output_mode',
     description:
-      'Update the calling user\'s email output mode. Pass "draft" to require review before ' +
-      'delivery (the default for new users) or "send" to allow immediate delivery. Refuses when ' +
-      'an administrator enforces draft mode for the tenant or for this user; only an administrator ' +
-      'can lift that in the admin UI.',
+      'Switch the calling user\'s email output mode to "draft", so send_mail saves to Drafts for ' +
+      'review instead of delivering. This tool can only tighten the mode: "send" is refused, and ' +
+      'the user switches to send mode themselves in the web UI under My Email Settings. Also ' +
+      'refuses when an administrator enforces draft mode for the tenant or for this user.',
     parameters: [
       {
         name: 'emailOutputMode',
         type: 'string',
-        description: '"draft" — save to Drafts for review; "send" — deliver immediately.',
+        description: '"draft" — save to Drafts for review. "send" is refused; the user sets it in the web UI.',
         required: true,
         enum: ['draft', 'send'],
       },

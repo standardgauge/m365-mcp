@@ -150,6 +150,13 @@ const SITE_SCOPED_TOOLS = new Set([
 const ENFORCED_MODE_MARKER = 'Email output mode is enforced to draft by your administrator';
 
 /**
+ * Prefix of the error set_email_output_mode throws when asked for 'send'. The tool may
+ * only tighten the mode to draft; loosening it is a person's call, made in the web UI.
+ * Matched in the tools/call catch block so the refusal is audited as denied.
+ */
+const SEND_MODE_UI_ONLY_MARKER = 'set_email_output_mode cannot switch to send mode';
+
+/**
  * Tools that mutate data (create / update / delete / send). When a tool's
  * service is in the tenant's readOnlyServices set, these are hidden from
  * tools/list and refused at tools/call time. Read tools — including read-via-POST ones
@@ -1270,7 +1277,7 @@ const tools: ToolDef[] = [
         // would act on.
         const howToChange = enforced
           ? 'Draft mode is enforced by your administrator and cannot be changed by this tool.'
-          : "To let tools dispatch drafts directly, switch the mode with set_email_output_mode('send').";
+          : 'Only the user can switch to send mode, in the web UI under My Email Settings.';
         throw new Error(
           "Your email output mode is 'draft', so drafts are sent by a person, not by this tool. " +
           `Open the draft and send it from Outlook: ${draft.webLink ?? '(no link available)'}. ` +
@@ -1313,13 +1320,13 @@ const tools: ToolDef[] = [
   {
     name: 'set_email_output_mode',
     description:
-      "Update the calling user's email output mode. Pass 'draft' to require review in Drafts before " +
-      "delivery (the default for new users) or 'send' to allow send_mail to deliver immediately. Only " +
-      "changes the calling user's own setting. Refuses when an administrator enforces draft mode for the " +
-      'tenant or for this user; only an administrator can lift that in the admin UI.',
+      "Switch the calling user's email output mode to 'draft', so send_mail saves to Drafts for review " +
+      "instead of delivering. This tool can only tighten the mode: 'send' is refused, and the user " +
+      'switches to send mode themselves in the web UI under My Email Settings. Also refuses when an ' +
+      'administrator enforces draft mode for the tenant or for this user.',
     inputSchema: {
       type: 'object',
-      properties: { emailOutputMode: prop('string', "'draft' (save to Drafts for review) or 'send' (deliver immediately)", { enum: ['draft', 'send'] }) },
+      properties: { emailOutputMode: prop('string', "'draft' (save to Drafts for review). 'send' is refused; the user sets it in the web UI", { enum: ['draft', 'send'] }) },
       required: ['emailOutputMode'],
     },
     handler: async (args, session) => {
@@ -1336,6 +1343,15 @@ const tools: ToolDef[] = [
         throw new Error(
           `${ENFORCED_MODE_MARKER} ${scope}, so set_email_output_mode cannot change it. ` +
           'Emails will be saved to Drafts for a person to review and send. Only an administrator can lift this in the admin UI.'
+        );
+      }
+      // Loosening to 'send' is refused even without enforcement. Otherwise an injected prompt
+      // only needs two calls, set_email_output_mode('send') then send_mail, and draft mode
+      // protects only tenants that knew to enforce it. The REST route and web UI keep full control.
+      if (mode === 'send') {
+        throw new Error(
+          `${SEND_MODE_UI_ONLY_MARKER}; it can only tighten the mode to draft. ` +
+          'Ask the user to switch to send mode themselves in the web UI under My Email Settings.'
         );
       }
       await setUserEmailSettings(tenantId, session.userId, { emailOutputMode: mode as EmailOutputMode });
@@ -2879,6 +2895,7 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
         message.includes('is not enabled') ||
         message.includes('disabled for your account') ||
         message.includes(ENFORCED_MODE_MARKER) ||
+        message.includes(SEND_MODE_UI_ONLY_MARKER) ||
         message.includes(OUTBOUND_POLICY_MARKER);
       if (auth && isDenied) {
         const errorResource = [
