@@ -10,14 +10,20 @@ import UserManagement from './components/UserManagement';
 import EmailOutputPolicy from './components/EmailOutputPolicy';
 import OutboundPolicy from './components/OutboundPolicy';
 import AuditLog from './components/AuditLog';
+import { readRuntimeConfig } from './runtimeConfig';
 
 // Instance display name is injected by the Azure Function serving index.html.
-const w = window as unknown as Record<string, string | undefined>;
-const instanceName = w.__MCP_INSTANCE_NAME__ ?? 'M365 MCP';
+const { instanceName } = readRuntimeConfig();
 
 // Guards against an infinite login bounce if the OAuth round-trip fails to set
 // the mcp_session cookie (e.g. a Secure cookie over a plain-http origin).
 const REDIRECT_GUARD_KEY = 'm365_auth_redirected';
+
+// /api/manage/* needs a console session: a short-lived, browser-only cookie
+// minted at sign-in and renewed by /api/auth/me. Calling /me on this interval
+// while the tab is visible keeps it alive; once it lapses (idle tab, or the
+// 8-hour cap) the next check sends the user back through sign-in.
+const CONSOLE_KEEPALIVE_MS = 5 * 60 * 1000;
 
 type View = 'admin' | 'settings';
 type AuthState = 'checking' | 'authed' | 'error';
@@ -28,6 +34,21 @@ interface MeResponse {
   displayName?: string;
   email?: string;
   isGlobalAdmin?: boolean;
+  consoleSession?: boolean;
+}
+
+function startLogin() {
+  window.location.href = '/api/auth/login';
+}
+
+// Logout is a POST so another page cannot sign the user out with a link.
+// A form submission carries the Origin header the server checks.
+function signOut() {
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = '/api/auth/logout';
+  document.body.appendChild(form);
+  form.submit();
 }
 
 function AppContent() {
@@ -40,16 +61,19 @@ function AppContent() {
   const [allowedSites, setAllowedSites] = useState<Array<{ id: string; name: string }> | undefined>(undefined);
   const [adminRefreshKey, setAdminRefreshKey] = useState(0);
 
-  // Establish the server session. The mcp_session cookie (set by the OAuth
-  // callback) authorizes every /api/* call automatically on this origin, so
-  // all we need here is to confirm it exists and learn who we are. No client
-  // Graph token, no MSAL: identity + admin status come from the session.
+  // Establish the server session. The mcp_session cookie and, for
+  // /api/manage/*, the mcp_console cookie (both set by the OAuth callback)
+  // authorize every /api/* call automatically on this origin, so all we need
+  // here is to confirm they exist and learn who we are. No client Graph token,
+  // no MSAL: identity + admin status come from the session.
   useEffect(() => {
     let cancelled = false;
     fetch('/api/auth/me', { credentials: 'same-origin' })
       .then(async (r) => {
-        if (r.ok) {
-          const data = (await r.json()) as MeResponse;
+        // A session without a console session (expired, or from before
+        // console sessions existed) needs a fresh sign-in to use the admin API.
+        const data = r.ok ? ((await r.json()) as MeResponse) : null;
+        if (data?.consoleSession) {
           if (cancelled) return;
           sessionStorage.removeItem(REDIRECT_GUARD_KEY);
           setUserId(data.userId);
@@ -58,7 +82,7 @@ function AppContent() {
           setAuthState('authed');
           return;
         }
-        if (r.status === 401) {
+        if (r.status === 401 || data) {
           // No valid session — start the server OAuth flow, unless we already
           // tried once (in which case something is wrong; show an error).
           if (sessionStorage.getItem(REDIRECT_GUARD_KEY)) {
@@ -66,7 +90,7 @@ function AppContent() {
             return;
           }
           sessionStorage.setItem(REDIRECT_GUARD_KEY, '1');
-          window.location.href = '/api/auth/login';
+          startLogin();
           return;
         }
         if (!cancelled) setAuthState('error');
@@ -76,6 +100,27 @@ function AppContent() {
       });
     return () => { cancelled = true; };
   }, []);
+
+  // Keep the console session alive while the tab is in use; re-sign-in when it
+  // has lapsed. Checked on an interval and whenever the tab becomes visible.
+  useEffect(() => {
+    if (authState !== 'authed') return;
+    const check = () => {
+      if (document.visibilityState !== 'visible') return;
+      fetch('/api/auth/me', { credentials: 'same-origin' })
+        .then(async (r) => {
+          const data = r.ok ? ((await r.json()) as MeResponse) : null;
+          if (r.status === 401 || (data && !data.consoleSession)) startLogin();
+        })
+        .catch(() => {});
+    };
+    const timer = window.setInterval(check, CONSOLE_KEEPALIVE_MS);
+    document.addEventListener('visibilitychange', check);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', check);
+    };
+  }, [authState]);
 
   // Fetch org-wide enabled services and allowed sites (scoped by tenant via the
   // session cookie).
@@ -106,7 +151,7 @@ function AppContent() {
         <button
           onClick={() => {
             sessionStorage.removeItem(REDIRECT_GUARD_KEY);
-            window.location.href = '/api/auth/login';
+            startLogin();
           }}
         >
           Try again
@@ -135,7 +180,7 @@ function AppContent() {
             My Settings
           </button>
           <span className="user-info">{accountName}</span>
-          <button onClick={() => { window.location.href = '/api/auth/logout'; }}>Sign out</button>
+          <button onClick={signOut}>Sign out</button>
         </div>
       </nav>
 

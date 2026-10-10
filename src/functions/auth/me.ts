@@ -1,5 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
-import { authenticateRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, authenticateRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { consoleCookie, renewConsoleToken } from '../../services/consoleSession.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 
 /**
@@ -19,12 +20,20 @@ import { withSecurity } from '../../services/securityHeaders.js';
  * `isGlobalAdmin` is computed server-side using the session's stored Graph
  * token (via checkGlobalAdmin → /me/transitiveMemberOf), so the client no
  * longer needs to hold a Directory.Read.All token to unlock the admin view.
+ *
+ * `consoleSession` says whether the request also carries a valid console
+ * session, the browser-only credential /api/manage/* requires
+ * (services/consoleSession.ts). When it does, the console cookie is re-issued
+ * with its idle expiry pushed out, so the SPA keeps it alive by calling this
+ * endpoint. When it does not, the SPA sends the user back through sign-in,
+ * which is the only place a console session is minted.
  */
 async function me(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const auth = await authenticateRequest(request);
+  const consoleAuth = await authenticateConsoleRequest(request);
+  const auth = consoleAuth ?? (await authenticateRequest(request));
   if (!auth) {
     return {
       status: 401,
@@ -34,15 +43,22 @@ async function me(
 
   const isGlobalAdmin = await checkGlobalAdmin(auth.userId);
 
+  const now = Date.now();
+  const renewed = consoleAuth ? renewConsoleToken(consoleAuth.sessionToken, consoleAuth.console, now) : null;
+
   return {
     status: 200,
+    headers: { 'Cache-Control': 'no-store' },
     jsonBody: {
       authenticated: true,
       userId: auth.userId,
       displayName: auth.session.displayName,
       email: auth.session.email,
       isGlobalAdmin,
+      consoleSession: renewed !== null,
+      ...(renewed ? { consoleExpiresAt: renewed.expiresAt } : {}),
     },
+    ...(renewed ? { cookies: [consoleCookie(renewed, now)] } : {}),
   };
 }
 

@@ -1,5 +1,6 @@
 /**
- * Serialize a value for safe embedding inside an inline <script> block.
+ * Serialize a value for safe embedding inside a <script> element, including a
+ * `type="application/json"` data block.
  *
  * Plain JSON.stringify does not escape `<`, so a value containing the literal
  * `</script>` (or `<!--`) would close the script element early and inject
@@ -8,6 +9,6 @@
  * impossible. Only exploitable by whoever controls the deployment env vars, so
  * this is defense-in-depth hardening (F13).
  */
-export function jsonForScript(value: string): string {
+export function jsonForScript(value: unknown): string {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }

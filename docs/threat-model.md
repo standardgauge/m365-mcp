@@ -135,7 +135,7 @@ content; it stores credentials, policy and audit rows.
 | ID | Boundary | Crossing it |
 |---|---|---|
 | TB1 | User device to server | MCP JSON-RPC and install polling over TLS, authenticated by the session token. |
-| TB2 | Browser to server | OAuth redirects and the admin SPA, authenticated by the `mcp_session` cookie. |
+| TB2 | Browser to server | OAuth redirects and the admin SPA, authenticated by the `mcp_session` cookie; the admin API also requires the `mcp_console` cookie (section 7). |
 | TB3 | Server to Entra ID | Confidential-client authorization code and refresh-token redemption. |
 | TB4 | Server to Microsoft Graph | Delegated access tokens. Graph enforces the user's own permissions. |
 | TB5 | Server to Table Storage | Entra token for the app's runtime identity; the account refuses shared-key auth. Everything at rest is here. |
@@ -218,7 +218,7 @@ replica keeps an in-memory cache of sessions it has seen, keyed by token hash.
 | 3.1 | S | Guessing a session token. | 32 random bytes; lookup by HMAC; no client-supplied user ID is trusted. | None. |
 | 3.2 | S | Stolen token used indefinitely. | 30-day absolute cap, anchored on an immutable creation time and checked before any refresh. | Sessions with neither timestamp skip the absolute check. The 7-day "idle" window is not a boundary: on expiry the server silently refreshes and carries on, so only the 30-day cap ends a session that holds a live refresh token. The runbook describes it as an idle timeout. **G13** |
 | 3.3 | E | Revoked session keeps working. Logout, the credential purge script, or deleting rows by hand. | Logout deletes all of the user's rows and evicts every cached session for the user on the replica that handled it. Other replicas re-check a cached session's row at most every 30 seconds on use and drop it once the row is gone, so a deleted session stops authenticating everywhere within 30 seconds ([`tokenCache.ts`](../src/services/tokenCache.ts) `SESSION_REVALIDATE_MS`). Writes back to an existing session are conditional updates, so a refresh inside that window fails instead of recreating the row, and evicts the session at once. Entra "revoke sessions" kills the refresh token. Key rotation (new revision, new process) clears everything. | While storage is unreachable a replica keeps serving a cached session for up to 5 minutes past its last check, then refuses it (`SESSION_REVALIDATE_MAX_STALE_MS`); accepted, so a storage blip does not sign everyone out. An admin action to revoke a named user's sessions is tracked separately. |
-| 3.4 | T | Cross-site request forgery against cookie-authenticated routes. | `mcp_session` is HttpOnly, Secure, `SameSite=Lax`, so it is not sent on cross-site POSTs. No CORS headers are emitted. | Relies on SameSite alone: no Origin check or CSRF token. A same-site origin (a sibling subdomain under the instance's registrable domain) is not cross-site and gets the cookie. Logout is a GET, so a cross-site link logs the user out. Folded into **G9**. |
+| 3.4 | T | Cross-site request forgery against cookie-authenticated routes. | `mcp_session` is HttpOnly, Secure, `SameSite=Lax`, so it is not sent on cross-site POSTs. No CORS headers are emitted. The admin API and logout also run an Origin check ([`consoleSession.ts`](../src/services/consoleSession.ts) `checkBrowserOrigin`): `Origin`, when sent, must be the instance's own; `Sec-Fetch-Site` must be `same-origin` (or `none` for a typed GET); a write must carry `Origin`. That refuses a same-site sibling subdomain, which SameSite alone does not. The admin API's `mcp_console` cookie is `SameSite=Strict`. Logout is a POST. | Non-admin REST routes that take the cookie (`/api/mail/settings` and the tool routes) still rely on `SameSite=Lax` alone, so a sibling subdomain under the instance's registrable domain could post to them with the user's cookie. Narrower than before: no admin route and no logout. **G15** |
 | 3.5 | I | Session token leaks from the client. | The desktop extension and the script installers both keep it in the OS keychain, DPAPI, or libsecret, falling back to a 0600 file. The installers hand it to the shim on stdin (`--store-token`) and the MCP client config names only the store (`--token-store`), so no config file holds the token. The `.backup` copies the installers write are 0600 and have the earlier installer's bearer header removed. | A config written by an earlier installer keeps its token until the installer is re-run, and that token stays valid until the 30-day cap. The macOS `security` CLI takes the token on argv for the moment it runs, the same as the extension. Accepted. |
 | 3.6 | R | Several devices share one identity. | Each device gets its own session row and an optional device label that the audit log records. | None. |
 | 3.7 | E | `tools/list` shows tools the user cannot use. | Filtered by enabled services, overrides and read-only. Call-time checks are the backstop. | If policy cannot be read, `tools/list` shows everything. Display only; every call is still checked and those checks fail closed. Accepted. |
@@ -286,18 +286,28 @@ policy tables, and `auditLog` ([`infra/main.bicep`](../infra/main.bicep),
 ## 7. Admin surface
 
 The admin SPA is served from the site root and calls `/api/manage/*`. Every
-admin route authenticates the session, then calls Graph `/me/transitiveMemberOf`
+admin route authenticates a console session (below), then calls Graph `/me/transitiveMemberOf`
 with the caller's own token and requires the Global Administrator role
 (`checkGlobalAdmin`). The check runs on every request and fails closed. The
 Functions host's own `/admin/*` API is master-key protected and never reaches
 this code ([runbook](operations-runbook.md#reserved-paths)).
 
+The admin API does not take the session token an MCP client holds.
+`authenticateConsoleRequest` ([`authMiddleware.ts`](../src/services/authMiddleware.ts))
+ignores the bearer and `x-session-token` headers, reads the session from the
+`mcp_session` cookie, and also requires an `mcp_console` cookie
+([`consoleSession.ts`](../src/services/consoleSession.ts)). That cookie is
+minted only by the OAuth callback, is HttpOnly and `SameSite=Strict`, is bound
+by HMAC to the exact `mcp_session` value beside it, and lasts 30 minutes idle
+and 8 hours at most. The request must also pass the Origin check in 3.4.
+Operator view: [Admin API sessions](operations-runbook.md#admin-api-sessions).
+
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
 | 7.1 | E | Non-admin calls an admin route. | Per-request Global Administrator check against Graph, fail closed. | Only active role assignments count; that is the intended behaviour. Allowing a lesser role or a group is tracked separately. |
 | 7.2 | E | Non-admin edits another user's deny list (IDOR). | User deny-list routes allow a different `targetUserId` only for a Global Administrator. | None. |
-| 7.3 | E | The MCP client's token is an admin credential. | None. | `authenticateRequest` accepts the same session token from the bearer header, the alternate header and the cookie, on every route. A Global Administrator who installs the client has an admin-API credential sitting in their MCP config, keychain or desktop extension. Admin sessions should be separate, short-lived and browser-only. **G9** |
-| 7.4 | T | XSS in the admin SPA. | React rendering; CSP with `default-src 'none'`, `frame-ancestors 'none'`, `form-action` and `connect-src` restricted; runtime config JSON-escaped for script context. | `script-src` allows `'unsafe-inline'` for the injected config block, so the CSP does not stop an injected inline script. **G9** |
+| 7.3 | E | The MCP client's token is an admin credential. | `/api/manage/*` authenticates only a console session: the `mcp_session` cookie plus an `mcp_console` cookie bound to it by HMAC, minted only at interactive sign-in, never handed to a client, 30 minutes idle and 8 hours absolute. The token in a Global Administrator's MCP config, keychain or desktop extension is refused as a bearer, as `x-session-token`, and as a forged `mcp_session` cookie. A test walks every `api/manage/` route registration and fails if one authenticates any other way. | The install flow still hands the client the same token the browser holds as `mcp_session`, so a stolen client token plus a stolen `mcp_console` cookie together reach the admin API. The console cookie alone is useless, and it expires within 8 hours. Issuing the browser and the client separate session tokens would close it. **G15** |
+| 7.4 | T | XSS in the admin SPA. | React rendering; CSP with `default-src 'none'`, `script-src 'self'` (no inline script), `frame-ancestors 'none'`, `form-action` and `connect-src` restricted. Runtime config travels as a non-executable `type="application/json"` data block, JSON-escaped for script context and read with `JSON.parse`. The session cookies are HttpOnly, so script that did run could act as the user in the page but not read the credentials. | `style-src` still allows `'unsafe-inline'`, which permits CSS injection but not script. Accepted. |
 | 7.5 | R | Admin changes are not attributable. | Draft-mode policy changes are audited. | Deny-list, services, read-only, allowed-sites, per-user override and mail-config changes are not. **G8** |
 | 7.6 | I | Admin reads tenant directory. | `tenant-users` requires Global Administrator and uses the admin's own token. | None. |
 
@@ -385,10 +395,10 @@ separately" in the tables and are not repeated here.
 | G1 | High | 4 Install | Install sign-in handoff binding. Details withheld until fixed. |
 | G4 | Medium | 2 Token cache | One MSAL cache row for every user: shared blast radius, last-writer-wins across replicas, 64 KiB property ceiling. |
 | G8 | Medium | 7, 8 Audit | Auth events and admin policy changes are not audited; MCP rows have no client address; REST rows trust the leftmost forwarded address. |
-| G9 | Medium | 7 Admin | The MCP client's session token is also an admin-API credential for Global Administrators; admin CSP allows inline script; CSRF defence is SameSite alone. |
 | G10 | Medium | 4 Client update | Extension auto-update is unsigned, writes payload paths without containment, and bakes in an origin from forwarded headers. |
 | G13 | Low | 3 Session | The 7-day idle window renews silently instead of ending the session; sessions with no timestamps skip the 30-day cap; runbook overstates the idle timeout. |
 | G14 | Low | 10 Availability | An unknown bearer token triggers full-partition scans (up to three per request); JSON-RPC batch size is unbounded. |
+| G15 | Low | 3, 7 Session | Cookie-authenticated non-admin REST routes have no Origin check (SameSite=Lax alone, so a same-site sibling can post to them); the install flow gives the browser and the MCP client the same session token. |
 
 When a gap closes, change its row in the relevant table to describe the new
 mitigation and delete it from this register in the same pull request.

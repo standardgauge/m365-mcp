@@ -66,7 +66,7 @@ Each user authenticates once through the standard Microsoft sign-in page. The re
 
 Because every token is **delegated**, the server's reach is bounded by the user's own permissions. A user who cannot open a SharePoint site cannot reach it through this server either. There are no application (app-only) Graph permissions anywhere in the registration, which is what rules out a back-door service account with tenant-wide access.
 
-Calls carry a random session token issued at sign-in (`Authorization: Bearer`, or the `mcp_session` cookie in the browser). The server stores only a keyed HMAC of it and looks the session up by that hash; a client-supplied user ID is never trusted. A request with no valid session gets no Graph access.
+Calls carry a random session token issued at sign-in (`Authorization: Bearer`, or the `mcp_session` cookie in the browser). The server stores only a keyed HMAC of it and looks the session up by that hash; a client-supplied user ID is never trusted. A request with no valid session gets no Graph access. The admin API (`/api/manage/*`) takes only the admin UI's browser session: a short-lived, HttpOnly `mcp_console` cookie set at interactive sign-in, so the token an MCP client holds is not an admin credential.
 
 What the server protects, its trust boundaries, and the known gaps are in the [threat model](docs/threat-model.md).
 

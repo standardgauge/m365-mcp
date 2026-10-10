@@ -1,7 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getAllowedSites, setAllowedSites } from '../../services/serviceSettings.js';
 import { getTenantId } from '../../services/tokenCache.js';
-import { authenticateRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 
 async function manageAllowedSites(
@@ -9,7 +9,7 @@ async function manageAllowedSites(
   context: InvocationContext
 ): Promise<HttpResponseInit> {
   try {
-    const auth = await authenticateRequest(request);
+    const auth = await authenticateConsoleRequest(request);
     if (!auth) {
       return { status: 401, jsonBody: { error: 'Authentication required' } };
     }

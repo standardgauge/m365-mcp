@@ -22,7 +22,7 @@ const mockSetOutboundPolicy = jest.fn<(tenantId: string, target: Scope, modes: R
 const mockLogAccess = jest.fn<(entry: Record<string, unknown>) => void>();
 
 jest.mock('../services/authMiddleware.js', () => ({
-  authenticateRequest: () => mockAuthenticateRequest(),
+  authenticateConsoleRequest: () => mockAuthenticateRequest(),
   checkGlobalAdmin: (userId: unknown) => mockCheckGlobalAdmin(userId as string),
 }));
 jest.mock('../services/tokenCache.js', () => ({ getTenantId: async () => TENANT }));

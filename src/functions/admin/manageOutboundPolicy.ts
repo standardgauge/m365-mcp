@@ -9,7 +9,7 @@ import {
   type OutboundModes,
 } from '../../services/outboundPolicy.js';
 import { getTenantId } from '../../services/tokenCache.js';
-import { authenticateRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { logAccess } from '../../services/auditLog.js';
 
@@ -39,7 +39,7 @@ async function manageOutboundPolicy(
   context: InvocationContext,
 ): Promise<HttpResponseInit> {
   try {
-    const auth = await authenticateRequest(request);
+    const auth = await authenticateConsoleRequest(request);
     if (!auth) {
       return { status: 401, jsonBody: { error: 'Authentication required' } };
     }

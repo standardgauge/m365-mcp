@@ -9,9 +9,12 @@
  * authorize URL, what the callback reads back and refuses without.
  */
 
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { jest } from '@jest/globals';
 import type { HttpRequest, InvocationContext } from '@azure/functions';
+
+// The callback mints a console session, which is MAC'd under the session key.
+process.env.MCP_SESSION_HMAC_KEY = randomBytes(32).toString('hex');
 
 type UrlBinding = { codeChallenge: string; nonce: string };
 type RedemptionBinding = { codeVerifier: string; nonce: string };

@@ -20,6 +20,11 @@
 
 import { jest } from '@jest/globals';
 import type { HttpRequest, InvocationContext } from '@azure/functions';
+import { randomBytes } from 'crypto';
+import { verifyConsoleToken } from '../services/consoleSession.js';
+
+// The callback mints a console session, which is MAC'd under the session key.
+process.env.MCP_SESSION_HMAC_KEY = randomBytes(32).toString('hex');
 
 const mockAcquireTokenByCode = jest.fn<() => Promise<unknown>>();
 const mockCreateGraphClient = jest.fn<() => unknown>();
@@ -48,11 +53,20 @@ jest.mock('@azure/functions', () => ({ app: { http: jest.fn() } }));
 import { app } from '@azure/functions';
 import '../functions/auth/callback.js';
 
+interface Cookie {
+  name: string;
+  value: string;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: string;
+  path?: string;
+  maxAge?: number;
+}
 interface HttpRegistration {
   handler: (
     req: HttpRequest,
     context: InvocationContext
-  ) => Promise<{ status: number; headers?: Record<string, string>; jsonBody?: unknown }>;
+  ) => Promise<{ status: number; headers?: Record<string, string>; jsonBody?: unknown; cookies?: Cookie[] }>;
 }
 const httpMock = app.http as unknown as jest.Mock<(name: string, opts: HttpRegistration) => void>;
 const reg = httpMock.mock.calls.find((c) => c[0] === 'callback');
@@ -140,5 +154,21 @@ describe('callback — post-OAuth redirect target', () => {
     const location = res.headers?.Location ?? '';
     expect(location).not.toContain('userId=');
     expect(location).not.toContain(USER_ID);
+  });
+});
+
+describe('callback — console session', () => {
+  it('sets an HttpOnly, SameSite=Strict mcp_console cookie bound to the new session token', async () => {
+    delete process.env.FRONTEND_URL;
+    const res = await handler(req(), ctx);
+    const session = res.cookies?.find((c) => c.name === 'mcp_session');
+    const consoleCookie = res.cookies?.find((c) => c.name === 'mcp_console');
+    expect(session?.value).toMatch(/^[0-9a-f]{64}$/);
+    expect(consoleCookie).toMatchObject({ httpOnly: true, secure: true, sameSite: 'Strict', path: '/api' });
+    expect(consoleCookie?.maxAge).toBeGreaterThan(0);
+    expect(consoleCookie?.maxAge).toBeLessThanOrEqual(30 * 60);
+    expect(verifyConsoleToken(consoleCookie?.value, session?.value)).not.toBeNull();
+    // Bound to this session: useless beside any other session token.
+    expect(verifyConsoleToken(consoleCookie?.value, 'f'.repeat(64))).toBeNull();
   });
 });
