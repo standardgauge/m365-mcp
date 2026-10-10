@@ -71,6 +71,7 @@ import {
   checkMailIndexing,
 } from '../services/policyEnforcement.js';
 import type { PolicyHandler } from '../services/policyEnforcement.js';
+import { SessionStoreUnavailableError } from '../services/sessionStoreError.js';
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
 
@@ -139,6 +140,21 @@ beforeEach(() => {
 // ──────────────────────────────────────────────────────────────────────────────
 // Service enablement
 // ──────────────────────────────────────────────────────────────────────────────
+
+describe('Authentication', () => {
+  it('returns 503, not 401, when the session store cannot be reached', async () => {
+    setupPassingMocks();
+    mockAuthenticateRequest.mockRejectedValue(new SessionStoreUnavailableError(new Error('ServerBusy')));
+
+    const handler: PolicyHandler = jest.fn<PolicyHandler>().mockResolvedValue({ status: 200 });
+    const res = await withPolicyEnforcement('mail', handler)(makeRequest(), makeContext());
+
+    expect(res.status).toBe(503);
+    expect(res.headers).toMatchObject({ 'Retry-After': '5' });
+    expect((res.jsonBody as { error: string }).error).toBe('Session store unavailable, retry shortly');
+    expect(handler).not.toHaveBeenCalled();
+  });
+});
 
 describe('Service enablement', () => {
   it('1. returns 403 when the service is disabled for the tenant', async () => {

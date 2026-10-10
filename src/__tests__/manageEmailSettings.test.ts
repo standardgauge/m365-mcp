@@ -72,6 +72,7 @@ jest.mock('../services/auditLog.js', () => ({
 
 import { app } from '@azure/functions';
 import '../functions/mail/manageEmailSettings.js';
+import { SessionStoreUnavailableError } from '../services/sessionStoreError.js';
 
 interface HttpRegistration {
   handler: (req: HttpRequest, context: InvocationContext) => Promise<{ status: number; jsonBody?: unknown }>;
@@ -144,6 +145,19 @@ describe('Authentication', () => {
 
     expect(res.status).toBe(401);
     expect((res.jsonBody as { error: string }).error).toContain('Authentication required');
+  });
+
+  it('returns 503, not 401, when the session store cannot be reached', async () => {
+    mockAuthenticateRequest.mockRejectedValue(
+      new SessionStoreUnavailableError(new Error('AuthorizationFailure: storage-account-detail')),
+    );
+
+    const res = await handler(makeGetRequest(), makeContext());
+
+    expect(res.status).toBe(503);
+    expect(res.jsonBody).toEqual({ error: 'Session store unavailable, retry shortly' });
+    expect(mockCheckGlobalAdmin).not.toHaveBeenCalled();
+    expect(mockGetUserEmailSettings).not.toHaveBeenCalled();
   });
 });
 

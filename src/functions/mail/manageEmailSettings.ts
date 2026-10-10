@@ -29,6 +29,7 @@ import { getTenantId } from '../../services/tokenCache.js';
 import { authenticateRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { logAccess } from '../../services/auditLog.js';
+import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from '../../services/sessionStoreError.js';
 
 async function manageEmailSettingsHandler(
   request: HttpRequest,
@@ -106,6 +107,9 @@ async function manageEmailSettingsHandler(
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     context.error('manageEmailSettings error:', message);
+    if (err instanceof SessionStoreUnavailableError) {
+      return { status: 503, headers: { 'Retry-After': String(SESSION_STORE_RETRY_AFTER_S) }, jsonBody: { error: 'Session store unavailable, retry shortly' } };
+    }
     return { status: 500, jsonBody: { error: message } };
   }
 }
