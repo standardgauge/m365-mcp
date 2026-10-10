@@ -449,7 +449,7 @@ az containerapp revision list \
 
   1. Check that the user has authenticated: visit `https://your-mcp-host.example.com/api/auth/login` and complete the OAuth flow.
   2. If authentication fails at the Entra redirect: verify the Entra app registration redirect URI matches `https://your-mcp-host.example.com/api/auth/callback` exactly.
-  3. If the session exists but calls still fail: the session has passed its 30-day absolute lifetime or 7-day idle window (`src/services/tokenCache.ts`), or the MSAL refresh token was revoked in Entra. Either way the user re-authenticates; the extension does this on its own at next start.
+  3. If the session exists but calls still fail: the session has passed its 30-day absolute lifetime (`src/services/tokenCache.ts`), or the MSAL refresh token was revoked or expired in Entra. A session left unused for more than 7 days is not ended by that alone: its next request renews it through the refresh token, and fails only if the refresh token no longer works. Either way the user re-authenticates; the extension does this on its own at next start.
 
 
 
