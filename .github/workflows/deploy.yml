@@ -12,6 +12,11 @@ name: Deploy
 #   CONTAINER_APP_NAME     e.g. m365-mcp
 #   ACR_NAME               e.g. m365mcpacr  (no hyphens)
 #
+# Optional:
+#   EXTENSION_LEGACY_KEYCHAIN_PREFIX
+#                          applied to the app as the setting of the same name
+#                          (see the README). Unset leaves the app's value alone.
+#
 # And these repository SECRETS:
 #   AZURE_CREDENTIALS   service principal JSON with Contributor on the resource
 #                       group and AcrPush on the registry. Used by azure/login
@@ -299,11 +304,18 @@ jobs:
       - name: Update Container App
         env:
           DEPLOY_IMAGE: ${{ steps.meta.outputs.image }}
+          LEGACY_KEYCHAIN_PREFIX: ${{ vars.EXTENSION_LEGACY_KEYCHAIN_PREFIX }}
         run: |
+          set -euo pipefail
+          extra=()
+          if [ -n "${LEGACY_KEYCHAIN_PREFIX}" ]; then
+            extra+=(--set-env-vars "EXTENSION_LEGACY_KEYCHAIN_PREFIX=${LEGACY_KEYCHAIN_PREFIX}")
+          fi
           az containerapp update \
             --name "${CONTAINER_APP_NAME}" \
             --resource-group "${AZURE_RESOURCE_GROUP}" \
-            --image "$DEPLOY_IMAGE"
+            --image "$DEPLOY_IMAGE" \
+            ${extra[@]+"${extra[@]}"}
 
       # Prove the deploy works rather than that az returned 0. Both assertions
       # below have failed silently in production before: a 200 from the SPA

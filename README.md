@@ -255,6 +255,7 @@ Copy `.env.example` to `.env` for local work, or set these as Container App secr
 | `DEFAULT_MAIL_DENY_FOLDERS` | No | Comma-separated mail folder names always denied, matched by display name, case-insensitively |
 | `DEFAULT_SHAREPOINT_DENY_PATHS` | No | Comma-separated SharePoint path prefixes always denied |
 | `MCP_INSTANCE_NAME` | No | Display name shown in the admin UI, the `initialize` response, and the generated extension bundle (also derives the bundle's slug and keychain service name). Defaults to `M365 MCP` |
+| `EXTENSION_LEGACY_KEYCHAIN_PREFIX` | No | Keychain service prefix an earlier release of the desktop extension saved its session under, ending in a dot (for example `com.fabrikam.`). Set it only if your instance once shipped the extension under another prefix: an updated extension then finds the saved session there and moves it to the current name instead of asking every user to sign in again. Leave it unset on a new instance |
 | `MCP_SESSION_HMAC_KEY` | Yes | 64-hex-char key that hashes session tokens at rest. Generate with `openssl rand -hex 32`; never reuse across tenants. The container refuses to start if it is missing or malformed |
 | `MCP_DATA_ENCRYPTION_KEY` | Yes | 64-hex-char AES-256-GCM key for access tokens and the MSAL cache at rest. Same generation and startup rules. Rotating it signs every user out; see "Application keys" in `docs/operations-runbook.md` |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | No | Forwards console output and exceptions to the tenant's own Application Insights resource |

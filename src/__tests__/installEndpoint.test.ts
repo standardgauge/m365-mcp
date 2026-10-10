@@ -18,7 +18,9 @@
 
 import { jest } from '@jest/globals';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import * as vm from 'vm';
 import type { HttpRequest, InvocationContext } from '@azure/functions';
 import * as zlib from 'zlib';
 import { randomBytes } from 'crypto';
@@ -257,6 +259,154 @@ describe('GET /api/extension-update', () => {
     // never as a command-line argument that would leak via the process list.
     expect(serverJs).toContain('input: token');
     expect(serverJs).toContain('[Console]::In.ReadToEnd()');
+  });
+});
+
+// ── Keychain service fallback in the generated extension ───────────────────
+//
+// Runs the generated server/index.js token functions against a fake keychain
+// (security / secret-tool stubbed through child_process), so the fallback is
+// tested by behaviour rather than by the strings it contains.
+
+type FakeStore = Map<string, string>;
+
+interface TokenFns {
+  loadToken: () => string | null;
+  saveToken: (token: string) => void;
+  deleteToken: () => void;
+  KEYCHAIN_SERVICE: string;
+  LEGACY_KEYCHAIN_SERVICE: string;
+}
+
+async function renderedServerJs(legacyPrefix?: string): Promise<string> {
+  if (legacyPrefix === undefined) delete process.env.EXTENSION_LEGACY_KEYCHAIN_PREFIX;
+  else process.env.EXTENSION_LEGACY_KEYCHAIN_PREFIX = legacyPrefix;
+  try {
+    const res = await extensionUpdate(makeRequest(), makeContext());
+    return (res.jsonBody as { files: Record<string, string> }).files['server/index.js'];
+  } finally {
+    delete process.env.EXTENSION_LEGACY_KEYCHAIN_PREFIX;
+  }
+}
+
+function loadTokenFns(serverJs: string, platform: string, store: FakeStore, stderr: string[]): TokenFns {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ext-home-'));
+  const flag = (args: string[], name: string) => args[args.indexOf(name) + 1];
+  const execFileSync = (cmd: string, args: string[], opts: { input?: string } = {}) => {
+    if (cmd === 'security') {
+      const service = flag(args, '-s');
+      if (args[0] === 'find-generic-password') {
+        if (!store.has(service)) throw new Error('not found');
+        return store.get(service) + '\n';
+      }
+      if (args[0] === 'add-generic-password') { store.set(service, flag(args, '-w')); return ''; }
+      if (args[0] === 'delete-generic-password') {
+        if (!store.delete(service)) throw new Error('not found');
+        return '';
+      }
+    }
+    if (cmd === 'secret-tool') {
+      const service = flag(args, 'service');
+      if (args[0] === 'lookup') {
+        if (!store.has(service)) throw new Error('not found');
+        return store.get(service) + '\n';
+      }
+      if (args[0] === 'store') { store.set(service, opts.input ?? ''); return ''; }
+      if (args[0] === 'clear') { store.delete(service); return ''; }
+    }
+    throw new Error(`unexpected command ${cmd} ${args.join(' ')}`);
+  };
+  const modules: Record<string, unknown> = {
+    child_process: { execFileSync },
+    fs,
+    path,
+    os: { ...os, homedir: () => home },
+    https: {}, http: {}, crypto: {}, readline: {},
+  };
+  // Drop the trailing main() call so loading the file runs nothing.
+  const body = serverJs.slice(serverJs.indexOf('\n'), serverJs.lastIndexOf('\nmain()'));
+  const sandbox = {
+    require: (name: string) => modules[name],
+    process: { platform, env: {}, stderr: { write: (line: string) => { stderr.push(line); } } },
+    console,
+    setTimeout,
+    exports: {} as TokenFns,
+  };
+  vm.runInNewContext(
+    body + '\nexports.loadToken = loadToken; exports.saveToken = saveToken; exports.deleteToken = deleteToken;' +
+      '\nexports.KEYCHAIN_SERVICE = KEYCHAIN_SERVICE; exports.LEGACY_KEYCHAIN_SERVICE = LEGACY_KEYCHAIN_SERVICE;',
+    sandbox,
+  );
+  return sandbox.exports;
+}
+
+describe('generated extension: legacy keychain service fallback', () => {
+  const PREFIX = 'com.fabrikam.';
+
+  it('embeds no legacy service when EXTENSION_LEGACY_KEYCHAIN_PREFIX is unset', async () => {
+    const fns = loadTokenFns(await renderedServerJs(), 'darwin', new Map(), []);
+    expect(fns.LEGACY_KEYCHAIN_SERVICE).toBe('');
+    expect(fns.loadToken()).toBeNull();
+  });
+
+  it('carries the legacy service inside the signed payload 2.11.0+ clients apply', async () => {
+    process.env.EXTENSION_LEGACY_KEYCHAIN_PREFIX = PREFIX;
+    try {
+      const res = await extensionUpdate(makeRequest(), makeContext());
+      const body = res.jsonBody as { files: Record<string, string>; signed: { payload: string } };
+      const signedFiles = (JSON.parse(body.signed.payload) as { files: Record<string, string> }).files;
+      expect(signedFiles['server/index.js']).toBe(body.files['server/index.js']);
+      expect(signedFiles['server/index.js']).toContain(`const LEGACY_KEYCHAIN_SERVICE = "${PREFIX}`);
+    } finally {
+      delete process.env.EXTENSION_LEGACY_KEYCHAIN_PREFIX;
+    }
+  });
+
+  it('ignores a prefix outside the reverse-DNS charset', async () => {
+    const serverJs = await renderedServerJs("x'; process.exit(1); '");
+    expect(serverJs).toContain('const LEGACY_KEYCHAIN_SERVICE = "";');
+  });
+
+  it.each(['darwin', 'linux'])('%s: prefers the current service when both exist', async (platform) => {
+    const serverJs = await renderedServerJs(PREFIX);
+    const store: FakeStore = new Map();
+    const stderr: string[] = [];
+    const fns = loadTokenFns(serverJs, platform, store, stderr);
+    expect(fns.LEGACY_KEYCHAIN_SERVICE).toBe(PREFIX + fns.KEYCHAIN_SERVICE.split('.').pop());
+    store.set(fns.KEYCHAIN_SERVICE, 'current-token');
+    store.set(fns.LEGACY_KEYCHAIN_SERVICE, 'legacy-token');
+    expect(fns.loadToken()).toBe('current-token');
+    expect(stderr).toEqual([]);
+  });
+
+  it.each(['darwin', 'linux'])('%s: moves a legacy-only session to the current service', async (platform) => {
+    const store: FakeStore = new Map();
+    const stderr: string[] = [];
+    const fns = loadTokenFns(await renderedServerJs(PREFIX), platform, store, stderr);
+    store.set(fns.LEGACY_KEYCHAIN_SERVICE, 'legacy-token');
+
+    expect(fns.loadToken()).toBe('legacy-token');
+    expect(store.get(fns.KEYCHAIN_SERVICE)).toBe('legacy-token');
+    // The old entry stays so an older version still finds it.
+    expect(store.get(fns.LEGACY_KEYCHAIN_SERVICE)).toBe('legacy-token');
+    expect(stderr.join('')).toContain('Moved the saved session');
+    expect(stderr.join('')).not.toContain('legacy-token');
+  });
+
+  it('returns null with nothing under either service', async () => {
+    const fns = loadTokenFns(await renderedServerJs(PREFIX), 'darwin', new Map(), []);
+    expect(fns.loadToken()).toBeNull();
+  });
+
+  it.each(['darwin', 'linux'])('%s: deleteToken removes both entries', async (platform) => {
+    const store: FakeStore = new Map();
+    const fns = loadTokenFns(await renderedServerJs(PREFIX), platform, store, []);
+    store.set(fns.KEYCHAIN_SERVICE, 'dead-token');
+    store.set(fns.LEGACY_KEYCHAIN_SERVICE, 'dead-token');
+    fns.deleteToken();
+    expect(store.size).toBe(0);
+    // A dead session is not resurrected from the old name on the next launch.
+    expect(fns.loadToken()).toBeNull();
   });
 });
 
