@@ -710,6 +710,36 @@ the second variable. If you would rather not wait,
 skip to step 3 directly and accept that every user re-authenticates once, or run
 `infra/scripts/purge-credentials.sh` for the same effect.
 
+### MSAL token cache: one row per account
+
+`mcpMsalCache` holds one row per signed-in account: partition `account`, row
+key the account's MSAL home account id (`<object id>.<tenant id>`, the same value
+as `homeAccountId` on that user's `mcpSessions` rows). Each row is that
+account's refresh token cache as an AES-256-GCM envelope bound to the row.
+Writes are conditional on the row's ETag, so two replicas refreshing the same
+user cannot silently overwrite each other.
+
+Releases before this kept every account in one row (partition `cache`, row
+`msal-token-cache`). The server splits that row into per-account rows and
+deletes it the first time any replica reads the cache after the upgrade; nobody
+has to sign in again. During a rolling deploy a replica still on the old release
+can write the shared row back. It is split again the next time a replica
+starts, and an account that already has its own row keeps it. If the shared row
+cannot be decrypted (a rotated `MCP_DATA_ENCRYPTION_KEY`), it is left in place
+and logged; delete it, or run `infra/scripts/purge-credentials.sh`.
+
+To sign one user out of Graph access everywhere, delete their row:
+
+```
+az storage entity delete --account-name <storage account> --table-name mcpMsalCache \
+  --partition-key account --row-key '<object id>.<tenant id>'
+```
+
+Every replica sees the row gone on that user's next token refresh (within the
+hour, as access tokens expire) and the user signs in again. This removes the
+server's copy only; revoke the user's sessions in Entra as well if the refresh
+token itself may have leaked.
+
 ### AZURE_CREDENTIALS (deploy service principal)
 
 ```

@@ -11,6 +11,10 @@
  * and the token endpoint for the authorization_code, device_code and
  * refresh_token grants. Any other URL throws, so a request the test did not
  * anticipate fails the test rather than being answered with something vague.
+ *
+ * Tokens go to the fake user unless the authorization code names another
+ * (`fakeAuthCode(oid)`); a refresh token is answered for the user it was
+ * issued to, so tests with many users see each refresh act for its own user.
  */
 
 import { createHash } from 'crypto';
@@ -22,6 +26,16 @@ export const FAKE_HOME_ACCOUNT_ID = `${FAKE_USER_OID}.${FAKE_TENANT_ID}`;
 export const FAKE_UPN = 'adele.vance@fabrikam.com';
 
 const HOST = 'https://login.microsoftonline.com';
+
+/** A distinct user object id for the n-th extra user in a test. */
+export function fakeUserOid(n: number): string {
+  return `00000000-0000-4000-8000-${n.toString().padStart(12, '0')}`;
+}
+
+/** An authorization code FakeEntra redeems for the user with this object id. */
+export function fakeAuthCode(oid: string): string {
+  return `fake-auth-code:${oid}`;
+}
 
 interface NetworkResponse<T> {
   headers: Record<string, string>;
@@ -43,10 +57,11 @@ function b64url(value: string): string {
   return Buffer.from(value, 'utf8').toString('base64url');
 }
 
-/** An unsigned id token for the fake user. Built at run time, never committed:
- *  a JWT-shaped string in the tree trips secret scanning. `nonce`, when given,
- *  is the claim Entra echoes from the authorize request. */
-export function idToken(nonce?: string): string {
+/** An unsigned id token for the fake user (or `oid`). Built at run time, never
+ *  committed: a JWT-shaped string in the tree trips secret scanning. `nonce`,
+ *  when given, is the claim Entra echoes from the authorize request. */
+export function idToken(oid: string = FAKE_USER_OID, nonce?: string): string {
+  const upn = oid === FAKE_USER_OID ? FAKE_UPN : `user-${oid.slice(-4)}@fabrikam.com`;
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: 'none', typ: 'JWT' }));
   const claims = b64url(
@@ -56,10 +71,10 @@ export function idToken(nonce?: string): string {
       iat: now,
       nbf: now,
       exp: now + 3600,
-      name: 'Adele Vance',
-      oid: FAKE_USER_OID,
-      preferred_username: FAKE_UPN,
-      sub: 'fake-subject',
+      name: oid === FAKE_USER_OID ? 'Adele Vance' : `User ${oid.slice(-4)}`,
+      oid,
+      preferred_username: upn,
+      sub: `fake-subject-${oid}`,
       tid: FAKE_TENANT_ID,
       ver: '2.0',
       ...(nonce === undefined ? {} : { nonce }),
@@ -93,6 +108,8 @@ export class FakeEntra {
   /** The nonce from the authorize request, echoed into the id token issued
    *  for the authorization_code grant. */
   authorizeNonce: string | null = null;
+  /** The user object id each issued refresh token belongs to. */
+  readonly refreshTokenOwners = new Map<string, string>();
 
   async sendGetRequestAsync<T>(url: string, _options?: NetworkRequestOptions): Promise<NetworkResponse<T>> {
     const u = new URL(url);
@@ -170,7 +187,16 @@ export class FakeEntra {
         throw new Error(`FakeEntra: unexpected grant_type ${grant}`);
       }
 
+      let oid = FAKE_USER_OID;
+      const code = form.get('code') ?? '';
+      if (grant === 'authorization_code' && code.startsWith('fake-auth-code:')) {
+        oid = code.slice('fake-auth-code:'.length);
+      } else if (grant === 'refresh_token') {
+        oid = this.refreshTokenOwners.get(form.get('refresh_token') ?? '') ?? FAKE_USER_OID;
+      }
+
       this.issued += 1;
+      this.refreshTokenOwners.set(`fake-refresh-token-${this.issued}`, oid);
       return json({
         token_type: 'Bearer',
         scope: (form.get('scope') ?? '').split(' ').filter((s) => !['openid', 'profile', 'offline_access'].includes(s)).join(' '),
@@ -178,8 +204,8 @@ export class FakeEntra {
         ext_expires_in: this.accessTokenLifetimeSeconds,
         access_token: `fake-access-token-${this.issued}`,
         refresh_token: `fake-refresh-token-${this.issued}`,
-        id_token: idToken(grant === 'authorization_code' ? this.authorizeNonce ?? undefined : undefined),
-        client_info: b64url(JSON.stringify({ uid: FAKE_USER_OID, utid: FAKE_TENANT_ID })),
+        id_token: idToken(oid, grant === 'authorization_code' ? this.authorizeNonce ?? undefined : undefined),
+        client_info: b64url(JSON.stringify({ uid: oid, utid: FAKE_TENANT_ID })),
       }) as NetworkResponse<T>;
     }
 

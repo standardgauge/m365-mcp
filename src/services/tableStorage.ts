@@ -10,6 +10,7 @@ import {
   boundColumnsAad,
   isLegacyIdentityBindingAllowed,
 } from './credentialCrypto.js';
+import { splitMsalCacheByAccount } from './msalCacheSplit.js';
 
 const storageConfigured = isStorageConfigured();
 const INSTALL_NONCES_TABLE = 'mcpInstallNonces';
@@ -699,89 +700,231 @@ export async function resetInstallNoncePurgeStateForTests(): Promise<void> {
 
 // ── MSAL cache persistence ──
 //
-// The MSAL token cache holds refresh tokens for every signed-in user. A
-// stolen refresh token grants perpetual delegated Graph access until an
-// admin revokes it in Entra. This is the highest-value credential we hold,
-// so it's encrypted at rest with AES-256-GCM via the same DEK as access
-// tokens. The serialized MSAL cache blob (JSON) goes through the envelope
-// before being written to Table Storage.
+// The MSAL token cache holds refresh tokens. A stolen refresh token grants
+// delegated Graph access until an admin revokes it in Entra, so this is the
+// highest-value credential we hold. It is encrypted at rest with AES-256-GCM
+// under the same DEK as access tokens.
 //
-// Schema (mcpMsalCache table) after hardening:
-//   PartitionKey = 'cache'
-//   RowKey       = 'msal-token-cache' (single fixed key — there's only one cache)
-//   ciphertext   = AES-256-GCM ciphertext of the MSAL cache JSON (base64)
+// Each account's cache is its own row (threat model section 2, row 2.4):
+//   PartitionKey = 'account'
+//   RowKey       = MSAL home account id (`<object id>.<tenant id>`; plaintext,
+//                  as it already is on mcpSessions rows)
+//   ciphertext   = AES-256-GCM ciphertext of that account's MSAL cache JSON
 //   iv           = 12-byte IV (base64)
 //   authTag      = 16-byte GCM auth tag (base64)
-//   The envelope is bound to this table/partition/row via GCM AAD, so a
-//   session access token envelope cannot be substituted for it. A pre-binding
-//   unbound envelope is read while legacy reads are allowed and rewritten
-//   bound on that read.
+//   The envelope is bound by GCM AAD to its table, partition and row, so one
+//   account's cache copied into another account's row does not decrypt.
 //
-// Pre- rows had a `data` column with the plaintext JSON. The migration
-// script (infra/scripts/purge-credentials.sh) wipes the table to force MSAL
-// to re-issue from a clean state on first request.
+// Every write is conditional on the ETag read before it (or on the row not
+// existing yet), so a replica never overwrites a cache another replica wrote
+// after it read. A losing write raises MsalCacheConflictError and the caller
+// keeps the winner's cache.
+//
+// Before this, every account shared one row ('cache' / 'msal-token-cache'),
+// written with an unconditional replace. splitLegacyMsalCache moves that row's
+// accounts into their own rows once per process and deletes it.
 
-const MSAL_CACHE_KEY = 'msal-token-cache';
-const MSAL_CACHE_AAD = envelopeAad('mcpMsalCache', 'cache', MSAL_CACHE_KEY, 'msalCache');
+const MSAL_PARTITION = 'account';
+const LEGACY_MSAL_PARTITION = 'cache';
+const LEGACY_MSAL_CACHE_KEY = 'msal-token-cache';
+const LEGACY_MSAL_CACHE_AAD = envelopeAad(
+  'mcpMsalCache', LEGACY_MSAL_PARTITION, LEGACY_MSAL_CACHE_KEY, 'msalCache',
+);
 
-export async function saveMsalCache(cacheData: string): Promise<void> {
+// Entra home account ids are two GUIDs joined by a dot. Anything outside this
+// set is refused rather than used as a RowKey.
+const HOME_ACCOUNT_ID_PATTERN = /^[A-Za-z0-9._-]{1,256}$/;
+
+function msalRowKey(homeAccountId: string): string {
+  if (!HOME_ACCOUNT_ID_PATTERN.test(homeAccountId)) {
+    throw new Error('Refusing to use a malformed home account id as an MSAL cache row key');
+  }
+  return homeAccountId;
+}
+
+function msalCacheAad(rowKey: string): string {
+  return envelopeAad('mcpMsalCache', MSAL_PARTITION, rowKey, 'msalCache');
+}
+
+function statusOf(err: unknown): number | undefined {
+  return (err as { statusCode?: number } | null)?.statusCode;
+}
+
+/** Another writer changed (or created) the row since it was read. */
+export class MsalCacheConflictError extends Error {
+  constructor(message = 'MSAL cache row changed since it was read') {
+    super(message);
+    this.name = 'MsalCacheConflictError';
+  }
+}
+
+export interface MsalCachePartition {
+  /** The account's serialized MSAL cache, or null when there is none to use. */
+  data: string | null;
+  /** ETag of the row as read; undefined when the row does not exist. */
+  etag: string | undefined;
+}
+
+/**
+ * Reads one account's MSAL cache. A missing row is `{ data: null, etag:
+ * undefined }`. A row that will not decrypt is logged and returned as
+ * `data: null` with its ETag, so the next sign-in can replace it. Storage
+ * errors other than not-found are thrown.
+ */
+export async function loadMsalCachePartition(homeAccountId: string): Promise<MsalCachePartition> {
   await ensureTables();
-  const envelope = encryptWithDek(cacheData, MSAL_CACHE_AAD);
-  await getMsalCacheTable().upsertEntity({
-    partitionKey: 'cache',
-    rowKey: MSAL_CACHE_KEY,
+  await legacySplitOnce();
+  const rowKey = msalRowKey(homeAccountId);
+  let entity;
+  try {
+    entity = await getMsalCacheTable().getEntity(MSAL_PARTITION, rowKey);
+  } catch (err) {
+    if (statusOf(err) === 404) return { data: null, etag: undefined };
+    throw err;
+  }
+  const ct = entity.ciphertext as string | undefined;
+  const iv = entity.iv as string | undefined;
+  const tag = entity.authTag as string | undefined;
+  if (!ct || !iv || !tag) {
+    console.warn('[tableStorage] MSAL cache row is missing encrypted columns — treating as empty');
+    return { data: null, etag: entity.etag };
+  }
+  try {
+    // These rows were only ever written AAD-bound, so there is no unbound
+    // form to fall back to.
+    return { data: decryptWithDek({ ciphertext: ct, iv, authTag: tag }, msalCacheAad(rowKey)), etag: entity.etag };
+  } catch (err) {
+    console.error(
+      '[tableStorage] MSAL cache row did not decrypt — treating as empty:',
+      err instanceof Error ? err.message : err,
+    );
+    return { data: null, etag: entity.etag };
+  }
+}
+
+/**
+ * Writes one account's MSAL cache, conditional on `etag`: the row must still
+ * carry that ETag, or, when `etag` is undefined, must not exist yet. Returns
+ * the new ETag. Throws MsalCacheConflictError when another writer got there
+ * first.
+ */
+export async function saveMsalCachePartition(
+  homeAccountId: string,
+  cacheData: string,
+  etag: string | undefined,
+): Promise<string | undefined> {
+  await ensureTables();
+  const rowKey = msalRowKey(homeAccountId);
+  const envelope = encryptWithDek(cacheData, msalCacheAad(rowKey));
+  const entity = {
+    partitionKey: MSAL_PARTITION,
+    rowKey,
     ciphertext: envelope.ciphertext,
     iv: envelope.iv,
     authTag: envelope.authTag,
-  }, 'Replace');
+  };
+  try {
+    const res = etag
+      ? await getMsalCacheTable().updateEntity(entity, 'Replace', { etag })
+      : await getMsalCacheTable().createEntity(entity);
+    return res?.etag;
+  } catch (err) {
+    const status = statusOf(err);
+    // 412: the row changed since we read it. 409: it was created since we
+    // found it missing. 404: it was deleted since we read it.
+    if (status === 412 || status === 409 || status === 404) {
+      throw new MsalCacheConflictError();
+    }
+    throw err;
+  }
 }
 
-export async function loadMsalCache(): Promise<string | null> {
+let legacySplit: Promise<void> | null = null;
+
+function legacySplitOnce(): Promise<void> {
+  if (legacySplit) return legacySplit;
+  const run: Promise<void> = splitLegacyMsalCache().then(
+    () => undefined,
+    (err) => {
+      console.error(
+        '[tableStorage] Could not split the shared MSAL cache row:',
+        err instanceof Error ? err.message : err,
+      );
+      // Try again on the next access rather than never.
+      if (legacySplit === run) legacySplit = null;
+    },
+  );
+  legacySplit = run;
+  return run;
+}
+
+/**
+ * Moves every account in the old shared cache row into its own row, then
+ * deletes the shared row. Idempotent, and safe to run on several replicas at
+ * once:
+ *   - an account that already has its own row keeps it (create-only write),
+ *     because that row was written by this code and is newer;
+ *   - the shared row is deleted only if it still carries the ETag read here.
+ *     If a replica still running the previous release wrote to it meanwhile,
+ *     it stays, and the next process to start splits it again.
+ * A shared row that does not decrypt is left in place and logged; it holds
+ * nothing this code can use, and deleting credentials it cannot read is the
+ * operator's call (infra/scripts/purge-credentials.sh).
+ * Returns the number of accounts given a row of their own.
+ */
+export async function splitLegacyMsalCache(): Promise<number> {
   await ensureTables();
+  const table = getMsalCacheTable();
+  let entity;
   try {
-    const entity = await getMsalCacheTable().getEntity('cache', MSAL_CACHE_KEY);
-    const ct = entity.ciphertext as string | undefined;
-    const iv = entity.iv as string | undefined;
-    const tag = entity.authTag as string | undefined;
-    if (!ct || !iv || !tag) {
-      // Pre- plaintext row (or partial row from a botched migration).
-      // Treat as empty so MSAL re-issues from a clean state.
-      console.warn('[tableStorage] MSAL cache row exists but missing encrypted columns — treating as empty');
-      return null;
+    entity = await table.getEntity(LEGACY_MSAL_PARTITION, LEGACY_MSAL_CACHE_KEY);
+  } catch (err) {
+    if (statusOf(err) === 404) return 0;
+    throw err;
+  }
+
+  const ct = entity.ciphertext as string | undefined;
+  const iv = entity.iv as string | undefined;
+  const tag = entity.authTag as string | undefined;
+  let plaintext: string | null = null;
+  if (ct && iv && tag) {
+    try {
+      plaintext = decryptWithDekMigrating({ ciphertext: ct, iv, authTag: tag }, LEGACY_MSAL_CACHE_AAD).plaintext;
+    } catch (err) {
+      console.error(
+        '[tableStorage] Shared MSAL cache row did not decrypt; leaving it in place:',
+        err instanceof Error ? err.message : err,
+      );
+      return 0;
     }
-    const { plaintext, legacy } = decryptWithDekMigrating(
-      { ciphertext: ct, iv, authTag: tag },
-      MSAL_CACHE_AAD,
-    );
-    if (legacy) {
-      // Conditional on the ETag we read, so a newer cache written by another
-      // replica in the meantime is not overwritten with this older blob.
+  }
+
+  let created = 0;
+  if (plaintext) {
+    for (const [homeAccountId, data] of splitMsalCacheByAccount(plaintext)) {
+      if (!HOME_ACCOUNT_ID_PATTERN.test(homeAccountId)) {
+        console.warn('[tableStorage] Skipping an MSAL account with a malformed home account id');
+        continue;
+      }
       try {
-        const envelope = encryptWithDek(plaintext, MSAL_CACHE_AAD);
-        await getMsalCacheTable().updateEntity(
-          {
-            partitionKey: 'cache',
-            rowKey: MSAL_CACHE_KEY,
-            ciphertext: envelope.ciphertext,
-            iv: envelope.iv,
-            authTag: envelope.authTag,
-          },
-          'Merge',
-          { etag: entity.etag },
-        );
+        await saveMsalCachePartition(homeAccountId, data, undefined);
+        created++;
       } catch (err) {
-        console.warn(
-          '[tableStorage] Could not rebind legacy MSAL cache envelope:',
-          err instanceof Error ? err.message : err,
-        );
+        if (!(err instanceof MsalCacheConflictError)) throw err;
       }
     }
-    return plaintext;
-  } catch (err) {
-    console.error(
-      '[tableStorage] Failed to load MSAL cache:',
-      err instanceof Error ? err.message : err
-    );
-    return null;
   }
+
+  try {
+    await table.deleteEntity(LEGACY_MSAL_PARTITION, LEGACY_MSAL_CACHE_KEY, { etag: entity.etag });
+  } catch (err) {
+    if (statusOf(err) !== 404 && statusOf(err) !== 412) throw err;
+  }
+  console.log(`[tableStorage] Split the shared MSAL cache row into ${created} account row(s)`);
+  return created;
+}
+
+/** Test hook: forget that the legacy split already ran in this process. */
+export function resetLegacyMsalSplitForTests(): void {
+  legacySplit = null;
 }
