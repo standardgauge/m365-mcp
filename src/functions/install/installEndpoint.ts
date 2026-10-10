@@ -301,13 +301,8 @@ const POLL_INTERVAL = 2000;
 // UPDATE_PUBLIC_KEY, checks every path stays inside the extension directory,
 // and only then overwrites files in place. Anything that fails a check is
 // refused and the current version keeps running. Next Claude Desktop restart
-<<<<<<< HEAD
 // picks up the new code. Runs alongside the bridge, never ahead of it, and
 // each request is bounded.
-=======
-// picks up the new code. Bounded by timeouts so a stalled server never blocks
-// startup.
->>>>>>> origin/main
 
 ${renderUpdateModule()}
 const { isNewerVersion } = extensionUpdate;
