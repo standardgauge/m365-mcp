@@ -282,8 +282,8 @@ policy tables, and `auditLog` ([`infra/main.bicep`](../infra/main.bicep),
 |---|---|---|---|---|
 | 6.1 | I | Storage copy (backup, leaked SAS) yields credentials. | Envelopes and HMAC, section 2, including the install-handoff token in `mcpInstallNonces` (4.2). Shared-key access off, so a leaked account key or key-signed SAS is refused. HTTPS only, TLS 1.2 minimum, no public blob access. | None. |
 | 6.2 | E | Azure operator reads everything. | The DEK, HMAC key and client secret are in an RBAC-mode Key Vault with purge protection; the Container App holds references, so reading its secrets yields URIs, not values. Reading a value directly takes a data-plane role on the vault, which Contributor does not include and only Owner or User Access Administrator can grant, and every read is logged to the instance's Log Analytics workspace. Storage takes an Entra token, so there is no storage key in the app or in deployment history. | Residual, not closed: Contributor on the resource group still controls the runtime. It can exec into a replica or roll a revision running its own image and read the resolved keys from the environment, and it can change the vault's and the storage account's settings, including turning shared-key access back on. Those are deliberate, logged control-plane writes rather than a passive read, so the Activity Log is the record; who holds Contributor remains the control that matters. Both the account and the vault are reachable from public networks, because the Consumption profile has no VNet integration; private endpoints are tracked separately. |
-| 6.3 | T | Storage writer widens policy (removes deny entries, empties the allow-list, lifts draft enforcement). | None at rest. Policy rows are plain entities. | Covered by 6.2 (who can write) and **G8** (no record when policy changes through the API). |
-| 6.4 | T, R | Storage writer edits or deletes audit rows. | None. The audit table is writable by the app's runtime identity and by anyone holding a data role on the account. | **G8**, and audit export to an append-only store is tracked separately. |
+| 6.3 | T | Storage writer widens policy (removes deny entries, empties the allow-list, lifts draft enforcement). | None at rest. Policy rows are plain entities. | Covered by 6.2 (who can write). A change made through the admin API is audited with its before and after values (7.5); a direct storage write is not. |
+| 6.4 | T, R | Storage writer edits or deletes audit rows. | None. The audit table is writable by the app's runtime identity and by anyone holding a data role on the account. | Audit export to an append-only store is tracked separately. |
 | 6.5 | D | Storage unavailable. | A session lookup storage cannot answer throws `SessionStoreUnavailableError` ([`sessionStoreError.ts`](../src/services/sessionStoreError.ts)) instead of reporting an unknown token, and the request gets a 503 with `Retry-After`, never an authenticated result and never a 401 that sends the client to sign in again. Remaining token candidates on the request are not tried after one goes unanswered. Logout answers 503 with the cookies left in place, since it could not end the session. Deny-list checks fail closed. Service, read-only, override and draft-policy reads propagate the error, so the call fails. | Audit writes fail open (6.4, section 8). |
 
 ---
@@ -313,7 +313,7 @@ Operator view: [Admin API sessions](operations-runbook.md#admin-api-sessions).
 | 7.2 | E | Non-admin edits another user's deny list (IDOR). | User deny-list routes allow a different `targetUserId` only for a Global Administrator. | None. |
 | 7.3 | E | The MCP client's token is an admin credential. | `/api/manage/*` authenticates only a console session: the `mcp_session` cookie plus an `mcp_console` cookie bound to it by HMAC, minted only at interactive sign-in, never handed to a client, 30 minutes idle and 8 hours absolute. The token in a Global Administrator's MCP config, keychain or desktop extension is refused as a bearer, as `x-session-token`, and as a forged `mcp_session` cookie. A test walks every `api/manage/` route registration and fails if one authenticates any other way. | The install flow still hands the client the same token the browser holds as `mcp_session`, so a stolen client token plus a stolen `mcp_console` cookie together reach the admin API. The console cookie alone is useless, and it expires within 8 hours. Issuing the browser and the client separate session tokens would close it. **G15** |
 | 7.4 | T | XSS in the admin SPA. | React rendering; CSP with `default-src 'none'`, `script-src 'self'` (no inline script), `frame-ancestors 'none'`, `form-action` and `connect-src` restricted. Runtime config travels as a non-executable `type="application/json"` data block, JSON-escaped for script context and read with `JSON.parse`. The session cookies are HttpOnly, so script that did run could act as the user in the page but not read the credentials. | `style-src` still allows `'unsafe-inline'`, which permits CSS injection but not script. Accepted. |
-| 7.5 | R | Admin changes are not attributable. | Draft-mode policy changes are audited. | Deny-list, services, read-only, allowed-sites, per-user override and mail-config changes are not. **G8** |
+| 7.5 | R | Admin changes are not attributable. | Every policy change through the API writes an audit row naming the admin, the target, and the value before and after: global and per-user deny lists (add, remove, clear), enabled services, read-only services, allowed sites, per-user service overrides, mail config, draft-mode policy, and outbound policy. A caller refused by the Global Administrator check is audited under the operation it attempted. | Before and after are capped at 8,000 characters each; a longer value is cut and marked. |
 | 7.6 | I | Admin reads tenant directory. | `tenant-users` requires Global Administrator and uses the admin's own token. | None. |
 
 ---
@@ -322,13 +322,22 @@ Operator view: [Admin API sessions](operations-runbook.md#admin-api-sessions).
 
 [`auditLog.ts`](../src/services/auditLog.ts) `logAccess` writes one row per
 allowed or denied tool call on both surfaces, partitioned by tenant, newest
-first. A Global Administrator reads or exports it from `/api/manage/audit-log`.
+first, plus one per authentication event and per admin policy change. A Global
+Administrator reads or exports it from `/api/manage/audit-log`.
+
+Each row carries the client address from
+[`clientAddress.ts`](../src/services/clientAddress.ts): the entry the ingress
+appended to `X-Forwarded-For` (the rightmost, or the one
+`RATE_LIMIT_TRUSTED_PROXY_HOPS` names), with any port dropped and an IPv6
+address kept whole. `withSecurity` runs every route's handler in a per-request
+scope holding that address, so rows written deep inside an MCP tool call get it
+without the call site passing it down.
 
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
 | 8.1 | R | A tool call happens without a record. | Every MCP `tools/call` path and every REST route through `withPolicyEnforcement` logs. | Writes are fire-and-forget: a failed write is logged to the console and the call proceeds. Retention and a SIEM path are tracked separately. |
-| 8.2 | R | A security-relevant event that is not a tool call goes unrecorded. | None. | Sign-in, sign-in failure, logout, session refresh, install handoff, admin policy changes and admin-check failures are not audited. **G8** |
-| 8.3 | S, R | Recorded client address is wrong. | REST rows record `x-forwarded-for`. | MCP rows record no address. REST rows record the whole header, whose leftmost entry the client controls. **G8** |
+| 8.2 | R | A security-relevant event that is not a tool call goes unrecorded. | Audited as `auth.*`: sign-in and each way it fails (identity-platform error, state mismatch, missing PKCE verifier or nonce, missing code, foreign tenant, callback error) and device-code sign-in, both under the instance's own tenant with no actor when no user was identified; logout that ended a session; refresh and in-request session renewal, success and failure; both ends of the install handoff (`attach` when install-confirm binds the session after the right code, `confirm` when the user declines it or five wrong codes discard it, `poll` when the installer collects it, and an expired nonce). Admin policy changes and refused admin checks: 7.5. | Anonymous requests that never reach a session are not recorded (a logout with no session, an unknown install verifier, an unauthenticated tool call), because anyone could fill the table with them; the rate limiter and the console log cover those. A device-code sign-in records the address that started the flow, not the device the user signed in on, which the server never sees. |
+| 8.3 | S, R | Recorded client address is wrong. | Every row, REST and MCP, records the ingress-appended forwarded address, never an entry the client wrote, and records nothing when that entry is not an IP address. | Correct only while `RATE_LIMIT_TRUSTED_PROXY_HOPS` matches the proxies actually in front of the app. Set too high, the address is again one the client chose; set too low, every row shows the proxy. |
 | 8.4 | T | Audit rows edited or deleted. | Only a Global Administrator can read them through the API; nothing in the API deletes them. | Anyone with the storage key can. No hash chain or immutable copy. Section 6.4. |
 | 8.5 | I | Audit rows hold tenant content. | Rows carry identifiers and paths, not message or file bodies. | Paths and denial reasons can include folder and file names. Accepted, and stated here so a reviewer does not read "stores no tenant content" as "stores no names". |
 | 8.6 | D | Unbounded growth. | Queries capped at 1,000 rows and a 10,000-row scan for substring filters. | No purge; tracked separately. |
@@ -397,7 +406,6 @@ separately" in the tables and are not repeated here.
 
 | Gap | Severity | Area | Summary |
 |---|---|---|---|
-| G8 | Medium | 7, 8 Audit | Auth events and admin policy changes are not audited; MCP rows have no client address; REST rows trust the leftmost forwarded address. |
 | G10 | Medium | 4 Client update | Extension auto-update is unsigned, writes payload paths without containment, and bakes in an origin from forwarded headers. |
 | G13 | Low | 3 Session | The 7-day idle window renews silently instead of ending the session; sessions with no timestamps skip the 30-day cap; runbook overstates the idle timeout. |
 | G15 | Low | 3, 7 Session | Cookie-authenticated non-admin REST routes have no Origin check (SameSite=Lax alone, so a same-site sibling can post to them); the install flow gives the browser and the MCP client the same session token. |

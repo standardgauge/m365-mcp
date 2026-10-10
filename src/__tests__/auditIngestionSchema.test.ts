@@ -29,6 +29,7 @@ describe('audit ingestion schema', () => {
     {
       tenantId: 't', userId: 'u', userEmail: 'adele@fabrikam.com', deviceLabel: 'd',
       operation: 'o', resource: 'r', result: 'denied', reason: 'x', source: 'mcp', ip: '203.0.113.7',
+      before: '[]', after: '["x"]',
     },
     '2026-01-02T03:04:05.678Z',
     'e',

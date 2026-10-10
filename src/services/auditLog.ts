@@ -1,6 +1,7 @@
 import { TableClient } from '@azure/data-tables';
 import { getTableClient, getTableServiceClient, isStorageConfigured } from './storageClient.js';
 import { sendToLogAnalytics, toLogAnalyticsRecord } from './auditLogAnalytics.js';
+import { currentClientAddress } from './clientAddress.js';
 
 const storageConfigured = isStorageConfigured();
 let auditTable: TableClient | null = null;
@@ -24,12 +25,46 @@ export interface AuditEntry {
   userId: string;
   userEmail: string;
   deviceLabel?: string;
-  operation: string;       // e.g. 'sharepoint.read_file', 'mail.search_mail'
-  resource?: string;       // e.g. siteId/path, messageId
+  operation: string;       // e.g. 'sharepoint.read_file', 'mail.search_mail', 'auth.login'
+  resource?: string;       // e.g. siteId/path, messageId, or the target of an admin change
   result: 'allowed' | 'denied';
   reason?: string;         // denial reason if result === 'denied'
   source: 'http' | 'mcp';
-  ip?: string;
+  ip?: string;             // defaults to the client address of the request being handled
+  before?: string;         // policy state before an admin change (auditSnapshot)
+  after?: string;          // policy state after it
+}
+
+/** Longest before/after value stored. Table Storage caps a string property at 32K characters. */
+export const AUDIT_SNAPSHOT_MAX_CHARS = 8_000;
+
+/**
+ * Serialise a policy value for the before/after columns. Long values are cut
+ * and marked, so a large deny list cannot push the row over the property limit.
+ */
+export function auditSnapshot(value: unknown): string {
+  const json = JSON.stringify(value ?? null);
+  if (json.length <= AUDIT_SNAPSHOT_MAX_CHARS) return json;
+  return `${json.slice(0, AUDIT_SNAPSHOT_MAX_CHARS)}…[truncated ${json.length - AUDIT_SNAPSHOT_MAX_CHARS} chars]`;
+}
+
+/** The actor fields of an audit row, from a signed-in session. */
+export function auditActor(session: { tenantId?: string; userId: string; email: string; deviceLabel?: string }): Pick<AuditEntry, 'tenantId' | 'userId' | 'userEmail' | 'deviceLabel'> {
+  return {
+    tenantId: auditTenantId(session.tenantId),
+    userId: session.userId,
+    userEmail: session.email,
+    deviceLabel: session.deviceLabel,
+  };
+}
+
+/**
+ * Partition for an event that may have no signed-in user yet: a failed
+ * sign-in or an install handoff. Falls back to the instance's own tenant so
+ * the row lands where that tenant's Global Administrator reads the log.
+ */
+export function auditTenantId(tenantId?: string): string {
+  return tenantId || process.env.AZURE_TENANT_ID || 'unknown';
 }
 
 // Year 9999-12-31T23:59:59.999Z in milliseconds — used to compute reverse timestamps.
@@ -55,7 +90,8 @@ function makeReverseRowKey(): string {
  * authoritative record; see auditLogAnalytics.ts). The table RowKey travels to
  * Log Analytics as EventId so the two copies can be joined.
  */
-export function logAccess(entry: AuditEntry): void {
+export function logAccess(input: AuditEntry): void {
+  const entry: AuditEntry = { ...input, ip: input.ip ?? currentClientAddress() };
   const timestamp = new Date().toISOString();
   const rowKey = makeReverseRowKey();
 
@@ -79,6 +115,8 @@ export function logAccess(entry: AuditEntry): void {
       reason: entry.reason ?? null,
       source: entry.source,
       ip: entry.ip ?? null,
+      before: entry.before ?? null,
+      after: entry.after ?? null,
       timestamp,
     }, 'Replace');
   }).catch((err: unknown) => {
@@ -310,6 +348,8 @@ export async function queryAuditLog(
       reason: entity.reason as string | undefined || undefined,
       source: entity.source as 'http' | 'mcp',
       ip: entity.ip as string | undefined || undefined,
+      before: entity.before as string | undefined || undefined,
+      after: entity.after as string | undefined || undefined,
       timestamp: ts,
     });
 

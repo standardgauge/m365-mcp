@@ -1,7 +1,8 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getMailConfig, setMailConfig } from '../../services/userMailConfig.js';
 import { getTenantId } from '../../services/tokenCache.js';
-import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, authorizeAdmin } from '../../services/authMiddleware.js';
+import { auditActor, auditSnapshot, logAccess } from '../../services/auditLog.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 
 /**
@@ -20,7 +21,7 @@ import { withSecurity } from '../../services/securityHeaders.js';
  * reads and writes — no self-service. IR-adjacent roles cannot opt themselves
  * back in; only an admin can change the flag.
  *
- * All flag changes are written to audit log (console → App Insights).
+ * Every flag change is written to the audit log with the value before and after.
  */
 async function manageMailConfig(
   request: HttpRequest,
@@ -32,7 +33,10 @@ async function manageMailConfig(
       return { status: 401, jsonBody: { error: 'Authentication required' } };
     }
 
-    const isAdmin = await checkGlobalAdmin(auth.userId);
+    const isAdmin = await authorizeAdmin(
+      auth,
+      request.method === 'GET' ? 'admin.mail_config.read' : 'policy.mail_config.set',
+    );
     if (!isAdmin) {
       return { status: 403, jsonBody: { error: 'Global Administrator role required' } };
     }
@@ -64,6 +68,7 @@ async function manageMailConfig(
       };
     }
 
+    const before = await getMailConfig(tenantId, body.userId);
     await setMailConfig(
       tenantId,
       body.userId,
@@ -71,6 +76,15 @@ async function manageMailConfig(
       auth.userId,
     );
 
+    logAccess({
+      ...auditActor(auth.session),
+      operation: 'policy.mail_config.set',
+      resource: `user:${body.userId}`,
+      result: 'allowed',
+      source: 'http',
+      before: auditSnapshot({ disable_mail_indexing: before.disable_mail_indexing }),
+      after: auditSnapshot({ disable_mail_indexing: body.disable_mail_indexing }),
+    });
     console.log(
       `[audit] mail-config-set admin=${auth.userId} target=${body.userId} disable_mail_indexing=${body.disable_mail_indexing} ts=${new Date().toISOString()}`,
     );

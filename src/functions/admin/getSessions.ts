@@ -1,6 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { listActiveSessions } from '../../services/tokenCache.js';
-import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, authorizeAdmin } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 
 async function getSessions(
@@ -14,7 +14,7 @@ async function getSessions(
   }
 
   // Require Global Admin role
-  const isAdmin = await checkGlobalAdmin(auth.userId);
+  const isAdmin = await authorizeAdmin(auth, 'admin.sessions.read');
   if (!isAdmin) {
     return { status: 403, jsonBody: { error: 'Global Administrator role required' } };
   }

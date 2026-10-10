@@ -19,6 +19,8 @@ import type { AuthResult } from '../services/authMiddleware.js';
 
 const mockAuthenticateRequest = jest.fn<(req: HttpRequest) => Promise<AuthResult | null>>();
 const mockCheckGlobalAdmin = jest.fn<(userId: string) => Promise<boolean>>();
+const mockAuditAdminRefusal = jest.fn<(operation: string, resource?: string) => void>();
+const mockLogAccess = jest.fn<(entry: Record<string, unknown>) => void>();
 const mockGetTenantId = jest.fn<(userId: string) => Promise<string>>();
 const mockGetUserServiceOverrides = jest.fn<(tenantId: string, userId: string) => Promise<string[]>>();
 const mockSetUserServiceOverrides = jest.fn<(tenantId: string, userId: string, disabled: string[]) => Promise<void>>();
@@ -28,6 +30,18 @@ const mockSetUserServiceOverrides = jest.fn<(tenantId: string, userId: string, d
 jest.mock('../services/authMiddleware.js', () => ({
   authenticateConsoleRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
   checkGlobalAdmin: (userId: unknown) => mockCheckGlobalAdmin(userId as string),
+  auditAdminRefusal: (_auth: unknown, operation: unknown, resource?: unknown) =>
+    mockAuditAdminRefusal(operation as string, resource as string | undefined),
+  authorizeAdmin: async (auth: unknown, operation: unknown, resource?: unknown) => {
+    const isAdmin = await mockCheckGlobalAdmin((auth as AuthResult).userId);
+    if (!isAdmin) mockAuditAdminRefusal(operation as string, resource as string | undefined);
+    return isAdmin;
+  },
+}));
+
+jest.mock('../services/auditLog.js', () => ({
+  ...jest.requireActual<object>('../services/auditLog.js'),
+  logAccess: (entry: unknown) => mockLogAccess(entry as Record<string, unknown>),
 }));
 
 jest.mock('../services/tokenCache.js', () => ({
@@ -209,6 +223,21 @@ describe('POST /api/manage/user-services', () => {
     expect(mockSetUserServiceOverrides).toHaveBeenCalledWith(TENANT, TARGET_USER, ['mail']);
   });
 
+  it('audits the override with the list before and after', async () => {
+    mockGetUserServiceOverrides.mockResolvedValue(['calendar']);
+    await handler(makePostRequest({ userId: TARGET_USER, disabledServices: ['mail'] }), makeContext());
+
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({
+      tenantId: TENANT,
+      userId: ADMIN_USER,
+      operation: 'policy.user_services.set',
+      resource: `user:${TARGET_USER}`,
+      result: 'allowed',
+      before: '["calendar"]',
+      after: '["mail"]',
+    }));
+  });
+
   it('clears overrides when empty array is passed', async () => {
     const res = await handler(
       makePostRequest({ userId: TARGET_USER, disabledServices: [] }),
@@ -264,6 +293,7 @@ describe('POST /api/manage/user-services', () => {
     expect(res.status).toBe(403);
     expect((res.jsonBody as { error: string }).error).toContain('your own');
     expect(mockSetUserServiceOverrides).not.toHaveBeenCalled();
+    expect(mockAuditAdminRefusal).toHaveBeenCalledWith('policy.user_services.set', `user:${TARGET_USER}`);
   });
 
   it('allows non-admin to modify their own overrides (self-service)', async () => {

@@ -18,6 +18,7 @@ import type { AuthResult } from '../services/authMiddleware.js';
 
 const mockAuthenticateRequest = jest.fn<(req: HttpRequest) => Promise<AuthResult | null>>();
 const mockCheckGlobalAdmin = jest.fn<(userId: string) => Promise<boolean>>();
+const mockAuditAdminRefusal = jest.fn<(operation: string, resource?: string) => void>();
 const mockGetValidAccessTokenForSession = jest.fn<(s: unknown) => Promise<string>>();
 const mockListActiveSessions = jest.fn<() => Promise<Array<{ userId: string; email: string; displayName: string; expiresAt: number; sessionCreatedAt: number }>>>();
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -37,6 +38,13 @@ const fakeGraphChain = {
 jest.mock('../services/authMiddleware.js', () => ({
   authenticateConsoleRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
   checkGlobalAdmin: (userId: unknown) => mockCheckGlobalAdmin(userId as string),
+  auditAdminRefusal: (_auth: unknown, operation: unknown, resource?: unknown) =>
+    mockAuditAdminRefusal(operation as string, resource as string | undefined),
+  authorizeAdmin: async (auth: unknown, operation: unknown, resource?: unknown) => {
+    const isAdmin = await mockCheckGlobalAdmin((auth as AuthResult).userId);
+    if (!isAdmin) mockAuditAdminRefusal(operation as string, resource as string | undefined);
+    return isAdmin;
+  },
 }));
 
 jest.mock('../services/tokenCache.js', () => ({

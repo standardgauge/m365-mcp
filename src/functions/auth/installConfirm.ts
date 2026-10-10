@@ -15,6 +15,7 @@ import {
 } from '../../services/installConfirm.js';
 import { withRateLimit } from '../../services/rateLimit.js';
 import { withSecurity } from '../../services/securityHeaders.js';
+import { auditActor, logAccess } from '../../services/auditLog.js';
 
 const NONCE_TTL_MS = 5 * 60 * 1000;
 const HANDOFF_ID_FORMAT = /^[a-f0-9]{64}$/;
@@ -68,6 +69,7 @@ async function installConfirm(
   if (form.get('action') === 'cancel') {
     await deleteInstallHandoff(handoffId);
     context.log(`install handoff declined by the signed-in user (userId=${stored.record.userId})`);
+    auditHandoff(stored, 'confirm', 'declined by the signed-in user');
     return page(
       200,
       messagePage(
@@ -88,6 +90,7 @@ async function installConfirm(
     const remaining = await recordInstallHandoffFailure(handoffId, stored);
     if (remaining === 0) {
       context.warn(`install handoff discarded after repeated wrong codes (userId=${stored.record.userId})`);
+      auditHandoff(stored, 'confirm', 'discarded after repeated wrong confirmation codes');
       return page(
         400,
         messagePage('Too many attempts', 'That code did not match and the request has been discarded. Run the installer again.'),
@@ -110,8 +113,10 @@ async function installConfirm(
     email: stored.record.email,
     displayName: stored.record.displayName,
     deviceLabel: stored.record.deviceLabel,
+    tenantId: stored.record.tenantId,
     expiresAt: Date.now() + NONCE_TTL_MS,
   });
+  auditHandoff(stored, 'attach', attached ? undefined : 'session could not be attached to the install nonce');
   if (!attached) {
     context.error(`install handoff confirmed but could not be stored (userId=${stored.record.userId})`);
     return page(
@@ -126,6 +131,21 @@ async function installConfirm(
     messagePage('Connected', 'Go back to the installer; it will finish on its own. You can close this tab.'),
     clearHandoffCookie()
   );
+}
+
+/**
+ * Audit row for a confirmation step. No reason means the session was attached;
+ * a reason records why the handoff ended without one.
+ */
+function auditHandoff(stored: StoredInstallHandoff, resource: 'attach' | 'confirm', reason?: string): void {
+  logAccess({
+    ...auditActor(stored.record),
+    operation: 'auth.install_handoff',
+    resource,
+    result: reason ? 'denied' : 'allowed',
+    ...(reason ? { reason } : {}),
+    source: 'http',
+  });
 }
 
 function readCookie(header: string, name: string): string | null {

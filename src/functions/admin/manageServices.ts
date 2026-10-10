@@ -1,7 +1,8 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getEnabledServices, setEnabledServices, getReadOnlyServices, setReadOnlyServices } from '../../services/serviceSettings.js';
 import { getTenantId } from '../../services/tokenCache.js';
-import { authenticateConsoleRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateConsoleRequest, authorizeAdmin } from '../../services/authMiddleware.js';
+import { auditActor, auditSnapshot, logAccess } from '../../services/auditLog.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 
 async function manageServices(
@@ -25,7 +26,7 @@ async function manageServices(
     }
 
     // POST requires Global Admin
-    const isAdmin = await checkGlobalAdmin(userId);
+    const isAdmin = await authorizeAdmin(auth, 'policy.services.set', 'tenant');
     if (!isAdmin) {
       return { status: 403, jsonBody: { error: 'Global Administrator role required' } };
     }
@@ -40,13 +41,33 @@ async function manageServices(
       if (!Array.isArray(body.enabledServices)) {
         return { status: 400, jsonBody: { error: 'enabledServices must be an array' } };
       }
+      const before = await getEnabledServices(tenantId);
       await setEnabledServices(tenantId, body.enabledServices);
+      logAccess({
+        ...auditActor(auth.session),
+        operation: 'policy.services.set',
+        resource: 'tenant',
+        result: 'allowed',
+        source: 'http',
+        before: auditSnapshot(before),
+        after: auditSnapshot(body.enabledServices),
+      });
     }
     if (body.readOnlyServices !== undefined) {
       if (!Array.isArray(body.readOnlyServices)) {
         return { status: 400, jsonBody: { error: 'readOnlyServices must be an array' } };
       }
+      const before = await getReadOnlyServices(tenantId);
       await setReadOnlyServices(tenantId, body.readOnlyServices);
+      logAccess({
+        ...auditActor(auth.session),
+        operation: 'policy.read_only.set',
+        resource: 'tenant',
+        result: 'allowed',
+        source: 'http',
+        before: auditSnapshot(before),
+        after: auditSnapshot(body.readOnlyServices),
+      });
     }
     return { status: 200, jsonBody: { ok: true } };
   } catch (err: unknown) {

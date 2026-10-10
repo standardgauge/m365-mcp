@@ -16,6 +16,7 @@ import { isPathDenied, type DenySubject } from './denyList.js';
 import { isMailIndexingDisabled } from './userMailConfig.js';
 import { authenticateRequest, AuthResult } from './authMiddleware.js';
 import { logAccess } from './auditLog.js';
+import { auditClientAddress } from './clientAddress.js';
 import { ValidationError } from './opaqueId.js';
 import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from './sessionStoreError.js';
 
@@ -242,7 +243,7 @@ export function withPolicyEnforcement(
           result: 'denied',
           reason: serviceViolation.error,
           source: 'http',
-          ip: req.headers.get('x-forwarded-for') ?? undefined,
+          ip: auditClientAddress(req),
         });
         return { status: serviceViolation.status, jsonBody: { error: serviceViolation.error } };
       }
@@ -261,7 +262,7 @@ export function withPolicyEnforcement(
             result: 'denied',
             reason: mailViolation.error,
             source: 'http',
-            ip: req.headers.get('x-forwarded-for') ?? undefined,
+            ip: auditClientAddress(req),
           });
           console.log(
             `[audit] mail-indexing-blocked user=${auth.userId} op=${req.method} url=${req.url} ts=${new Date().toISOString()}`,
@@ -284,7 +285,7 @@ export function withPolicyEnforcement(
             result: 'denied',
             reason: readOnlyViolation.error,
             source: 'http',
-            ip: req.headers.get('x-forwarded-for') ?? undefined,
+            ip: auditClientAddress(req),
           });
           return { status: readOnlyViolation.status, jsonBody: { error: readOnlyViolation.error } };
         }
@@ -306,7 +307,7 @@ export function withPolicyEnforcement(
               result: 'denied',
               reason: siteViolation.error,
               source: 'http',
-              ip: req.headers.get('x-forwarded-for') ?? undefined,
+              ip: auditClientAddress(req),
             });
             return { status: siteViolation.status, jsonBody: { error: siteViolation.error } };
           }
@@ -330,7 +331,7 @@ export function withPolicyEnforcement(
                 result: 'denied',
                 reason: denyViolation.error,
                 source: 'http',
-                ip: req.headers.get('x-forwarded-for') ?? undefined,
+                ip: auditClientAddress(req),
               });
               return { status: denyViolation.status, jsonBody: { error: denyViolation.error } };
             }
@@ -352,7 +353,7 @@ export function withPolicyEnforcement(
         resource,
         result: 'allowed',
         source: 'http',
-        ip: req.headers.get('x-forwarded-for') ?? undefined,
+        ip: auditClientAddress(req),
       });
       return await handler(req, context, auth);
     } catch (err: unknown) {

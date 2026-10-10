@@ -26,9 +26,9 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/fu
 import { getUserEmailSettings, setUserEmailSettings } from '../../services/userEmailSettings.js';
 import type { EmailOutputMode } from '../../services/userEmailSettings.js';
 import { getTenantId } from '../../services/tokenCache.js';
-import { authenticateRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
+import { authenticateRequest, auditAdminRefusal, checkGlobalAdmin } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
-import { logAccess } from '../../services/auditLog.js';
+import { auditSnapshot, logAccess } from '../../services/auditLog.js';
 import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from '../../services/sessionStoreError.js';
 
 async function manageEmailSettingsHandler(
@@ -67,6 +67,7 @@ async function manageEmailSettingsHandler(
     const targetUserId = body.userId ?? auth.userId;
 
     if (!isAdmin && targetUserId !== auth.userId) {
+      auditAdminRefusal(auth, 'set_email_output_mode', targetUserId);
       return { status: 403, jsonBody: { error: 'You can only modify your own email settings' } };
     }
 
@@ -98,6 +99,18 @@ async function manageEmailSettingsHandler(
 
     await setUserEmailSettings(tenantId, targetUserId, {
       emailOutputMode: body.emailOutputMode as EmailOutputMode,
+    });
+    logAccess({
+      tenantId,
+      userId: auth.userId,
+      userEmail: auth.session.email,
+      deviceLabel: auth.session.deviceLabel,
+      operation: 'set_email_output_mode',
+      resource: targetUserId,
+      result: 'allowed',
+      source: 'http',
+      before: auditSnapshot({ emailOutputMode: current.preferredEmailOutputMode }),
+      after: auditSnapshot({ emailOutputMode: body.emailOutputMode }),
     });
 
     return {

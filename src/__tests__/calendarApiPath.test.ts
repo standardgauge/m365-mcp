@@ -58,11 +58,14 @@ const mockCreateGraphClient = jest.fn(() => ({
 
 // ── Wire mocks ───────────────────────────────────────────────────────────────
 
-// The outbound policy is covered in outboundPolicy.test.ts; here it allows everything.
+// The outbound policy is covered in outboundPolicy.test.ts; here it allows
+// everything unless a test makes it refuse.
+const mockEnforceOutboundPolicy = jest.fn<() => Promise<void>>();
+const mockEnforceEventUpdatePolicy = jest.fn<() => Promise<void>>();
 jest.mock('../services/outboundPolicy.js', () => ({
   ...jest.requireActual<typeof import('../services/outboundPolicy.js')>('../services/outboundPolicy.js'),
-  enforceOutboundPolicy: () => Promise.resolve(),
-  enforceEventUpdatePolicy: () => Promise.resolve(),
+  enforceOutboundPolicy: () => mockEnforceOutboundPolicy(),
+  enforceEventUpdatePolicy: () => mockEnforceEventUpdatePolicy(),
 }));
 
 jest.mock('../services/authMiddleware.js', () => ({
@@ -123,6 +126,8 @@ jest.mock('@azure/functions', () => ({
 // ── Import handlers (triggers app.http registrations) ─────────────────────────
 
 import { app } from '@azure/functions';
+import { logAccess } from '../services/auditLog.js';
+import { OutboundPolicyError } from '../services/outboundPolicy.js';
 import '../functions/calendar/listEvents.js';
 import '../functions/calendar/getEvent.js';
 import '../functions/calendar/createEvent.js';
@@ -167,12 +172,17 @@ const FAKE_AUTH: AuthResult = {
 
 const ctx = { error: jest.fn() } as unknown as InvocationContext;
 
-function makeReq(opts: { params?: Record<string, string>; query?: Record<string, string>; body?: unknown }): HttpRequest {
+function makeReq(opts: {
+  params?: Record<string, string>;
+  query?: Record<string, string>;
+  body?: unknown;
+  headers?: Record<string, string>;
+}): HttpRequest {
   return {
     json: async () => opts.body ?? {},
     params: opts.params ?? {},
     query: { get: (k: string) => (opts.query && k in opts.query ? opts.query[k] : null) },
-    headers: new Map<string, string>(),
+    headers: new Map<string, string>(Object.entries(opts.headers ?? {})),
   } as unknown as HttpRequest;
 }
 
@@ -191,6 +201,8 @@ beforeEach(() => {
   mockGraphPost.mockResolvedValue({ id: EVENT_ID, subject: 'New', start: {}, end: {}, webLink: 'http://x' });
   mockGraphPatch.mockResolvedValue({ id: EVENT_ID, subject: 'Test' });
   mockGraphDelete.mockResolvedValue(undefined);
+  mockEnforceOutboundPolicy.mockResolvedValue(undefined);
+  mockEnforceEventUpdatePolicy.mockResolvedValue(undefined);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -324,6 +336,56 @@ describe('updateEvent — Graph API path', () => {
     const res = await handler(makeReq({ params: { eventId: INJECT }, body: { subject: 'x' } }), ctx);
     expect(res.status).toBe(400);
     expect(lastGraphCall.path).toBeNull();
+  });
+});
+
+describe('createEvent / updateEvent — outbound-policy refusal audit row', () => {
+  // A client can prepend its own entries to X-Forwarded-For; only the one the
+  // ingress appended is trustworthy, and that is what the row must record.
+  const spoofed = { 'x-forwarded-for': '198.51.100.66, 203.0.113.9' };
+  const mockLogAccess = logAccess as unknown as jest.Mock;
+  const createEvent = getHandler('createEvent');
+  const updateEvent = getHandler('updateEvent');
+
+  it('createEvent records the trusted client address, not the raw header', async () => {
+    mockEnforceOutboundPolicy.mockRejectedValue(new OutboundPolicyError('external invitations are blocked'));
+    const res = await createEvent(
+      makeReq({ body: { subject: 'Sync', start: '2026-07-01T10:00:00', end: '2026-07-01T11:00:00' }, headers: spoofed }),
+      ctx,
+    );
+    expect(res.status).toBe(403);
+    expect(mockGraphPost).not.toHaveBeenCalled();
+    expect(mockLogAccess).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'calendar.post', result: 'denied', ip: '203.0.113.9' }),
+    );
+  });
+
+  it('updateEvent records the trusted client address, not the raw header', async () => {
+    mockEnforceEventUpdatePolicy.mockRejectedValue(new OutboundPolicyError('external invitations are blocked'));
+    const res = await updateEvent(
+      makeReq({ params: { eventId: EVENT_ID }, body: { subject: 'x' }, headers: spoofed }),
+      ctx,
+    );
+    expect(res.status).toBe(403);
+    expect(mockGraphPatch).not.toHaveBeenCalled();
+    expect(mockLogAccess).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'calendar.patch', result: 'denied', ip: '203.0.113.9' }),
+    );
+  });
+
+  it('records no address when the selected entry is not an IP', async () => {
+    mockEnforceOutboundPolicy.mockRejectedValue(new OutboundPolicyError('external invitations are blocked'));
+    await createEvent(
+      makeReq({
+        body: { subject: 'Sync', start: '2026-07-01T10:00:00', end: '2026-07-01T11:00:00' },
+        headers: { 'x-forwarded-for': '<script>' },
+      }),
+      ctx,
+    );
+    const row = mockLogAccess.mock.calls.map((c) => c[0] as { operation: string; ip?: string })
+      .find((r) => r.operation === 'calendar.post');
+    expect(row).toBeDefined();
+    expect(row?.ip).toBeUndefined();
   });
 });
 

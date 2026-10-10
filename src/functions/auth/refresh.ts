@@ -4,6 +4,7 @@ import { acquireTokenSilent } from '../../services/graphClient.js';
 import { storeSession } from '../../services/tokenCache.js';
 import type { UserSession } from '../../services/tokenCache.js';
 import { withSecurity } from '../../services/securityHeaders.js';
+import { auditActor, logAccess } from '../../services/auditLog.js';
 import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from '../../services/sessionStoreError.js';
 
 /**
@@ -53,6 +54,7 @@ async function refresh(
       };
 
       await storeSession(updated);
+      logAccess({ ...auditActor(session), operation: 'auth.refresh', result: 'allowed', source: 'http' });
       context.log(`[refresh] Session refreshed for user ${session.userId}`);
 
       return {
@@ -62,6 +64,13 @@ async function refresh(
     } catch (msalErr: unknown) {
       const message = msalErr instanceof Error ? msalErr.message : 'Unknown MSAL error';
       context.warn(`[refresh] Silent token acquisition failed for user ${session.userId}: ${message}`);
+      logAccess({
+        ...auditActor(session),
+        operation: 'auth.refresh',
+        result: 'denied',
+        reason: 'silent token acquisition failed',
+        source: 'http',
+      });
 
       return {
         status: 401,

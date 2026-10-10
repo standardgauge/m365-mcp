@@ -47,6 +47,8 @@ var columns = [
   { name: 'Reason', type: 'string' }
   { name: 'Source', type: 'string' }
   { name: 'ClientIp', type: 'string' }
+  { name: 'Before', type: 'string' }
+  { name: 'After', type: 'string' }
 ]
 
 resource workspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = {

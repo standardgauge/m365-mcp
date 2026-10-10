@@ -16,6 +16,8 @@ import type { AuthResult } from '../services/authMiddleware.js';
 
 const mockAuthenticateRequest = jest.fn<(req: HttpRequest) => Promise<AuthResult | null>>();
 const mockCheckGlobalAdmin = jest.fn<(userId: string) => Promise<boolean>>();
+const mockAuditAdminRefusal = jest.fn<(operation: string) => void>();
+const mockLogAccess = jest.fn<(entry: Record<string, unknown>) => void>();
 const mockGetTenantId = jest.fn<(userId: string) => Promise<string>>();
 const mockGetEnabledServices = jest.fn<(t: string) => Promise<string[]>>();
 const mockSetEnabledServices = jest.fn<(t: string, s: string[]) => Promise<void>>();
@@ -25,6 +27,16 @@ const mockSetReadOnlyServices = jest.fn<(t: string, s: string[]) => Promise<void
 jest.mock('../services/authMiddleware.js', () => ({
   authenticateConsoleRequest: (req: unknown) => mockAuthenticateRequest(req as HttpRequest),
   checkGlobalAdmin: (userId: unknown) => mockCheckGlobalAdmin(userId as string),
+  authorizeAdmin: async (auth: unknown, operation: unknown) => {
+    const isAdmin = await mockCheckGlobalAdmin((auth as AuthResult).userId);
+    if (!isAdmin) mockAuditAdminRefusal(operation as string);
+    return isAdmin;
+  },
+}));
+
+jest.mock('../services/auditLog.js', () => ({
+  ...jest.requireActual<object>('../services/auditLog.js'),
+  logAccess: (entry: unknown) => mockLogAccess(entry as Record<string, unknown>),
 }));
 
 jest.mock('../services/tokenCache.js', () => ({
@@ -83,6 +95,23 @@ describe('manageServices — readOnlyServices', () => {
     expect(mockSetEnabledServices).not.toHaveBeenCalled();
   });
 
+  it('POST audits each list it changes with the value before and after', async () => {
+    await handler(req('POST', { enabledServices: ['mail'], readOnlyServices: [] }), ctx);
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({
+      tenantId: TENANT,
+      operation: 'policy.services.set',
+      resource: 'tenant',
+      result: 'allowed',
+      before: '["mail","calendar"]',
+      after: '["mail"]',
+    }));
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({
+      operation: 'policy.read_only.set',
+      before: '["calendar"]',
+      after: '[]',
+    }));
+  });
+
   it('POST can update both lists in one call', async () => {
     await handler(req('POST', { enabledServices: ['mail', 'calendar'], readOnlyServices: [] }), ctx);
     expect(mockSetEnabledServices).toHaveBeenCalledWith(TENANT, ['mail', 'calendar']);
@@ -94,6 +123,8 @@ describe('manageServices — readOnlyServices', () => {
     const res = await handler(req('POST', { readOnlyServices: ['calendar'] }), ctx);
     expect(res.status).toBe(403);
     expect(mockSetReadOnlyServices).not.toHaveBeenCalled();
+    expect(mockAuditAdminRefusal).toHaveBeenCalledWith('policy.services.set');
+    expect(mockLogAccess).not.toHaveBeenCalled();
   });
 
   it('POST with neither field returns 400', async () => {

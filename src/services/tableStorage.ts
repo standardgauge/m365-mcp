@@ -602,6 +602,8 @@ export interface InstallNonceRecord {
   email: string;
   displayName: string;
   deviceLabel?: string;
+  /** Entra tenant of the signed-in user, for the audit row written when the record is consumed. */
+  tenantId?: string;
   /** Unix timestamp in milliseconds when this record expires. */
   expiresAt: number;
 }
@@ -650,6 +652,7 @@ export async function attachSessionToInstallNonce(
         email: record.email,
         displayName: record.displayName,
         deviceLabel: record.deviceLabel ?? null,
+        tenantId: record.tenantId ?? null,
         expiresAt: record.expiresAt,
       },
       'Replace'
@@ -727,6 +730,7 @@ export async function consumeInstallNonce(
     email: entity.email as string,
     displayName: entity.displayName as string,
     deviceLabel: entity.deviceLabel as string | undefined,
+    tenantId: (entity.tenantId as string | null | undefined) ?? undefined,
     expiresAt,
   };
 
@@ -827,6 +831,8 @@ export interface InstallHandoffRecord {
   email: string;
   displayName: string;
   deviceLabel?: string;
+  /** Entra tenant of the signed-in user, carried on to the nonce row for its audit rows. */
+  tenantId?: string;
   /** Wrong codes entered so far. */
   attempts: number;
   /** Unix timestamp in milliseconds when this record expires. */
@@ -853,6 +859,7 @@ export async function createInstallHandoff(
     email: record.email,
     displayName: record.displayName,
     deviceLabel: record.deviceLabel ?? null,
+    tenantId: record.tenantId ?? null,
     attempts: record.attempts,
     expiresAt: record.expiresAt,
   });
@@ -884,6 +891,7 @@ export async function getInstallHandoff(handoffId: string): Promise<StoredInstal
       email: entity.email as string,
       displayName: entity.displayName as string,
       deviceLabel: (entity.deviceLabel as string | null) ?? undefined,
+      tenantId: (entity.tenantId as string | null) ?? undefined,
       attempts: (entity.attempts as number) ?? 0,
       expiresAt,
     },

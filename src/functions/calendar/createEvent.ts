@@ -8,6 +8,7 @@ import { resolveMailboxTimeZone } from '../../services/mailboxTimeZone.js';
 import type { AuthResult } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { logAccess } from '../../services/auditLog.js';
+import { auditClientAddress } from '../../services/clientAddress.js';
 import {
   enforceOutboundPolicy,
   attendeeRecipients,
@@ -130,7 +131,7 @@ function outboundDenied(auth: AuthResult, tenantId: string, request: HttpRequest
     result: 'denied',
     reason: err.message,
     source: 'http',
-    ip: request.headers.get('x-forwarded-for') ?? undefined,
+    ip: auditClientAddress(request),
   });
   return { status: 403, jsonBody: { error: err.message } };
 }

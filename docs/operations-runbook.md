@@ -172,12 +172,12 @@ ContainerAppConsoleLogs_CL
 
 ### Application audit log
 
-Every allowed and denied call on both the REST and MCP surfaces is written to
-two places. The **authoritative record** is the `M365McpAudit_CL` table in the
+Every allowed and denied call on both the REST and MCP surfaces, every
+authentication event and every admin policy change is written to two places. The **authoritative record** is the `M365McpAudit_CL` table in the
 instance's Log Analytics workspace (next section), which is where a security
 team or SIEM should read it. A working copy goes to the `auditLog` table in the
 tenant's storage account: tenant, user, device label, operation, resource,
-result, reason, source, client IP, timestamp. That copy backs the admin screen;
+result, reason, source, client IP, before, after, timestamp. That copy backs the admin screen;
 a Global Administrator reads it in the admin UI (Audit Log), which also exports
 the filtered view as CSV. The same endpoint answers a URL typed into the address
 bar of the browser that is signed in to the admin UI:
@@ -192,6 +192,34 @@ https://your-mcp-host.example.com/api/manage/audit-log?format=csv
 `/api/manage/*` accepts only the admin UI's browser session, never the session
 token an MCP client holds, so `curl` with a bearer token or a copied
 `mcp_session` cookie gets a 401. See [Admin API sessions](#admin-api-sessions).
+
+Events that are not tool calls:
+
+| Operation | Written when | Actor and target |
+|---|---|---|
+| `auth.login` | Browser sign-in completes (`resource` `browser` or `install`), or fails: identity-platform error, state mismatch, missing PKCE verifier or nonce, missing code, foreign tenant (`resource` `tenant:<id>`), callback error | The signed-in user; on failure no user, in the instance's own tenant |
+| `auth.device_login` | A device-code sign-in completes or fails | As above. The address is the one that started the flow |
+| `auth.install_handoff` | The browser enters the installer's code on install-confirm and the session is attached (`resource` `attach`; denied if the callback could not record the pending handoff or the attach failed), the user declines it or it is discarded after five wrong codes (`confirm`, denied), the installer collects it (`poll`), or polls an expired nonce (`poll`, denied) | The signed-in user. Compare the two addresses: `attach` and `confirm` are the browser, `poll` is the machine running the installer |
+| `auth.logout` | A logout ended a session, or failed to | The user whose sessions were deleted |
+| `auth.refresh`, `auth.session_renew` | `/api/auth/refresh`, or a request on a session idle past its TTL, renews it or fails to | The session's user |
+| `policy.deny_list.global.add` / `.remove` | A global deny entry changes | The admin; `resource` is `<type>:<path>` |
+| `policy.deny_list.user.add` / `.remove` / `.clear` | A per-user deny list changes | The caller; `resource` is `user:<id>/<type>:<path>` or `user:<id>` |
+| `policy.services.set`, `policy.read_only.set`, `policy.allowed_sites.set` | Tenant service settings change | The admin; `resource` `tenant` |
+| `policy.user_services.set`, `policy.mail_config.set` | A user's service overrides or mail config change | The caller; `resource` `user:<id>` |
+| `set_email_output_policy`, `set_email_output_mode` | Draft-mode policy, or a user's own output mode, changes | The caller; `resource` `tenant`, `user:<id>` or the user id |
+| `set_outbound_policy` | The outbound policy for calendar invitations, response comments or Teams sends changes | The admin; `resource` `tenant` or `user:<id>`; `reason` lists the channels set |
+| `admin.*.read` | Refusals only: a non-admin asked for the audit log, sessions, tenant users, mail config, draft-mode policy, outbound policy, or another user's deny list or overrides | The caller |
+
+Every policy operation is also written, `denied` with reason `Global
+Administrator role required`, when a caller fails the admin check. `before` and
+`after` hold the value as JSON, capped at 8,000 characters each.
+
+The client IP is the entry the Container Apps ingress appended to
+`X-Forwarded-For`, never one the client sent, with any port removed and IPv6
+addresses kept whole. Behind Front Door or an Application Gateway set
+`RATE_LIMIT_TRUSTED_PROXY_HOPS=2` (see [Rate limiting](#rate-limiting-and-ingress-restriction)),
+or every row records the proxy's address. Rows written before this change may
+hold the whole forwarded header (REST) or nothing (MCP).
 
 #### Audit log retention
 
@@ -271,12 +299,14 @@ workspace or write anywhere else.
 | `UserId` | string | Entra object id of the caller |
 | `UserEmail` | string | Caller's UPN |
 | `DeviceLabel` | string | Device label from the session, when present |
-| `Operation` | string | e.g. `mail.search_mail`, `sharepoint.read_file` |
-| `TargetResource` | string | Message id, site/path, folder, when the operation has one |
+| `Operation` | string | e.g. `mail.search_mail`, `sharepoint.read_file`, `auth.login`, `policy.services.set` |
+| `TargetResource` | string | Message id, site/path, folder, or the target of an admin change, when the operation has one |
 | `Result` | string | `allowed` or `denied` |
 | `Reason` | string | Why a call was denied |
 | `Source` | string | `mcp` or `http` |
-| `ClientIp` | string | Caller IP as seen by the server, when known |
+| `ClientIp` | string | Caller IP as the ingress saw it, when known |
+| `Before` | string | Policy value before an admin change, as JSON |
+| `After` | string | Policy value after it, as JSON |
 
 Retention follows the workspace (90 days in the Bicep). To keep the audit table
 longer than the console logs, set it on the table alone:
@@ -302,7 +332,24 @@ M365McpAudit_CL
 | where TimeGenerated between (datetime(2026-01-01) .. datetime(2026-01-02))
 | project TimeGenerated, Operation, TargetResource, Result, Reason, Source, ClientIp
 | order by TimeGenerated asc
+
+// Policy changes and refused admin checks
+M365McpAudit_CL
+| where Operation startswith "policy." or Operation startswith "admin." or Operation endswith "_email_output_policy"
+| project TimeGenerated, UserEmail, Operation, TargetResource, Result, Before, After, ClientIp
+
+// Failed sign-ins by address
+M365McpAudit_CL
+| where Operation in ("auth.login", "auth.device_login") and Result == "denied"
+| summarize Failures = count(), Reasons = make_set(Reason) by ClientIp
+| order by Failures desc
 ```
+
+**The `Before` and `After` columns need the current Bicep.** An instance whose
+table and data collection rule predate them drops both columns from the Log
+Analytics copy without an error; the storage table and the admin screen still
+have them. Re-apply `infra/audit-ingestion.bicep` as described below to add
+them.
 
 **Pointing Sentinel or another SIEM at it.** The table lives in the client's
 workspace, so the client's tooling owns what happens next:
