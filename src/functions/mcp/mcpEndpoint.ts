@@ -16,6 +16,14 @@ import { getEnabledServices, getAllowedSites, getReadOnlyServices } from '../../
 import { getUserServiceOverrides } from '../../services/userServiceOverrides.js';
 import { getUserEmailSettings, setUserEmailSettings, type EmailOutputMode } from '../../services/userEmailSettings.js';
 import { isMailIndexingDisabled } from '../../services/userMailConfig.js';
+import {
+  enforceOutboundPolicy,
+  enforceEventUpdatePolicy,
+  attendeeRecipients,
+  graphAttendeeRecipients,
+  teamsMemberRecipients,
+  OUTBOUND_POLICY_MARKER,
+} from '../../services/outboundPolicy.js';
 import { logAccess } from '../../services/auditLog.js';
 import { assertOpaqueIds, encodeGraphId } from '../../services/opaqueId.js';
 import { findUnsupportedArgs, unsupportedArgsMessage } from '../../services/toolArgs.js';
@@ -1698,6 +1706,11 @@ const tools: ToolDef[] = [
         event.isOnlineMeeting = true;
         event.onlineMeetingProvider = args.onlineMeetingProvider ?? 'teamsForBusiness';
       }
+      // Outbound policy: attendees get the invitation the moment the event is written.
+      await enforceOutboundPolicy({
+        graph, tenantId: getTenantIdFromSession(session), userId: session.userId,
+        channel: 'calendarInvites', recipients: async () => attendeeRecipients(args.attendees),
+      });
       const apiPath = args.calendarId ? `/me/calendars/${encodeGraphId(args.calendarId, 'calendarId')}/events` : '/me/events';
       const result = await graph.api(apiPath).post(event);
       return {
@@ -1745,6 +1758,8 @@ const tools: ToolDef[] = [
       const apiPath = args.calendarId
         ? `/me/calendars/${encodeGraphId(args.calendarId, 'calendarId')}/events/${encUpdEventId}`
         : `/me/events/${encUpdEventId}`;
+      // Outbound policy: an organizer's edit goes to every attendee as an update.
+      await enforceEventUpdatePolicy(graph, getTenantIdFromSession(session), session.userId, apiPath, patch, args.attendees);
       const result = await graph.api(apiPath).patch(patch);
       return { id: result.id, subject: result.subject, status: 'updated' };
     },
@@ -1864,6 +1879,11 @@ const tools: ToolDef[] = [
           'and a cancellation for the original — real outbound mail. Re-run with force=true to proceed.',
         );
       }
+      // Outbound policy: force=true is the user's consent, not the administrator's.
+      await enforceOutboundPolicy({
+        graph, tenantId, userId, channel: 'calendarInvites',
+        recipients: async () => graphAttendeeRecipients(attendees),
+      });
 
       // Build the copy. Only set fields Graph will accept on create; carry the
       // full location/recurrence objects verbatim so nothing is lossily flattened.
@@ -2011,6 +2031,18 @@ const tools: ToolDef[] = [
         eventId = msg.event.id;
       }
       const sendResponse = args.sendResponse ?? true;
+      // Outbound policy: a comment is agent-written text delivered to the organizer.
+      // A bare accept/tentative/decline carries nothing the agent chose beyond the choice.
+      if (args.comment && sendResponse) {
+        await enforceOutboundPolicy({
+          graph, tenantId, userId: session.userId, channel: 'eventResponses',
+          recipients: async () => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const ev: any = await graph.api(`${base}/events/${encodeGraphId(eventId, 'eventId')}`).select('organizer').get();
+            return [{ address: ev?.organizer?.emailAddress?.address ?? null }];
+          },
+        });
+      }
       const body: Record<string, unknown> = { sendResponse };
       if (args.comment) body.comment = args.comment;
       await graph.api(`${base}/events/${encodeGraphId(eventId, 'eventId')}/${responseChoice.action}`).post(body);
@@ -2515,6 +2547,10 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
       if (await isPathDenied(tenantId, session.userId, 'teams', args.chatId)) throw new Error('Access restricted by deny list');
+      await enforceOutboundPolicy({
+        graph, tenantId, userId: session.userId, channel: 'teamsMessages', alwaysNotifies: true,
+        recipients: () => teamsMemberRecipients(graph, `/chats/${encodeGraphId(args.chatId, 'chatId')}/members`, 'ChatMember.Read'),
+      });
       const body = { body: { contentType: args.contentType === 'html' ? 'html' : 'text', content: args.content ?? '' } };
       const result = await graph.api(`/chats/${args.chatId}/messages`).post(body);
       return { id: result.id, chatId: args.chatId, webUrl: result.webUrl ?? null, status: 'sent' };
@@ -2543,6 +2579,17 @@ const tools: ToolDef[] = [
       // Deny-list check on both the team and the channel (deny list keys on IDs for teams).
       if (await isPathDenied(tenantId, session.userId, 'teams', args.teamId)) throw new Error('Access restricted by deny list');
       if (await isPathDenied(tenantId, session.userId, 'teams', args.channelId)) throw new Error('Access restricted by deny list');
+      // Channel members include guests and, on a shared channel, people from other tenants.
+      // `/allMembers`, not `/members`: a shared channel also reaches the indirect
+      // members of every team it is shared with, and only `/allMembers` lists them.
+      await enforceOutboundPolicy({
+        graph, tenantId, userId: session.userId, channel: 'teamsMessages', alwaysNotifies: true,
+        recipients: () => teamsMemberRecipients(
+          graph,
+          `/teams/${encodeGraphId(args.teamId, 'teamId')}/channels/${encodeGraphId(args.channelId, 'channelId')}/allMembers`,
+          'ChannelMember.Read.All',
+        ),
+      });
       const body = { body: { contentType: args.contentType === 'html' ? 'html' : 'text', content: args.content ?? '' } };
       const result = await graph.api(`/teams/${args.teamId}/channels/${args.channelId}/messages`).post(body);
       return { id: result.id, teamId: args.teamId, channelId: args.channelId, webUrl: result.webUrl ?? null, status: 'sent' };
@@ -2830,7 +2877,8 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
         message.includes('not in the allowed sites') ||
         message.includes('is not enabled') ||
         message.includes('disabled for your account') ||
-        message.includes(ENFORCED_MODE_MARKER);
+        message.includes(ENFORCED_MODE_MARKER) ||
+        message.includes(OUTBOUND_POLICY_MARKER);
       if (auth && isDenied) {
         const errorResource = [
           toolArgs.siteId, toolArgs.driveId, toolArgs.listId, toolArgs.itemId,

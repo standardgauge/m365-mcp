@@ -97,6 +97,13 @@ function makeChain(path: string) {
 const mockCreateGraphClient = jest.fn(() => ({ api: (path: string) => makeChain(path) }));
 
 // telemetry.js patches console at import time — stub it.
+// The outbound policy is covered in outboundPolicy.test.ts; here it allows everything.
+jest.mock('../services/outboundPolicy.js', () => ({
+  ...jest.requireActual<typeof import('../services/outboundPolicy.js')>('../services/outboundPolicy.js'),
+  enforceOutboundPolicy: () => Promise.resolve(),
+  enforceEventUpdatePolicy: () => Promise.resolve(),
+}));
+
 jest.mock('../services/telemetry.js', () => ({}));
 
 jest.mock('../services/authMiddleware.js', () => ({

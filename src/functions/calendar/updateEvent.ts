@@ -7,6 +7,11 @@ import { assertOpaqueId, encodeGraphId } from '../../services/opaqueId.js';
 import { resolveMailboxTimeZone } from '../../services/mailboxTimeZone.js';
 import type { AuthResult } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
+import { logAccess } from '../../services/auditLog.js';
+import {
+  enforceEventUpdatePolicy,
+  OutboundPolicyError,
+} from '../../services/outboundPolicy.js';
 
 // Graph's free/busy status enum for an event (event.showAs). Writable on both
 // POST and PATCH; omitting it leaves the event's current status untouched.
@@ -87,6 +92,14 @@ async function updateEventHandler(
     ? `/me/calendars/${encodeGraphId(calendarId, 'calendarId')}/events/${encEventId}`
     : `/me/events/${encEventId}`;
 
+  // Outbound policy: an organizer's edit goes to every attendee as an update.
+  try {
+    await enforceEventUpdatePolicy(graph, tenantId, userId, apiPath, patch, reqBody.attendees);
+  } catch (err: unknown) {
+    if (err instanceof OutboundPolicyError) return outboundDenied(auth, tenantId, request, err);
+    throw err;
+  }
+
   const result = await graph.api(apiPath).patch(patch);
 
   return {
@@ -99,6 +112,22 @@ async function updateEventHandler(
       status: 'updated',
     },
   };
+}
+
+/** Refuse with 403 and record the refusal, as the policy wrapper does for its own checks. */
+function outboundDenied(auth: AuthResult, tenantId: string, request: HttpRequest, err: OutboundPolicyError): HttpResponseInit {
+  logAccess({
+    tenantId,
+    userId: auth.userId,
+    userEmail: auth.session.email,
+    deviceLabel: auth.session.deviceLabel,
+    operation: 'calendar.patch',
+    result: 'denied',
+    reason: err.message,
+    source: 'http',
+    ip: request.headers.get('x-forwarded-for') ?? undefined,
+  });
+  return { status: 403, jsonBody: { error: err.message } };
 }
 
 app.http('updateEvent', {
