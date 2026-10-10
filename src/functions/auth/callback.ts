@@ -89,6 +89,7 @@ async function callback(
     const oauthNonceMatch = cookieHeader.match(/(?:^|;\s*)oauth_nonce=([^;]+)/);
     if (!verifierMatch || !oauthNonceMatch) {
       context.error('OAuth PKCE verifier or nonce cookie missing');
+      auditSignInFailure('pkce verifier or nonce missing');
       return {
         status: 403,
         jsonBody: { error: 'Sign-in session expired. Please try logging in again.' },

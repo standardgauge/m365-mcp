@@ -118,6 +118,8 @@ const FOREIGN = 'tenant-xyz';
 const USER_ID = 'user-1';
 const STATE = 'state-123';
 const NONCE = 'a'.repeat(64);
+// The cookies /api/auth/login sets beside oauth_state (AC-429).
+const FLOW = `oauth_state=${STATE}; oauth_pkce=verifier; oauth_nonce=n`;
 
 const ctx = { error: jest.fn(), warn: jest.fn(), log: jest.fn() } as unknown as InvocationContext;
 
@@ -177,7 +179,7 @@ describe('sign-in (callback)', () => {
   const ok = { code: 'c', state: STATE };
 
   it('records a browser sign-in against the signed-in user', async () => {
-    const res = await callback(request({ query: ok, cookie: `oauth_state=${STATE}` }), ctx);
+    const res = await callback(request({ query: ok, cookie: FLOW }), ctx);
     expect(res.status).toBe(302);
     expect(rows('auth.login')).toEqual([expect.objectContaining({
       tenantId: TENANT, userId: USER_ID, userEmail: 'adele@fabrikam.com', resource: 'browser', result: 'allowed',
@@ -186,7 +188,7 @@ describe('sign-in (callback)', () => {
   });
 
   it('records an installer sign-in and the handoff it attaches', async () => {
-    await callback(request({ query: ok, cookie: `oauth_state=${STATE}; install_nonce=${NONCE}` }), ctx);
+    await callback(request({ query: ok, cookie: `${FLOW}; install_nonce=${NONCE}` }), ctx);
     expect(rows('auth.login')[0]).toMatchObject({ resource: 'install', result: 'allowed' });
     expect(rows('auth.install_handoff')).toEqual([expect.objectContaining({
       userId: USER_ID, resource: 'attach', result: 'allowed',
@@ -196,7 +198,7 @@ describe('sign-in (callback)', () => {
 
   it('records a handoff that could not attach as denied', async () => {
     mockAttach.mockResolvedValue(false);
-    await callback(request({ query: ok, cookie: `oauth_state=${STATE}; install_nonce=${NONCE}` }), ctx);
+    await callback(request({ query: ok, cookie: `${FLOW}; install_nonce=${NONCE}` }), ctx);
     expect(rows('auth.install_handoff')[0]).toMatchObject({ result: 'denied' });
   });
 
@@ -208,9 +210,18 @@ describe('sign-in (callback)', () => {
     })]);
   });
 
+  it('records a sign-in that lost its PKCE verifier or nonce', async () => {
+    const res = await callback(request({ query: ok, cookie: `oauth_state=${STATE}` }), ctx);
+    expect(res.status).toBe(403);
+    expect(mockAcquireTokenByCode).not.toHaveBeenCalled();
+    expect(rows('auth.login')).toEqual([expect.objectContaining({
+      tenantId: TENANT, userId: '', result: 'denied', reason: 'pkce verifier or nonce missing',
+    })]);
+  });
+
   it('records a foreign-tenant sign-in with that tenant as the target', async () => {
     mockAcquireTokenByCode.mockResolvedValue({ accessToken: 't', homeAccountId: `${USER_ID}.${FOREIGN}` });
-    const res = await callback(request({ query: ok, cookie: `oauth_state=${STATE}` }), ctx);
+    const res = await callback(request({ query: ok, cookie: FLOW }), ctx);
     expect(res.status).toBe(403);
     expect(rows('auth.login')).toEqual([expect.objectContaining({
       tenantId: TENANT, resource: `tenant:${FOREIGN}`, result: 'denied', reason: 'foreign tenant',

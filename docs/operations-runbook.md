@@ -197,7 +197,7 @@ Events that are not tool calls:
 
 | Operation | Written when | Actor and target |
 |---|---|---|
-| `auth.login` | Browser sign-in completes (`resource` `browser` or `install`), or fails: identity-platform error, state mismatch, missing code, foreign tenant (`resource` `tenant:<id>`), callback error | The signed-in user; on failure no user, in the instance's own tenant |
+| `auth.login` | Browser sign-in completes (`resource` `browser` or `install`), or fails: identity-platform error, state mismatch, missing PKCE verifier or nonce, missing code, foreign tenant (`resource` `tenant:<id>`), callback error | The signed-in user; on failure no user, in the instance's own tenant |
 | `auth.device_login` | A device-code sign-in completes or fails | As above. The address is the one that started the flow |
 | `auth.install_handoff` | The callback binds a session to an installer (`resource` `attach`), the installer collects it (`poll`), or polls an expired nonce (`poll`, denied) | The signed-in user. Compare the two addresses: `attach` is the browser, `poll` is the machine running the installer |
 | `auth.logout` | A logout ended a session, or failed to | The user whose sessions were deleted |
