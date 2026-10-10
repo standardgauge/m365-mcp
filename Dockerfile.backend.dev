@@ -10,7 +10,9 @@
 # in .github/dependabot.yml so the two never desync.
 
 # ── Stage 1: build ─────────────────────────────────────────────────────────────
-FROM --platform=linux/amd64 node:20-slim AS builder
+# Same ECR Public mirror and digest as the production Dockerfile, so no image
+# in this repo depends on Docker Hub's anonymous pull limit.
+FROM --platform=linux/amd64 public.ecr.aws/docker/library/node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 WORKDIR /build
 
 COPY package*.json tsconfig.json ./

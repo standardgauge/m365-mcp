@@ -2,7 +2,10 @@
 # Keep this Node major aligned with the azure-functions/node:4-node20 runtime in
 # stage 2. Dependabot major bumps of the node image are ignored (.github/dependabot.yml)
 # so the builder never drifts ahead of the runtime; move both together on an LTS bump.
-FROM node:20-slim AS builder
+# Pulled from the ECR Public mirror of the Docker Official Image, not Docker
+# Hub: CI builds this file anonymously and Docker Hub rate-limits anonymous
+# pulls, which turned main red on a merge burst. Same image, same digest.
+FROM public.ecr.aws/docker/library/node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 WORKDIR /build
 
 COPY package*.json ./
