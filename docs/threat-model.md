@@ -242,6 +242,16 @@ handoff and sends the browser to
 browser's session only once the user has entered that code. The extension also checks the
 instance for a newer version of itself at startup and overwrites its own files.
 
+The desktop extension connects to its MCP client before it signs in, so a
+client's connect timeout cannot kill a sign-in midway. The first tool call that
+needs a session starts the sign-in and answers with an error naming the
+confirmation code. While that sign-in is in flight the extension keeps its
+verifier in a 0600 file in the user's home directory, for at most the login
+route's 10-minute cookie lifetime, so a relaunch adopts it instead of opening
+another. Reading that file yields a session only to someone who can already read
+the user's home directory, and only if the user then finishes that sign-in and
+enters its code: the same reach as the token's 0600 file fallback.
+
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
 | 4.1 | S, E | Someone other than the installer that started the sign-in collects the resulting session. Whoever writes a sign-in link holds its verifier, so a link sent to a user who then signs in would otherwise deliver that user's session to the link's author; with admin consent already granted the user sees an ordinary sign-in. | Verifier/challenge split: the URL carries only the hash, so a party that only sees the URL cannot poll. The callback never attaches a session to the challenge on its own. The browser lands on `install-confirm`, which names the signed-in account and the installer's device label, and attaches the session only after the user types the code the installer printed. Someone who was only sent a link has no installer and so no code; "This wasn't me" discards the request. The handoff is bound to the browser that signed in (HttpOnly cookie, and the attached session must be the one the callback issued to that browser). Five wrong codes discard it. One-time consumption with ETag race guards at both steps. 5-minute window. | Residual: a user persuaded to type a code that someone else supplies, the same social-engineering shape as device-code phishing. The page warns against it, but the device label is whatever the installer sent and is not verified. Accepted. |
