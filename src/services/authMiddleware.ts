@@ -80,7 +80,7 @@ export async function authenticateRequest(request: HttpRequest): Promise<AuthRes
 }
 
 /**
- * Validate one session token: absolute lifetime, inactivity TTL with silent
+ * Validate one session token: absolute lifetime, renewal window with silent
  * refresh, sliding-window touch. 'unknown' means no session has this token, so
  * the caller may try the next candidate; null means the session exists but may
  * not be used. Storage failures propagate as SessionStoreUnavailableError.
@@ -101,7 +101,10 @@ async function authenticateToken(token: string): Promise<AuthResult | null | 'un
   const now = Date.now();
   const elapsed = now - (session.sessionCreatedAt || 0);
 
-  // ── Session TTL expired (inactivity) — must refresh to continue ──
+  // ── Renewal window passed — renew through MSAL to continue ──
+  // Not an idle timeout: an idle session is renewed here, not ended. Only
+  // a failed silent refresh (refresh token revoked or expired) ends it.
+  // The absolute cap above is what bounds a stolen token.
   if (session.sessionCreatedAt && elapsed > SESSION_TTL_MS) {
     try {
       const { accessToken, expiresOn } = await acquireTokenSilent(session.homeAccountId);
@@ -120,7 +123,7 @@ async function authenticateToken(token: string): Promise<AuthResult | null | 'un
         source: 'http',
       });
       console.log(
-        `[auth] Session TTL refresh succeeded for user ${session.userId} (idle ${Math.round(elapsed / 60_000)}m)`
+        `[auth] Session renewal succeeded for user ${session.userId} (unused ${Math.round(elapsed / 60_000)}m)`
       );
       return { userId: refreshed.userId, session: refreshed };
     } catch (err) {
@@ -132,8 +135,8 @@ async function authenticateToken(token: string): Promise<AuthResult | null | 'un
         source: 'http',
       });
       console.error(
-        `[auth] Session TTL refresh FAILED for user ${session.userId} ` +
-        `(idle ${Math.round(elapsed / 60_000)}m):`,
+        `[auth] Session renewal FAILED for user ${session.userId} ` +
+        `(unused ${Math.round(elapsed / 60_000)}m):`,
         err instanceof Error ? err.message : err
       );
       return null; // refresh token truly expired — caller gets 401
@@ -193,9 +196,9 @@ export async function authenticateConsoleRequest(request: HttpRequest): Promise<
 }
 
 /**
- * Authenticate a request but allow inactivity-expired sessions. The session
- * must exist and have a valid token hash, and the inactivity TTL check is
- * skipped so clients can silently renew without requiring a full re-login.
+ * Authenticate a request without the renewal-window check. The session must
+ * exist and have a valid token hash; a session past SESSION_TTL_MS is
+ * accepted so clients can renew it without a full re-login.
  *
  * The absolute session lifetime (SESSION_MAX_LIFETIME_MS) IS enforced here.
  * A session older than that bound returns null regardless of MSAL token
@@ -206,7 +209,7 @@ export async function authenticateConsoleRequest(request: HttpRequest): Promise<
  * The absolute anchor is sessionAbsoluteCreatedAt (immutable, set once at
  * OAuth time). For legacy sessions that predate this field, sessionCreatedAt
  * is used as a best-effort fallback; sessions with neither field set (both
- * zero/absent) bypass the absolute check.
+ * zero/absent) are treated as past the cap and rejected.
  *
  * Throws SessionStoreUnavailableError when storage cannot answer, as
  * authenticateRequest does.
@@ -218,9 +221,10 @@ export async function authenticateRequestAllowExpired(request: HttpRequest): Pro
     if (session) {
       if (isAbsoluteLifetimeExceeded(session)) {
         const anchor = session.sessionAbsoluteCreatedAt || session.sessionCreatedAt || 0;
+        const age = anchor ? `${Math.round((Date.now() - anchor) / 86_400_000)}d old` : 'no anchor';
         console.warn(
           `[auth] Session for user ${session.userId} exceeded absolute lifetime ` +
-          `(${Math.round((Date.now() - anchor) / 86_400_000)}d old) — forcing re-OAuth`
+          `(${age}) — forcing re-OAuth`
         );
         return null;
       }

@@ -209,14 +209,17 @@ the operator sets `MCP_ENVELOPE_REQUIRE_AAD=true` and
 
 The server keeps no MCP-protocol session state. Each JSON-RPC request carries
 the session token, and [`authMiddleware.ts`](../src/services/authMiddleware.ts)
-`authenticateRequest` resolves it. A session has a 7-day idle window and a
-30-day absolute cap ([`tokenCache.ts`](../src/services/tokenCache.ts)). Each
+`authenticateRequest` resolves it. A session has a 30-day absolute cap and a
+7-day renewal window ([`tokenCache.ts`](../src/services/tokenCache.ts)). The
+renewal window is not an idle timeout: a session unused for longer is renewed
+through MSAL silent refresh on its next request, and ends only if that refresh
+fails. Each
 replica keeps an in-memory cache of sessions it has seen, keyed by token hash.
 
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
 | 3.1 | S | Guessing a session token. | 32 random bytes; lookup by HMAC; no client-supplied user ID is trusted. | None. |
-| 3.2 | S | Stolen token used indefinitely. | 30-day absolute cap, anchored on an immutable creation time and checked before any refresh. | Sessions with neither timestamp skip the absolute check. The 7-day "idle" window is not a boundary: on expiry the server silently refreshes and carries on, so only the 30-day cap ends a session that holds a live refresh token. The runbook describes it as an idle timeout. **G13** |
+| 3.2 | S | Stolen token used indefinitely. | 30-day absolute cap, anchored on an immutable creation time and checked before any refresh. A session with neither timestamp has no anchor and is rejected. Entra revocation ends a session at its next token refresh. The 7-day window is documented as renewal, not an idle timeout, so nothing claims a shorter bound than the cap. | A stolen token stays usable for up to 30 days unless the refresh token is revoked in Entra; an idle timeout would not shorten that, because a stolen token in use is never idle. Accepted. |
 | 3.3 | E | Revoked session keeps working. Logout, the credential purge script, or deleting rows by hand. | Logout deletes all of the user's rows and evicts every cached session for the user on the replica that handled it. Other replicas re-check a cached session's row at most every 30 seconds on use and drop it once the row is gone, so a deleted session stops authenticating everywhere within 30 seconds ([`tokenCache.ts`](../src/services/tokenCache.ts) `SESSION_REVALIDATE_MS`). Writes back to an existing session are conditional updates, so a refresh inside that window fails instead of recreating the row, and evicts the session at once. Entra "revoke sessions" kills the refresh token. Key rotation (new revision, new process) clears everything. | While storage is unreachable a replica keeps serving a cached session for up to 5 minutes past its last check, then refuses it with a 503 (`SESSION_REVALIDATE_MAX_STALE_MS`); accepted, so a storage blip does not sign everyone out. An admin action to revoke a named user's sessions is tracked separately. |
 | 3.4 | T | Cross-site request forgery against cookie-authenticated routes. | `mcp_session` is HttpOnly, Secure, `SameSite=Lax`, so it is not sent on cross-site POSTs. No CORS headers are emitted. The admin API and logout also run an Origin check ([`consoleSession.ts`](../src/services/consoleSession.ts) `checkBrowserOrigin`): `Origin`, when sent, must be the instance's own; `Sec-Fetch-Site` must be `same-origin` (or `none` for a typed GET); a write must carry `Origin`. That refuses a same-site sibling subdomain, which SameSite alone does not. The admin API's `mcp_console` cookie is `SameSite=Strict`. Logout is a POST. | Non-admin REST routes that take the cookie (`/api/mail/settings` and the tool routes) still rely on `SameSite=Lax` alone, so a sibling subdomain under the instance's registrable domain could post to them with the user's cookie. Narrower than before: no admin route and no logout. **G15** |
 | 3.5 | I | Session token leaks from the client. | The desktop extension and the script installers both keep it in the OS keychain, DPAPI, or libsecret, falling back to a 0600 file. The installers hand it to the shim on stdin (`--store-token`) and the MCP client config names only the store (`--token-store`), so no config file holds the token. The `.backup` copies the installers write are 0600 and have the earlier installer's bearer header removed. | A config written by an earlier installer keeps its token until the installer is re-run, and that token stays valid until the 30-day cap. The macOS `security` CLI takes the token on argv for the moment it runs, the same as the extension. Accepted. |
@@ -407,7 +410,6 @@ separately" in the tables and are not repeated here.
 | Gap | Severity | Area | Summary |
 |---|---|---|---|
 | G10 | Medium | 4 Client update | Extension auto-update is unsigned, writes payload paths without containment, and bakes in an origin from forwarded headers. |
-| G13 | Low | 3 Session | The 7-day idle window renews silently instead of ending the session; sessions with no timestamps skip the 30-day cap; runbook overstates the idle timeout. |
 | G15 | Low | 3, 7 Session | Cookie-authenticated non-admin REST routes have no Origin check (SameSite=Lax alone, so a same-site sibling can post to them); the install flow gives the browser and the MCP client the same session token. |
 
 When a gap closes, change its row in the relevant table to describe the new

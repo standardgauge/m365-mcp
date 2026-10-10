@@ -12,12 +12,14 @@ import {
 import { hashSessionToken } from './credentialCrypto.js';
 import { SessionStoreUnavailableError } from './sessionStoreError.js';
 
-/** Session inactivity TTL (in milliseconds). Active sessions auto-extend
- *  via a sliding window in the auth middleware. When the TTL fires after
- *  inactivity, MSAL silent refresh extends the session transparently.
- *  7 days is the industry standard for headless API integrations (e.g.
- *  Auth0 default idle timeout). MSAL refresh tokens are valid for 90 days,
- *  well beyond this window. */
+/** Session renewal window (in milliseconds). This is NOT an idle timeout:
+ *  a session unused for longer than this is not ended. On its next request
+ *  the auth middleware renews it through MSAL silent refresh, and only a
+ *  failed refresh (refresh token revoked or expired in Entra) ends it.
+ *  Active sessions also slide the window forward past its halfway point.
+ *  Renewal keeps headless clients working across idle weeks; the bound on a
+ *  stolen token is SESSION_MAX_LIFETIME_MS plus Entra revocation, both of
+ *  which the renewal cannot get past. */
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Maximum absolute session lifetime (30 days). Sessions past this bound
@@ -62,9 +64,9 @@ export interface UserSession {
    */
   sessionToken: string;
   /**
-   * Unix timestamp (ms) when the session was created. Used to enforce
-   * server-side session expiry independent of the Graph access token TTL.
-   * Reset by the sliding-window refresh to extend the inactivity timeout.
+   * Unix timestamp (ms) the session was last renewed. Starts the
+   * SESSION_TTL_MS renewal window; reset by the sliding-window touch and by
+   * every renewal. Not an expiry: see SESSION_TTL_MS.
    */
   sessionCreatedAt: number;
   /**
@@ -91,13 +93,14 @@ export interface UserSession {
 /**
  * Returns true when a session has exceeded its absolute lifetime bound
  * (SESSION_MAX_LIFETIME_MS). Uses sessionAbsoluteCreatedAt when present and
- * non-zero, falls back to sessionCreatedAt for legacy sessions. Returns false
- * when both fields are zero/absent — no anchor means no absolute check (these
- * sessions re-OAuth when the inactivity TTL fires).
+ * non-zero, falls back to sessionCreatedAt for legacy sessions. Returns true
+ * when both fields are zero/absent: a session with no anchor cannot show it
+ * is inside the cap, and such a row predates both fields, so it fails closed
+ * and the user signs in again.
  */
 export function isAbsoluteLifetimeExceeded(session: UserSession, now = Date.now()): boolean {
   const anchor = session.sessionAbsoluteCreatedAt || session.sessionCreatedAt;
-  if (!anchor) return false;
+  if (!anchor) return true;
   return (now - anchor) > SESSION_MAX_LIFETIME_MS;
 }
 

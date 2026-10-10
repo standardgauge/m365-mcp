@@ -167,7 +167,7 @@ describe('getSessionByToken — legacy anchor materialization', () => {
     expect(mockSaveSession).not.toHaveBeenCalled();
   });
 
-  it('does not materialize when sessionCreatedAt is 0 (zero-anchor session bypasses absolute check)', async () => {
+  it('does not materialize when sessionCreatedAt is 0 (zero-anchor session fails the absolute check)', async () => {
     const token = uniqueToken();
     const userId = uniqueUserId();
     const zeroAnchor = makeLegacySession(token, userId, {
@@ -181,8 +181,8 @@ describe('getSessionByToken — legacy anchor materialization', () => {
     expect(session!.sessionAbsoluteCreatedAt).toBeUndefined();
     await new Promise((r) => setImmediate(r));
     expect(mockSaveSession).not.toHaveBeenCalled();
-    // Confirm isAbsoluteLifetimeExceeded returns false for this session (bypass path)
-    expect(isAbsoluteLifetimeExceeded(session!)).toBe(false);
+    // No anchor fails closed: the session counts as past the cap
+    expect(isAbsoluteLifetimeExceeded(session!)).toBe(true);
   });
 });
 
