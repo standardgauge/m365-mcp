@@ -107,13 +107,40 @@ function entryExists(p) {
 }
 
 /**
+ * Refuse a payload whose paths collide with each other: two entries naming the
+ * same file, one entry that is an ancestor directory of another (it would be
+ * written as a file and then needed as a directory), or one entry that is
+ * another's temp name. Paths are compared case-insensitively, since the
+ * extension directory may sit on a case-insensitive filesystem.
+ */
+function checkPayloadConflicts(root, writes) {
+  const keys = new Set();
+  for (const { fullPath } of writes) {
+    const key = path.relative(root, fullPath).split(path.sep).join('/').toLowerCase();
+    if (keys.has(key)) throw new Error('update names the same path twice: ' + fullPath);
+    keys.add(key);
+  }
+  for (const key of keys) {
+    const parts = key.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      if (keys.has(parts.slice(0, i).join('/'))) {
+        throw new Error('update writes a file where another entry needs a directory: ' + key);
+      }
+    }
+    if (keys.has(key + '.tmp')) throw new Error('update entry collides with a temp name: ' + key + '.tmp');
+  }
+}
+
+/**
  * Write every file in `files` under `extDir`. The whole set is checked before
  * the first write, so a payload with one bad path changes nothing: each path is
- * validated syntactically, and the deepest directory of each that already
- * exists is resolved through any symlinks and must still sit inside the
- * extension directory, so a symlinked directory cannot redirect a write (or a
- * mkdir) outside it. Each file is then written to a fresh temp name and renamed
- * into place.
+ * validated syntactically, entries may not collide with each other, and the
+ * deepest directory of each that already exists is resolved through any
+ * symlinks and must still sit inside the extension directory, so a symlinked
+ * directory cannot redirect a write (or a mkdir) outside it. A target or temp
+ * name that is already a directory is refused too, since neither the rename nor
+ * the temp cleanup could replace it. Each file is then written to a fresh temp
+ * name and renamed into place.
  */
 function applyUpdate(extDir, files) {
   const root = path.resolve(extDir);
@@ -121,6 +148,7 @@ function applyUpdate(extDir, files) {
     if (typeof content !== 'string') throw new Error('update content is not text: ' + filePath);
     return { fullPath: resolveUpdatePath(root, filePath), content };
   });
+  checkPayloadConflicts(root, writes);
 
   const realRoot = fs.realpathSync(root);
   for (const { fullPath } of writes) {
@@ -137,6 +165,11 @@ function applyUpdate(extDir, files) {
     }
     if (!fs.statSync(real).isDirectory()) {
       throw new Error('update path runs through a file: ' + fullPath);
+    }
+    for (const target of [fullPath, fullPath + '.tmp']) {
+      if (entryExists(target) && fs.lstatSync(target).isDirectory()) {
+        throw new Error('update path is an existing directory: ' + target);
+      }
     }
   }
 

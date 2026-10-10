@@ -221,6 +221,31 @@ describe('update path containment', () => {
     expect(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')).toBe('old');
   });
 
+  it.each([
+    [{ 'manifest.json': 'new', server: 'not a dir', 'server/index.js': 'new' }, /needs a directory/],
+    [{ 'manifest.json': 'new', 'server/index.js': 'new', server: 'not a dir' }, /needs a directory/],
+    [{ 'manifest.json': 'new', 'Server': 'x', 'server/index.js': 'new' }, /needs a directory/],
+    [{ 'manifest.json': 'new', './x.js': 'a', 'x.js': 'b' }, /same path twice/],
+    [{ 'manifest.json': 'new', 'X.js': 'a', 'x.js': 'b' }, /same path twice/],
+    [{ 'manifest.json': 'new', 'x.js': 'a', 'x.js.tmp': 'b' }, /temp name/],
+  ])('writes nothing when payload entries collide with each other (%#)', (files, err) => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, 'manifest.json'), 'old');
+    expect(() => update.applyUpdate(dir, files)).toThrow(err);
+    expect(fs.readdirSync(dir)).toEqual(['manifest.json']);
+    expect(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')).toBe('old');
+  });
+
+  it('writes nothing when a later target or its temp name is an existing directory', () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, 'manifest.json'), 'old');
+    fs.mkdirSync(path.join(dir, 'server'));
+    fs.mkdirSync(path.join(dir, 'lib.js.tmp'));
+    expect(() => update.applyUpdate(dir, { 'manifest.json': 'new', server: 'x' })).toThrow(/existing directory/);
+    expect(() => update.applyUpdate(dir, { 'manifest.json': 'new', 'lib.js': 'x' })).toThrow(/existing directory/);
+    expect(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')).toBe('old');
+  });
+
   it('does not follow a link planted at the temp name', () => {
     const dir = tmpDir();
     const outside = tmpDir();
