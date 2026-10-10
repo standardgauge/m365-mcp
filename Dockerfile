@@ -17,13 +17,9 @@ COPY src/ ./src/
 # TypeScript compile (outputs to dist/functions/, dist/services/, dist/mcp/)
 RUN npm run build
 
-# Vite admin UI compile (outputs to dist/admin/)
-# AZURE_CLIENT_ID / AZURE_TENANT_ID are baked in at build time via vite define;
-# pass them as build args so the SPA gets the correct values.
-ARG AZURE_CLIENT_ID
-ARG AZURE_TENANT_ID
-ENV AZURE_CLIENT_ID=${AZURE_CLIENT_ID} \
-    AZURE_TENANT_ID=${AZURE_TENANT_ID}
+# Vite admin UI compile (outputs to dist/admin/). The SPA carries no Entra
+# configuration: sign-in runs on the server, so the image is the same for
+# every tenant.
 RUN npm run build:admin
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
