@@ -281,6 +281,23 @@ jobs:
             exit 1
           fi
 
+      # Without AzureWebJobsStorage the host's built-in storage health check is
+      # Unhealthy on every 30s publish, and its publisher would log a warning
+      # each time. host.json raises that category to Error so console-log
+      # alerts stay quiet (docs/operations-runbook.md, Host health-check noise).
+      # The publisher starts 5s after the host and repeats every 30s, so by 75s
+      # of uptime it has published at least twice.
+      - name: Assert the host does not log the storage health check
+        run: |
+          started=$(date -d "$(docker inspect -f '{{.State.StartedAt}}' "$CONTAINER")" +%s)
+          wait=$((started + 75 - $(date +%s)))
+          [ "$wait" -le 0 ] || sleep "$wait"
+          if docker logs "$CONTAINER" 2>&1 | grep -F 'azure.functions.webjobs.storage'; then
+            echo "::error::the Functions host logs the AzureWebJobsStorage health check; check the HealthChecks entry in host.json logging.logLevel"
+            exit 1
+          fi
+          echo "no storage health-check lines after $(( $(date +%s) - started ))s of uptime"
+
       - name: Container logs
         if: always()
         run: docker logs "$CONTAINER" 2>&1 | tail -n 200 || true
