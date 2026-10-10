@@ -199,7 +199,7 @@ Events that are not tool calls:
 |---|---|---|
 | `auth.login` | Browser sign-in completes (`resource` `browser` or `install`), or fails: identity-platform error, state mismatch, missing PKCE verifier or nonce, missing code, foreign tenant (`resource` `tenant:<id>`), callback error | The signed-in user; on failure no user, in the instance's own tenant |
 | `auth.device_login` | A device-code sign-in completes or fails | As above. The address is the one that started the flow |
-| `auth.install_handoff` | The callback binds a session to an installer (`resource` `attach`), the installer collects it (`poll`), or polls an expired nonce (`poll`, denied) | The signed-in user. Compare the two addresses: `attach` is the browser, `poll` is the machine running the installer |
+| `auth.install_handoff` | The browser enters the installer's code on install-confirm and the session is attached (`resource` `attach`; denied if the callback could not record the pending handoff or the attach failed), the user declines it or it is discarded after five wrong codes (`confirm`, denied), the installer collects it (`poll`), or polls an expired nonce (`poll`, denied) | The signed-in user. Compare the two addresses: `attach` and `confirm` are the browser, `poll` is the machine running the installer |
 | `auth.logout` | A logout ended a session, or failed to | The user whose sessions were deleted |
 | `auth.refresh`, `auth.session_renew` | `/api/auth/refresh`, or a request on a session idle past its TTL, renews it or fails to | The session's user |
 | `policy.deny_list.global.add` / `.remove` | A global deny entry changes | The admin; `resource` is `<type>:<path>` |
@@ -567,9 +567,9 @@ Setting min-replicas to 0 causes cold starts of 10-30 seconds. Do not set this o
 
 ### Rate limiting and ingress restriction
 
-Container Apps ingress has no native rate limit, so the server limits its four
+Container Apps ingress has no native rate limit, so the server limits its five
 unauthenticated routes itself: `/api/auth/login`, `/api/auth/device`,
-`/api/auth/install-poll` and `/api/mcp`. Each client address gets a fixed
+`/api/auth/install-poll`, `/api/auth/install-confirm` and `/api/mcp`. Each client address gets a fixed
 one-minute window per route, counted in the replica's memory. Over the limit,
 the route answers `429` with `Retry-After` and the handler never runs.
 
@@ -578,6 +578,7 @@ the route answers `429` with `Retry-After` and the handler never runs.
 | `login` | 30 | `RATE_LIMIT_LOGIN_PER_MINUTE` |
 | `device` | 10 | `RATE_LIMIT_DEVICE_PER_MINUTE` |
 | `install-poll` | 120 | `RATE_LIMIT_INSTALL_POLL_PER_MINUTE` |
+| `install-confirm` | 30 | `RATE_LIMIT_INSTALL_CONFIRM_PER_MINUTE` |
 | `mcp` | 1200 | `RATE_LIMIT_MCP_PER_MINUTE` |
 
 The defaults are sized for an office behind one NAT address, not for one user.

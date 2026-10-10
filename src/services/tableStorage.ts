@@ -463,8 +463,9 @@ export async function listAllSessions(): Promise<StoredSession[]> {
 //
 // Implements the install-time hands-free auth flow. install-mcp.sh generates
 // a one-time nonce, embeds it in the OAuth login URL, and polls install-poll
-// while the user completes browser OAuth. The callback writes the resulting
-// session here keyed by sha256(nonce); the poll endpoint reads and atomically
+// while the user completes browser OAuth. Once the browser has confirmed the
+// handoff (install-confirm, below), the resulting session is written here keyed
+// by sha256(nonce); the poll endpoint reads and atomically
 // deletes (one-time-use, race-safe via ETag). Records have a 5-minute TTL.
 //
 // The session token is the one value in this table that authenticates, and it
@@ -504,6 +505,8 @@ export interface InstallNonceRecord {
 }
 
 const INSTALL_NONCE_PARTITION = 'nonce';
+/** Pending install handoffs (install-confirm) share the table under their own partition. */
+const HANDOFF_PARTITION = 'handoff';
 const NONCE_PURGE_INTERVAL_MS = 10 * 60 * 1000;
 // Bounds one run. A backlog larger than this is finished by later runs.
 const NONCE_PURGE_MAX_ROWS_PER_RUN = 5_000;
@@ -520,10 +523,10 @@ function installNonceTokenAad(rowKey: string): string {
 }
 
 /**
- * Upsert a completed session under the given nonce. Called from the OAuth
- * callback after the session has been created. Returns false if the write
- * (or encrypting the token) fails — there is no pre-reservation to fail
- * against. The plaintext token never reaches storage.
+ * Upsert a completed session under the given nonce. Called from install-confirm
+ * once the signed-in browser has entered the installer's confirmation code.
+ * Returns false if the write (or encrypting the token) fails — there is no
+ * pre-reservation to fail against. The plaintext token never reaches storage.
  */
 export async function attachSessionToInstallNonce(
   nonce: string,
@@ -642,8 +645,8 @@ export async function consumeInstallNonce(
 }
 
 /**
- * Delete install-nonce rows whose expiresAt has passed, and rows with no
- * expiresAt at all (nothing could ever consume them). Returns the number of
+ * Delete install-nonce and pending-handoff rows whose expiresAt has passed,
+ * and rows with no expiresAt at all (nothing could ever consume them). Returns the number of
  * rows deleted. Each delete carries the row's ETag, so a row re-attached
  * between the scan and the delete is left alone.
  */
@@ -652,8 +655,8 @@ export async function purgeExpiredInstallNonces(nowMs: number = Date.now()): Pro
   const table = getInstallNoncesTable();
   const iterator = table.listEntities<{ expiresAt?: number }>({
     queryOptions: {
-      filter: `PartitionKey eq '${INSTALL_NONCE_PARTITION}'`,
-      select: ['expiresAt'],
+      filter: `PartitionKey eq '${INSTALL_NONCE_PARTITION}' or PartitionKey eq '${HANDOFF_PARTITION}'`,
+      select: ['PartitionKey', 'RowKey', 'expiresAt'],
     },
   });
 
@@ -664,7 +667,7 @@ export async function purgeExpiredInstallNonces(nowMs: number = Date.now()): Pro
     const expiresAt = entity.expiresAt;
     if (typeof expiresAt === 'number' && expiresAt >= nowMs) continue;
     try {
-      await table.deleteEntity(INSTALL_NONCE_PARTITION, entity.rowKey as string, { etag: entity.etag });
+      await table.deleteEntity(entity.partitionKey as string, entity.rowKey as string, { etag: entity.etag });
       deleted++;
     } catch {
       /* consumed, re-attached, or deleted by another replica meanwhile */
@@ -700,6 +703,140 @@ export async function resetInstallNoncePurgeStateForTests(): Promise<void> {
   if (noncePurgeInFlight) await noncePurgeInFlight;
   lastNoncePurgeStartedAt = 0;
   noncePurgeInFlight = null;
+}
+
+// ── Install handoff confirmation ──
+//
+// The callback no longer attaches a session to an install nonce directly. It
+// records a pending handoff here, keyed by a random id held in an HttpOnly
+// cookie on the browser that signed in, and the install-confirm page attaches
+// the session only after that browser enters the installer's confirmation code
+// (see installConfirm.ts). Rows live in the install-nonce table under their own
+// partition and carry no session token: the token is read from the confirming
+// request's own mcp_session cookie and checked against the keyed hash stored
+// here, so the handoff can only attach the session this sign-in created.
+
+export const INSTALL_HANDOFF_MAX_ATTEMPTS = 5;
+
+export interface InstallHandoffRecord {
+  /** SHA256(verifier) the installer put in the login URL. */
+  challenge: string;
+  /** Keyed HMAC of the session token the callback issued to this browser. */
+  sessionTokenHash: string;
+  userId: string;
+  email: string;
+  displayName: string;
+  deviceLabel?: string;
+  /** Entra tenant of the signed-in user, carried on to the nonce row for its audit rows. */
+  tenantId?: string;
+  /** Wrong codes entered so far. */
+  attempts: number;
+  /** Unix timestamp in milliseconds when this record expires. */
+  expiresAt: number;
+}
+
+export interface StoredInstallHandoff {
+  record: InstallHandoffRecord;
+  etag: string;
+}
+
+
+export async function createInstallHandoff(
+  handoffId: string,
+  record: InstallHandoffRecord
+): Promise<void> {
+  await ensureTables();
+  await getInstallNoncesTable().createEntity({
+    partitionKey: HANDOFF_PARTITION,
+    rowKey: hashNonce(handoffId),
+    challenge: record.challenge,
+    sessionTokenHash: record.sessionTokenHash,
+    userId: record.userId,
+    email: record.email,
+    displayName: record.displayName,
+    deviceLabel: record.deviceLabel ?? null,
+    tenantId: record.tenantId ?? null,
+    attempts: record.attempts,
+    expiresAt: record.expiresAt,
+  });
+}
+
+/** The pending handoff, or null if it is unknown, used, or expired. */
+export async function getInstallHandoff(handoffId: string): Promise<StoredInstallHandoff | null> {
+  await ensureTables();
+  const rowKey = hashNonce(handoffId);
+  let entity;
+  try {
+    entity = await getInstallNoncesTable().getEntity(HANDOFF_PARTITION, rowKey);
+  } catch {
+    return null;
+  }
+  const expiresAt = entity.expiresAt as number;
+  if (expiresAt < Date.now()) {
+    try {
+      await getInstallNoncesTable().deleteEntity(HANDOFF_PARTITION, rowKey);
+    } catch { /* race ok */ }
+    return null;
+  }
+  return {
+    etag: entity.etag as string,
+    record: {
+      challenge: entity.challenge as string,
+      sessionTokenHash: entity.sessionTokenHash as string,
+      userId: entity.userId as string,
+      email: entity.email as string,
+      displayName: entity.displayName as string,
+      deviceLabel: (entity.deviceLabel as string | null) ?? undefined,
+      tenantId: (entity.tenantId as string | null) ?? undefined,
+      attempts: (entity.attempts as number) ?? 0,
+      expiresAt,
+    },
+  };
+}
+
+/**
+ * Count a wrong code against the handoff, deleting it once the limit is
+ * reached. Returns the attempts remaining, 0 when the handoff is gone, or null
+ * if another request changed the row first (the caller asks the user to retry).
+ */
+export async function recordInstallHandoffFailure(
+  handoffId: string,
+  stored: StoredInstallHandoff
+): Promise<number | null> {
+  const rowKey = hashNonce(handoffId);
+  const attempts = stored.record.attempts + 1;
+  try {
+    if (attempts >= INSTALL_HANDOFF_MAX_ATTEMPTS) {
+      await getInstallNoncesTable().deleteEntity(HANDOFF_PARTITION, rowKey, { etag: stored.etag });
+      return 0;
+    }
+    await getInstallNoncesTable().updateEntity(
+      { partitionKey: HANDOFF_PARTITION, rowKey, attempts },
+      'Merge',
+      { etag: stored.etag }
+    );
+    return INSTALL_HANDOFF_MAX_ATTEMPTS - attempts;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove the handoff. With an etag, only succeeds for the request that read
+ * that version, which makes a successful confirmation one-time.
+ */
+export async function deleteInstallHandoff(handoffId: string, etag?: string): Promise<boolean> {
+  await ensureTables();
+  try {
+    await getInstallNoncesTable().deleteEntity(
+      HANDOFF_PARTITION,
+      hashNonce(handoffId),
+      etag ? { etag } : undefined
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ── MSAL cache persistence ──

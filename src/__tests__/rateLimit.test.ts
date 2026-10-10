@@ -182,11 +182,12 @@ describe('withRateLimit', () => {
 describe('route wiring', () => {
   // Each public unauthenticated route must register its handler through
   // withRateLimit. A source check, because the handlers' own imports
-  // (MSAL, Graph, Table Storage) make importing all four here expensive.
+  // (MSAL, Graph, Table Storage) make importing them all here expensive.
   it.each([
     ['functions/auth/login.ts', 'login'],
     ['functions/auth/deviceLogin.ts', 'device'],
     ['functions/auth/installPoll.ts', 'install-poll'],
+    ['functions/auth/installConfirm.ts', 'install-confirm'],
     ['functions/mcp/mcpEndpoint.ts', 'mcp'],
   ])('%s is behind the %s limiter', async (file, route) => {
     const { readFileSync } = await import('fs');

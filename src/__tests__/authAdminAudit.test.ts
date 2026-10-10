@@ -12,6 +12,8 @@ import { randomBytes } from 'crypto';
 import { jest } from '@jest/globals';
 import type { HttpRequest, InvocationContext } from '@azure/functions';
 import type { AuthResult } from '../services/authMiddleware.js';
+import { hashSessionToken } from '../services/credentialCrypto.js';
+import { installConfirmationCode } from '../services/installConfirm.js';
 
 // The callback mints a console session, which is MAC'd under the session key.
 process.env.MCP_SESSION_HMAC_KEY = randomBytes(32).toString('hex');
@@ -23,6 +25,10 @@ const mockAcquireTokenByCode = jest.fn<() => Promise<unknown>>();
 const mockAcquireTokenSilent = jest.fn<() => Promise<unknown>>();
 const mockAttach = jest.fn<(nonce: string, record: Row) => Promise<boolean>>();
 const mockConsume = jest.fn<(nonce: string) => Promise<unknown>>();
+const mockCreateHandoff = jest.fn<(id: string, record: Row) => Promise<void>>();
+const mockGetHandoff = jest.fn<(id: string) => Promise<unknown>>();
+const mockRecordHandoffFailure = jest.fn<() => Promise<number | null>>();
+const mockDeleteHandoff = jest.fn<() => Promise<boolean>>();
 const mockAuthenticate = jest.fn<() => Promise<AuthResult | null>>();
 const mockAuthenticateAllowExpired = jest.fn<() => Promise<AuthResult | null>>();
 const mockIsAdmin = jest.fn<() => Promise<boolean>>();
@@ -67,6 +73,10 @@ jest.mock('../services/tenantUtils.js', () => ({
 jest.mock('../services/tableStorage.js', () => ({
   attachSessionToInstallNonce: (nonce: string, record: unknown) => mockAttach(nonce, record as Row),
   consumeInstallNonce: (nonce: string) => mockConsume(nonce),
+  createInstallHandoff: (id: string, record: unknown) => mockCreateHandoff(id, record as Row),
+  getInstallHandoff: (id: string) => mockGetHandoff(id),
+  recordInstallHandoffFailure: () => mockRecordHandoffFailure(),
+  deleteInstallHandoff: () => mockDeleteHandoff(),
 }));
 
 jest.mock('../services/authMiddleware.js', () => ({
@@ -104,6 +114,7 @@ jest.mock('@azure/functions', () => ({ app: { http: jest.fn() } }));
 
 import { app } from '@azure/functions';
 import '../functions/auth/callback.js';
+import '../functions/auth/installConfirm.js';
 import '../functions/auth/installPoll.js';
 import '../functions/auth/logout.js';
 import '../functions/auth/refresh.js';
@@ -144,6 +155,7 @@ function request(opts: {
   query?: Record<string, string>;
   cookie?: string;
   body?: unknown;
+  form?: Record<string, string>;
 }): HttpRequest {
   // A same-origin browser request, so logout's Origin check passes.
   const headers = new Map<string, string>([['host', HOST], ['origin', `https://${HOST}`]]);
@@ -153,6 +165,7 @@ function request(opts: {
     query: new Map(Object.entries(opts.query ?? {})),
     headers,
     json: async () => opts.body ?? {},
+    text: async () => new URLSearchParams(opts.form ?? {}).toString(),
   } as unknown as HttpRequest;
 }
 
@@ -171,6 +184,8 @@ beforeEach(() => {
     expiresOn: new Date(Date.now() + 3_600_000),
   });
   mockAttach.mockResolvedValue(true);
+  mockCreateHandoff.mockResolvedValue(undefined);
+  mockDeleteHandoff.mockResolvedValue(true);
   mockIsAdmin.mockResolvedValue(true);
   mockListGlobal.mockResolvedValue([]);
   mockListUser.mockResolvedValue([]);
@@ -194,19 +209,20 @@ describe('sign-in (callback)', () => {
     expect(rows('auth.install_handoff')).toEqual([]);
   });
 
-  it('records an installer sign-in and the handoff it attaches', async () => {
+  it('records an installer sign-in and parks the handoff with the user\'s tenant', async () => {
     await callback(request({ query: ok, cookie: `${FLOW}; install_nonce=${NONCE}` }), ctx);
     expect(rows('auth.login')[0]).toMatchObject({ resource: 'install', result: 'allowed' });
-    expect(rows('auth.install_handoff')).toEqual([expect.objectContaining({
-      userId: USER_ID, resource: 'attach', result: 'allowed',
-    })]);
-    expect(mockAttach.mock.calls[0][1]).toMatchObject({ tenantId: TENANT });
+    // Nothing is attached until the browser enters the installer's code.
+    expect(rows('auth.install_handoff')).toEqual([]);
+    expect(mockCreateHandoff.mock.calls[0][1]).toMatchObject({ tenantId: TENANT });
   });
 
-  it('records a handoff that could not attach as denied', async () => {
-    mockAttach.mockResolvedValue(false);
+  it('records a handoff that could not be recorded as denied', async () => {
+    mockCreateHandoff.mockRejectedValue(new Error('storage down'));
     await callback(request({ query: ok, cookie: `${FLOW}; install_nonce=${NONCE}` }), ctx);
-    expect(rows('auth.install_handoff')[0]).toMatchObject({ result: 'denied' });
+    expect(rows('auth.install_handoff')).toEqual([expect.objectContaining({
+      userId: USER_ID, resource: 'attach', result: 'denied',
+    })]);
   });
 
   it('records a state mismatch with no actor, in the instance tenant', async () => {
@@ -242,6 +258,67 @@ describe('sign-in (callback)', () => {
       'identity platform error: access_denied',
       'identity platform error: unrecognised',
     ]);
+  });
+});
+
+describe('install handoff (install-confirm)', () => {
+  const confirm = handlerFor('install-confirm');
+  const HANDOFF_ID = 'c'.repeat(64);
+  const SESSION_TOKEN = 'session-token';
+  const cookie = `install_handoff=${HANDOFF_ID}; mcp_session=${SESSION_TOKEN}`;
+
+  beforeEach(() => {
+    mockGetHandoff.mockResolvedValue({
+      etag: 'e1',
+      record: {
+        challenge: NONCE,
+        sessionTokenHash: hashSessionToken(SESSION_TOKEN),
+        userId: USER_ID,
+        email: 'adele@fabrikam.com',
+        displayName: 'Adele Vance',
+        deviceLabel: 'laptop',
+        tenantId: 'tenant-from-handoff',
+        attempts: 0,
+        expiresAt: Date.now() + 60_000,
+      },
+    });
+  });
+
+  it('records the attach against the signed-in user and carries the tenant to the nonce row', async () => {
+    const res = await confirm(request({ method: 'POST', cookie, form: { code: installConfirmationCode(NONCE) } }), ctx);
+    expect(res.status).toBe(200);
+    expect(rows('auth.install_handoff')).toEqual([expect.objectContaining({
+      tenantId: 'tenant-from-handoff', userId: USER_ID, deviceLabel: 'laptop', resource: 'attach', result: 'allowed',
+    })]);
+    expect(mockAttach.mock.calls[0][1]).toMatchObject({ tenantId: 'tenant-from-handoff' });
+  });
+
+  it('records an attach that could not be stored as denied', async () => {
+    mockAttach.mockResolvedValue(false);
+    await confirm(request({ method: 'POST', cookie, form: { code: installConfirmationCode(NONCE) } }), ctx);
+    expect(rows('auth.install_handoff')[0]).toMatchObject({ resource: 'attach', result: 'denied' });
+  });
+
+  it('records a declined handoff', async () => {
+    await confirm(request({ method: 'POST', cookie, form: { action: 'cancel' } }), ctx);
+    expect(rows('auth.install_handoff')).toEqual([expect.objectContaining({
+      userId: USER_ID, resource: 'confirm', result: 'denied', reason: 'declined by the signed-in user',
+    })]);
+  });
+
+  it('records a handoff discarded after repeated wrong codes, but not each wrong code', async () => {
+    mockRecordHandoffFailure.mockResolvedValueOnce(2).mockResolvedValueOnce(0);
+    await confirm(request({ method: 'POST', cookie, form: { code: 'WRONG-CODE' } }), ctx);
+    expect(rows('auth.install_handoff')).toEqual([]);
+    await confirm(request({ method: 'POST', cookie, form: { code: 'WRONG-CODE' } }), ctx);
+    expect(rows('auth.install_handoff')).toEqual([expect.objectContaining({
+      resource: 'confirm', result: 'denied', reason: 'discarded after repeated wrong confirmation codes',
+    })]);
+  });
+
+  it('records nothing for a page view', async () => {
+    expect((await confirm(request({ cookie }), ctx)).status).toBe(200);
+    expect(mockLogAccess).not.toHaveBeenCalled();
   });
 });
 

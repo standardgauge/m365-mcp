@@ -3,14 +3,17 @@ import { acquireTokenByCode, createGraphClient } from '../../services/graphClien
 import { storeSession, SESSION_TTL_MS } from '../../services/tokenCache.js';
 import type { UserSession } from '../../services/tokenCache.js';
 import { extractTenantId } from '../../services/tenantUtils.js';
-import { attachSessionToInstallNonce } from '../../services/tableStorage.js';
+import { createInstallHandoff } from '../../services/tableStorage.js';
+import { hashSessionToken } from '../../services/credentialCrypto.js';
+import { INSTALL_CONFIRM_PATH, INSTALL_HANDOFF_COOKIE } from '../../services/installConfirm.js';
 import { randomBytes } from 'crypto';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { resolveFrontendUrl } from '../../services/frontendUrl.js';
 import { consoleCookie, mintConsoleToken } from '../../services/consoleSession.js';
 import { auditActor, auditTenantId, logAccess } from '../../services/auditLog.js';
 
-const NONCE_TTL_MS = 5 * 60 * 1000;
+const HANDOFF_TTL_MS = 5 * 60 * 1000;
+const NONCE_FORMAT = /^[a-f0-9]{64}$/;
 
 /**
  * A sign-in that ended before a user was identified. The row goes to the
@@ -39,6 +42,13 @@ function auditSignInFailure(reason: string, resource?: string, tenantId?: string
  * that /api/auth/login left in cookies, fetches the user profile
  * via Graph, generates a session token, stores the session, then redirects
  * to the admin UI.
+ *
+ * When the sign-in was started by an installer (install_nonce cookie), the
+ * session is not handed to the installer here. The callback records a pending
+ * handoff and sends the browser to install-confirm, which attaches the session
+ * only after the user enters the code the installer shows. A sign-in link
+ * written by someone else therefore ends at a page asking for a code the
+ * signer does not have, instead of silently delivering their session.
  */
 async function callback(
   request: HttpRequest,
@@ -154,31 +164,38 @@ async function callback(
       source: 'http',
     });
 
-    // If this OAuth flow was started by install-mcp.sh, attach the new
-    // session to its install-nonce slot so the polling install script can
-    // pick it up. We don't fail the OAuth flow if attach fails — the user
-    // can still use the admin UI; only the install script flow is degraded.
-    if (installNonce) {
-      const attached = await attachSessionToInstallNonce(installNonce, {
-        sessionToken,
-        userId: session.userId,
-        email: session.email,
-        displayName: session.displayName,
-        deviceLabel: session.deviceLabel,
-        tenantId: session.tenantId,
-        expiresAt: Date.now() + NONCE_TTL_MS,
-      });
-      logAccess({
-        ...auditActor(session),
-        operation: 'auth.install_handoff',
-        resource: 'attach',
-        result: attached ? 'allowed' : 'denied',
-        ...(attached ? {} : { reason: 'session could not be attached to the install nonce' }),
-        source: 'http',
-      });
-      if (!attached) {
+    // If an installer started this sign-in, park the handoff until the user
+    // confirms it on install-confirm. We don't fail the OAuth flow if this
+    // fails — the user can still use the admin UI; only the install is degraded.
+    let handoffId: string | null = null;
+    if (installNonce && NONCE_FORMAT.test(installNonce)) {
+      const id = randomBytes(32).toString('hex');
+      try {
+        await createInstallHandoff(id, {
+          challenge: installNonce,
+          sessionTokenHash: hashSessionToken(sessionToken),
+          userId: session.userId,
+          email: session.email,
+          displayName: session.displayName,
+          deviceLabel: session.deviceLabel,
+          tenantId: session.tenantId,
+          attempts: 0,
+          expiresAt: Date.now() + HANDOFF_TTL_MS,
+        });
+        handoffId = id;
+      } catch (err: unknown) {
+        logAccess({
+          ...auditActor(session),
+          operation: 'auth.install_handoff',
+          resource: 'attach',
+          result: 'denied',
+          reason: 'install handoff could not be recorded',
+          source: 'http',
+        });
         context.warn(
-          `install_nonce attach failed — nonce expired or never reserved (userId=${session.userId})`
+          `install handoff could not be recorded (userId=${session.userId}): ${
+            err instanceof Error ? err.message : 'unknown error'
+          }`
         );
       }
     }
@@ -187,9 +204,9 @@ async function callback(
     // resolveFrontendUrl refuses a value whose path the Functions host reserves
     // (notably '/admin'), since such a redirect 404s before reaching any
     // function. See docs/operations-runbook.md → "Reserved paths".
-    const frontendUrl = resolveFrontendUrl(process.env.FRONTEND_URL, (m) =>
-      context.error(m)
-    );
+    const frontendUrl = handoffId
+      ? INSTALL_CONFIRM_PATH
+      : resolveFrontendUrl(process.env.FRONTEND_URL, (m) => context.error(m));
 
     // The console session is what the admin API accepts. It is minted only
     // here, at an interactive sign-in, and only ever leaves as an HttpOnly
@@ -279,6 +296,19 @@ async function callback(
           path: '/',
           maxAge: 0,
         },
+        ...(handoffId
+          ? [
+              {
+                name: INSTALL_HANDOFF_COOKIE,
+                value: handoffId,
+                httpOnly: true,
+                secure: true,
+                sameSite: 'Lax' as const,
+                path: INSTALL_CONFIRM_PATH,
+                maxAge: HANDOFF_TTL_MS / 1000,
+              },
+            ]
+          : []),
       ],
     };
   } catch (err: unknown) {

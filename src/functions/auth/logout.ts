@@ -5,6 +5,7 @@ import { withSecurity } from '../../services/securityHeaders.js';
 import { checkBrowserOrigin, expiredConsoleCookie } from '../../services/consoleSession.js';
 import { resolveFrontendUrl } from '../../services/frontendUrl.js';
 import { auditActor, logAccess } from '../../services/auditLog.js';
+import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from '../../services/sessionStoreError.js';
 
 /**
  * POST /api/auth/logout
@@ -19,6 +20,10 @@ import { auditActor, logAccess } from '../../services/auditLog.js';
  *
  * Replaces the SPA's old MSAL `logoutRedirect()` — sign-out now clears the
  * server session that actually authorizes API calls, not just client cache.
+ *
+ * If session storage cannot be reached the session cannot be identified or
+ * ended, so the response is a 503 with the cookies untouched and the user can
+ * try again.
  *
  * POST with an Origin check, not GET: a GET logout let any page, or a link,
  * sign the user out cross-site (threat model 3.4). The SPA submits a form.
@@ -44,6 +49,14 @@ async function logout(
       logAccess({ ...auditActor(auth.session), operation: 'auth.logout', result: 'allowed', source: 'http' });
     }
   } catch (err) {
+    // Storage could not say whose session this is, so it cannot be ended.
+    // Answer 503 and leave the cookies alone: redirecting as if signed out
+    // would leave a live server session behind and drop the cookie the user
+    // needs to retry.
+    if (err instanceof SessionStoreUnavailableError) {
+      context.error('[logout] session store unavailable; session not ended:', err.cause);
+      return { status: 503, headers: { 'Retry-After': String(SESSION_STORE_RETRY_AFTER_S) }, jsonBody: { error: 'Session store unavailable, retry shortly' } };
+    }
     context.warn('[logout] session cleanup failed:', err instanceof Error ? err.message : err);
     if (auth) {
       logAccess({

@@ -59,6 +59,14 @@ jest.mock('@microsoft/microsoft-graph-client', () => ({
 // Side-effect-only import — stub it so no actual fetch polyfill loads
 jest.mock('isomorphic-fetch', () => ({}));
 
+// No Table Storage here: every session lives in the in-memory cache. A cache
+// miss reaches the storage lookup, which must answer "no such row" rather than
+// fail, since getSessionByToken surfaces a failed lookup as an error.
+jest.mock('../services/tableStorage.js', () => ({
+  ...jest.requireActual<typeof import('../services/tableStorage.js')>('../services/tableStorage.js'),
+  loadSessionByToken: async () => null,
+}));
+
 // ── Module under test ─────────────────────────────────────────────────────────
 
 import {

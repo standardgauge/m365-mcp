@@ -18,6 +18,7 @@ import { authenticateRequest, AuthResult } from './authMiddleware.js';
 import { logAccess } from './auditLog.js';
 import { auditClientAddress } from './clientAddress.js';
 import { ValidationError } from './opaqueId.js';
+import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from './sessionStoreError.js';
 
 export type ServiceCategory = 'mail' | 'sharepoint' | 'onedrive' | 'calendar' | 'onenote' | 'contacts' | 'teams';
 
@@ -204,7 +205,7 @@ export type PolicyHandler = (
  *   6. Calls the inner handler only if all checks pass
  *
  * Error handling mirrors the existing per-route pattern (Re-authentication
- * required -> 401, everything else -> 500).
+ * required -> 401, session store unavailable -> 503, everything else -> 500).
  */
 export function withPolicyEnforcement(
   service: ServiceCategory,
@@ -360,6 +361,10 @@ export function withPolicyEnforcement(
       context.error(`[${service}] handler error:`, message);
       if (err instanceof ValidationError) {
         return { status: 400, jsonBody: { error: message } };
+      }
+      // Storage could not authenticate the request: a server error, never a 401.
+      if (err instanceof SessionStoreUnavailableError) {
+        return { status: 503, headers: { 'Retry-After': String(SESSION_STORE_RETRY_AFTER_S) }, jsonBody: { error: 'Session store unavailable, retry shortly' } };
       }
       if (message.includes('Re-authentication required')) {
         return { status: 401, jsonBody: { error: message } };

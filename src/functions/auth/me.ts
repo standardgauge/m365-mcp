@@ -2,6 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/fu
 import { authenticateConsoleRequest, authenticateRequest, checkGlobalAdmin } from '../../services/authMiddleware.js';
 import { consoleCookie, renewConsoleToken } from '../../services/consoleSession.js';
 import { withSecurity } from '../../services/securityHeaders.js';
+import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from '../../services/sessionStoreError.js';
 
 /**
  * GET /api/auth/me
@@ -27,13 +28,29 @@ import { withSecurity } from '../../services/securityHeaders.js';
  * with its idle expiry pushed out, so the SPA keeps it alive by calling this
  * endpoint. When it does not, the SPA sends the user back through sign-in,
  * which is the only place a console session is minted.
+ *
+ * A 503 means session storage could not be reached. The SPA should retry, not
+ * start sign-in.
  */
 async function me(
   request: HttpRequest,
   _context: InvocationContext,
 ): Promise<HttpResponseInit> {
-  const consoleAuth = await authenticateConsoleRequest(request);
-  const auth = consoleAuth ?? (await authenticateRequest(request));
+  let consoleAuth: Awaited<ReturnType<typeof authenticateConsoleRequest>>;
+  let auth: Awaited<ReturnType<typeof authenticateRequest>>;
+  try {
+    consoleAuth = await authenticateConsoleRequest(request);
+    auth = consoleAuth ?? (await authenticateRequest(request));
+  } catch (err: unknown) {
+    if (!(err instanceof SessionStoreUnavailableError)) throw err;
+    // Not a 401: that would send the SPA to sign in again over a storage outage.
+    _context.error('[authMe] session store unavailable:', err.cause);
+    return {
+      status: 503,
+      headers: { 'Retry-After': String(SESSION_STORE_RETRY_AFTER_S), 'Cache-Control': 'no-store' },
+      jsonBody: { error: 'Session store unavailable, retry shortly' },
+    };
+  }
   if (!auth) {
     return {
       status: 401,

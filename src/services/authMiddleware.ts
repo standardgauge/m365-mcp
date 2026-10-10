@@ -60,6 +60,11 @@ function extractSessionTokenCandidates(request: HttpRequest): string[] {
  * authenticateConsoleRequest, which accepts the cookie only.
  *
  * No shared secrets, no x-user-id trust, no fallback paths.
+ *
+ * Throws SessionStoreUnavailableError when storage cannot say whether a
+ * candidate is a session. That stops the loop: the remaining candidates are
+ * not tried, because the unanswered one may have been a session that should
+ * have been refused. Callers turn it into a 503, never into an auth result.
  */
 export async function authenticateRequest(request: HttpRequest): Promise<AuthResult | null> {
   const candidates = extractSessionTokenCandidates(request);
@@ -78,7 +83,7 @@ export async function authenticateRequest(request: HttpRequest): Promise<AuthRes
  * Validate one session token: absolute lifetime, inactivity TTL with silent
  * refresh, sliding-window touch. 'unknown' means no session has this token, so
  * the caller may try the next candidate; null means the session exists but may
- * not be used.
+ * not be used. Storage failures propagate as SessionStoreUnavailableError.
  */
 async function authenticateToken(token: string): Promise<AuthResult | null | 'unknown'> {
   const session = await getSessionByToken(token);
@@ -164,6 +169,9 @@ export interface ConsoleAuthResult extends AuthResult {
  * (see services/consoleSession.ts) and pass the Origin check. So the token an
  * MCP client holds is not an admin-API credential, however it is presented.
  * Threat model section 7, rows 7.3 and 3.4.
+ *
+ * Throws SessionStoreUnavailableError when storage cannot answer, as
+ * authenticateRequest does.
  */
 export async function authenticateConsoleRequest(request: HttpRequest): Promise<ConsoleAuthResult | null> {
   const origin = checkBrowserOrigin(request);
@@ -199,6 +207,9 @@ export async function authenticateConsoleRequest(request: HttpRequest): Promise<
  * OAuth time). For legacy sessions that predate this field, sessionCreatedAt
  * is used as a best-effort fallback; sessions with neither field set (both
  * zero/absent) bypass the absolute check.
+ *
+ * Throws SessionStoreUnavailableError when storage cannot answer, as
+ * authenticateRequest does.
  */
 export async function authenticateRequestAllowExpired(request: HttpRequest): Promise<AuthResult | null> {
   const candidates = extractSessionTokenCandidates(request);
