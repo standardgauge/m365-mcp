@@ -36,12 +36,13 @@ jest.mock('@azure/functions', () => ({ app: { http: jest.fn() } }));
 
 import { app } from '@azure/functions';
 import '../functions/auth/me.js';
+import { SessionStoreUnavailableError } from '../services/sessionStoreError.js';
 
 interface HttpRegistration {
   handler: (
     req: HttpRequest,
     context: InvocationContext,
-  ) => Promise<{ status: number; jsonBody?: unknown; cookies?: Array<{ name: string; value: string; maxAge?: number }> }>;
+  ) => Promise<{ status: number; jsonBody?: unknown; headers?: Record<string, string>; cookies?: Array<{ name: string; value: string; maxAge?: number }> }>;
 }
 const httpMock = app.http as unknown as jest.Mock<(name: string, opts: HttpRegistration) => void>;
 const reg = httpMock.mock.calls.find((c) => c[0] === 'authMe');
@@ -70,6 +71,23 @@ describe('authMe — /api/auth/me', () => {
     const res = await handler(req(), ctx);
     expect(res.status).toBe(401);
     expect(res.jsonBody).toEqual({ authenticated: false, loginUrl: '/api/auth/login' });
+    expect(mockCheckGlobalAdmin).not.toHaveBeenCalled();
+  });
+
+  it('returns 503, not a 401 that would restart sign-in, when the session store is down', async () => {
+    mockAuthenticateRequest.mockRejectedValue(new SessionStoreUnavailableError(new Error('ServerBusy')));
+    const res = await handler(req(), ctx);
+    expect(res.status).toBe(503);
+    expect(res.headers).toMatchObject({ 'Retry-After': '5', 'Cache-Control': 'no-store' });
+    expect(res.jsonBody).toEqual({ error: 'Session store unavailable, retry shortly' });
+    expect(mockCheckGlobalAdmin).not.toHaveBeenCalled();
+  });
+
+  it('returns 503 when the console lookup hits a session store outage', async () => {
+    mockAuthenticateConsoleRequest.mockRejectedValue(new SessionStoreUnavailableError(new Error('ServerBusy')));
+    const res = await handler(req(), ctx);
+    expect(res.status).toBe(503);
+    expect(mockAuthenticateRequest).not.toHaveBeenCalled();
     expect(mockCheckGlobalAdmin).not.toHaveBeenCalled();
   });
 

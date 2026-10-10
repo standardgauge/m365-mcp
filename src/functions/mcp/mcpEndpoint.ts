@@ -10,6 +10,7 @@ import { resolveDenySubject } from '../../services/mailboxOwner.js';
 import { checkCalendarAccess } from '../../services/calendarAccess.js';
 import { resolveMailFolderName, resolveContactParentFolder, resolveDefaultContactFolder, resolveSectionNotebook, normalizeContactFolderId, resolveDefaultCalendarId } from '../../services/containerResolver.js';
 import { authenticateRequest } from '../../services/authMiddleware.js';
+import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from '../../services/sessionStoreError.js';
 import type { UserSession } from '../../services/tokenCache.js';
 import { filterAndDisambiguateSites } from '../../services/sharepointFilter.js';
 import { getEnabledServices, getAllowedSites, getReadOnlyServices } from '../../services/serviceSettings.js';
@@ -2915,7 +2916,18 @@ async function mcpEndpoint(
   context: InvocationContext
 ): Promise<HttpResponseInit> {
   // Authenticate via session token (Bearer header, x-session-token, or mcp_session cookie)
-  const auth = await authenticateRequest(request);
+  let auth: Awaited<ReturnType<typeof authenticateRequest>>;
+  try {
+    auth = await authenticateRequest(request);
+  } catch (err: unknown) {
+    if (!(err instanceof SessionStoreUnavailableError)) throw err;
+    context.error('MCP endpoint: session store unavailable:', err.cause);
+    return {
+      status: 503,
+      headers: { 'Retry-After': String(SESSION_STORE_RETRY_AFTER_S) },
+      jsonBody: { jsonrpc: '2.0', id: null, error: { code: -32603, message: 'Session store unavailable, retry shortly' } },
+    };
+  }
 
   try {
     const body = await request.json();

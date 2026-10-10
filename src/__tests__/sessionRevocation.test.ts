@@ -192,8 +192,11 @@ describe('cached-session revalidation', () => {
     now += b.SESSION_REVALIDATE_MS;
     expect(await b.getSessionByToken(session.sessionToken)).toBeDefined();
 
+    // Refused as a storage failure (a 503 upstream), not as an unknown token.
     now += b.SESSION_REVALIDATE_MAX_STALE_MS;
-    expect(await b.getSessionByToken(session.sessionToken)).toBeUndefined();
+    await expect(b.getSessionByToken(session.sessionToken)).rejects.toBeInstanceOf(
+      b.SessionStoreUnavailableError,
+    );
 
     // Storage back and the row still there: the session works again.
     mockStorage.down = false;

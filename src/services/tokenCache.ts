@@ -10,6 +10,7 @@ import {
   SessionRowMissingError,
 } from './tableStorage.js';
 import { hashSessionToken } from './credentialCrypto.js';
+import { SessionStoreUnavailableError } from './sessionStoreError.js';
 
 /** Session inactivity TTL (in milliseconds). Active sessions auto-extend
  *  via a sliding window in the auth middleware. When the TTL fires after
@@ -40,6 +41,8 @@ export const SESSION_REVALIDATE_MAX_STALE_MS = 5 * 60 * 1000;
 /** Thrown by storeSession when the session's row was deleted after this
  *  replica cached it. The session is revoked and has been evicted. */
 export { SessionRowMissingError };
+/** Thrown by getSessionByToken when storage cannot answer. */
+export { SessionStoreUnavailableError };
 
 export interface UserSession {
   userId: string;
@@ -146,31 +149,35 @@ function cacheEvict(key: string): void {
 
 /**
  * Confirm a cached session's row still exists, at most once per
- * SESSION_REVALIDATE_MS. Returns false (and evicts) when the row is gone, or
- * when storage has been unreachable for longer than
- * SESSION_REVALIDATE_MAX_STALE_MS since the last confirmation.
+ * SESSION_REVALIDATE_MS. Returns 'gone' (and evicts) when the row is gone, and
+ * 'unavailable' when storage has been unreachable for longer than
+ * SESSION_REVALIDATE_MAX_STALE_MS since the last confirmation. Either way the
+ * cached session must not be served.
  */
-async function revalidateCached(key: string, session: UserSession): Promise<boolean> {
+async function revalidateCached(
+  key: string,
+  session: UserSession,
+): Promise<'ok' | 'gone' | { unavailable: unknown }> {
   const last = verifiedAt.get(key) ?? 0;
   const now = Date.now();
-  if (now - last < SESSION_REVALIDATE_MS || !session._storageKey) return true;
+  if (now - last < SESSION_REVALIDATE_MS || !session._storageKey) return 'ok';
   try {
     if (await sessionRowExists(session._storageKey)) {
       verifiedAt.set(key, now);
-      return true;
+      return 'ok';
     }
     console.warn(`[tokenCache] Session row for user ${session.userId} was deleted — evicting cached session`);
   } catch (err) {
     if (now - last < SESSION_REVALIDATE_MAX_STALE_MS) {
       console.warn('[tokenCache] Could not revalidate cached session; serving cached copy:', err);
-      return true;
+      return 'ok';
     }
     console.error('[tokenCache] Could not revalidate cached session past the stale limit; refusing it:', err);
     // Refuse but keep the entry: it is still valid if storage comes back.
-    return false;
+    return { unavailable: err };
   }
   cacheEvict(key);
-  return false;
+  return 'gone';
 }
 
 /**
@@ -220,7 +227,7 @@ export async function getSession(userId: string): Promise<UserSession | undefine
   const cachedKey = userIndex.get(userId);
   if (cachedKey) {
     const cached = sessionCache.get(cachedKey);
-    if (cached && !(await revalidateCached(cachedKey, cached))) return undefined;
+    if (cached && (await revalidateCached(cachedKey, cached)) !== 'ok') return undefined;
     if (cached) {
       if (materializeLegacyAnchor(cached)) {
         storeSession(cached).catch((err) =>
@@ -260,14 +267,21 @@ export async function getSession(userId: string): Promise<UserSession | undefine
  * Two-tier lookup:
  *   1. sessionCache (in-memory, keyed by tokenHash) — fast path
  *   2. loadSessionByToken (storage lookup) — cold path on container restart
+ *
+ * Returns undefined only when storage says no session has this token. When
+ * storage cannot answer (throttling, 5xx, auth, network), or a cached session
+ * is past the revalidation stale limit, it throws SessionStoreUnavailableError
+ * instead, so an outage surfaces as a server error rather than a 401.
  */
 export async function getSessionByToken(token: string): Promise<UserSession | undefined> {
   const hash = hashSessionToken(token);
 
   // Fast path: direct session lookup by token hash
   const cached = sessionCache.get(hash);
-  if (cached && !(await revalidateCached(hash, cached))) return undefined;
   if (cached) {
+    const state = await revalidateCached(hash, cached);
+    if (state === 'gone') return undefined;
+    if (state !== 'ok') throw new SessionStoreUnavailableError(state.unavailable);
     if (!cached.sessionToken) cached.sessionToken = token;
     if (materializeLegacyAnchor(cached)) {
       storeSession(cached).catch((err) =>
@@ -278,24 +292,24 @@ export async function getSessionByToken(token: string): Promise<UserSession | un
   }
 
   // Cold path: storage lookup (O(1) with new RowKey format)
+  let stored: UserSession | null;
   try {
-    const stored = await loadSessionByToken(token);
-    if (stored) {
-      if (materializeLegacyAnchor(stored)) {
-        storeSession(stored).catch((err) =>
-          console.error('[tokenCache] Failed to persist legacy absolute anchor (getSessionByToken storage):', err)
-        );
-      }
-      cachePut(hash, stored);
-      // Update userId index so subsequent getSession/getValidAccessToken
-      // calls in this request context use THIS session
-      userIndex.set(stored.userId, hash);
-      return stored;
-    }
+    stored = await loadSessionByToken(token);
   } catch (err) {
     console.error('[tokenCache] Failed to load session by token from Table Storage:', err);
+    throw new SessionStoreUnavailableError(err);
   }
-  return undefined;
+  if (!stored) return undefined;
+  if (materializeLegacyAnchor(stored)) {
+    storeSession(stored).catch((err) =>
+      console.error('[tokenCache] Failed to persist legacy absolute anchor (getSessionByToken storage):', err)
+    );
+  }
+  cachePut(hash, stored);
+  // Update userId index so subsequent getSession/getValidAccessToken
+  // calls in this request context use THIS session
+  userIndex.set(stored.userId, hash);
+  return stored;
 }
 
 /**

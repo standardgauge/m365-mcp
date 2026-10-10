@@ -4,6 +4,7 @@ import { acquireTokenSilent } from '../../services/graphClient.js';
 import { storeSession } from '../../services/tokenCache.js';
 import type { UserSession } from '../../services/tokenCache.js';
 import { withSecurity } from '../../services/securityHeaders.js';
+import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from '../../services/sessionStoreError.js';
 
 /**
  * POST /api/auth/refresh
@@ -22,6 +23,8 @@ import { withSecurity } from '../../services/securityHeaders.js';
  *
  * If the MSAL silent acquisition fails (e.g. refresh token revoked or truly
  * expired), a 401 is returned with a `loginUrl` the client can redirect to.
+ * If session storage cannot be reached, a 503 is returned instead: the session
+ * may well be valid, so the client should retry rather than sign in again.
  */
 async function refresh(
   request: HttpRequest,
@@ -68,6 +71,10 @@ async function refresh(
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     context.error('[refresh] Unexpected error:', message);
+    // Storage could not find the session: retry later, don't send the client to sign in.
+    if (err instanceof SessionStoreUnavailableError) {
+      return { status: 503, headers: { 'Retry-After': String(SESSION_STORE_RETRY_AFTER_S) }, jsonBody: { error: 'Session store unavailable, retry shortly' } };
+    }
     return { status: 500, jsonBody: { error: 'Session refresh failed' } };
   }
 }
