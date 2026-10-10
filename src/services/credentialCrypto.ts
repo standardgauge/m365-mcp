@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, createCipheriv, createDecipheriv } from 'crypto';
+import { createHmac, randomBytes, createCipheriv, createDecipheriv, hkdfSync } from 'crypto';
 
 /**
  * Credential crypto helpers for at-rest protection of secrets in Azure Table
@@ -136,6 +136,18 @@ export function hashSessionToken(token: string): string {
  */
 export function macWithSessionKey(purpose: string, data: string): string {
   return createHmac('sha256', getHmacKey()).update(`${purpose}\n${data}`, 'utf8').digest('hex');
+}
+
+/**
+ * A 32-byte key for another purpose, derived from the HMAC key with
+ * HKDF-SHA256 and `purpose` as the info string. Distinct purposes give
+ * independent keys, and none of them reveals the HMAC key, so a new purpose
+ * needs no new secret on any deployment. The cost is shared rotation: rotating
+ * MCP_SESSION_HMAC_KEY rotates every derived key with it.
+ */
+export function deriveFromHmacKey(purpose: string): Buffer {
+  if (!purpose) throw new Error('deriveFromHmacKey: purpose must be non-empty');
+  return Buffer.from(hkdfSync('sha256', getHmacKey(), Buffer.alloc(0), purpose, 32));
 }
 
 // ── AES-256-GCM envelope encryption for sensitive blobs ───────────────────────

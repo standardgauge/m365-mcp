@@ -1004,6 +1004,13 @@ returns 401, and after a data-key rotation the admin UI's session list fails to
 read storage (it logs the decrypt error and shows only sessions held in that
 replica's memory). So purge after every rotation.
 
+Rotating the HMAC key also rotates the desktop extension's update-signing key,
+which is derived from it (`src/services/extensionSigning.ts`). Installed
+extensions carry the old public key, so they refuse every later update and keep
+running the version they have. Users already have to sign in again; tell them to
+reinstall the extension from `/install` at the same time, or they stay on that
+version for good.
+
 Each replica also holds decrypted sessions in memory. That is why a rotation
 must be a new revision: the new replicas start empty, and the old ones are
 retired once the new revision is ready.
