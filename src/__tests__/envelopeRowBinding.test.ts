@@ -334,6 +334,26 @@ function setLegacyRow(envelope: { ciphertext: string; iv: string; authTag: strin
   });
 }
 
+describe('session kind column', () => {
+  test('round-trips browser and client, and a refresh write keeps it', async () => {
+    await saveSession({ ...session('userA', 'tok-A', 'graph-token-A'), kind: 'browser' });
+    await saveSession({ ...session('userA', 'tok-C', 'graph-token-A'), kind: 'client' });
+    expect((await loadSessionByToken('tok-A'))?.kind).toBe('browser');
+    const client = (await loadSessionByToken('tok-C'))!;
+    expect(client.kind).toBe('client');
+
+    await saveSession({ ...client, sessionToken: '', kind: undefined, accessToken: 'graph-token-A2' }, 'update');
+    expect((await loadSessionByToken('tok-C'))?.kind).toBe('client');
+  });
+
+  test('a row without the column, or with an unknown value, has no kind', async () => {
+    await saveSession(session('userA', 'tok-A', 'graph-token-A'));
+    expect((await loadSessionByToken('tok-A'))?.kind).toBeUndefined();
+    sessionRow('userA').kind = 'admin';
+    expect((await loadSessionByToken('tok-A'))?.kind).toBeUndefined();
+  });
+});
+
 describe('MSAL cache rows, one per account', () => {
   test('round-trip through the account row, with the ETag the next write needs', async () => {
     const etag = await saveMsalCachePartition(HOME_A, '{"a":1}', undefined);

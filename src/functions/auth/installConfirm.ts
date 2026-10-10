@@ -1,5 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
-import { timingSafeEqual } from 'crypto';
+import { randomBytes, timingSafeEqual } from 'crypto';
 import {
   attachSessionToInstallNonce,
   deleteInstallHandoff,
@@ -16,6 +16,10 @@ import {
 import { withRateLimit } from '../../services/rateLimit.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { auditActor, logAccess } from '../../services/auditLog.js';
+import { deleteSessionByKey, getSessionByToken, storeSession } from '../../services/tokenCache.js';
+import type { UserSession } from '../../services/tokenCache.js';
+import { SessionStoreUnavailableError } from '../../services/sessionStoreError.js';
+import { checkBrowserOrigin } from '../../services/consoleSession.js';
 
 const NONCE_TTL_MS = 5 * 60 * 1000;
 const HANDOFF_ID_FORMAT = /^[a-f0-9]{64}$/;
@@ -34,16 +38,24 @@ const PAGE_HEADERS = {
  * Second half of an installer's sign-in. The OAuth callback records a pending
  * handoff and redirects here with its id in an HttpOnly cookie. GET shows who
  * is signed in, the device label the installer gave, and a box for the code the
- * installer printed. POST checks the code and, if it matches, attaches this
- * browser's session to the installer's nonce so install-poll can return it.
+ * installer printed. POST checks the code and, if it matches, attaches a new
+ * client session for the signed-in user to the installer's nonce so
+ * install-poll can return it.
  *
  * Someone who was only sent a sign-in link has no installer and so no code: the
  * page tells them to close it, and "This wasn't me" discards the handoff. Five
  * wrong codes discard it too.
  *
- * The session handed over is the one in this request's mcp_session cookie, and
- * only if its keyed hash matches the one the callback recorded, so the page can
- * hand over nothing but the session this sign-in created.
+ * The browser's session is never handed over. The request's mcp_session cookie
+ * must be the session the callback recorded (by keyed hash), so the page acts
+ * only on the sign-in that created it, and the installer then gets a new client
+ * session for the same user: its own token, its own row. The browser and the
+ * MCP client never hold the same token, so a client's token plus a stolen
+ * console cookie is not an admin credential (threat model 7.3). Logout still
+ * ends both, since it deletes every session row for the user.
+ *
+ * POST requires the browser Origin check, as every cookie-authenticated write
+ * does (threat model 3.4).
  */
 async function installConfirm(
   request: HttpRequest,
@@ -62,6 +74,16 @@ async function installConfirm(
 
   if (request.method !== 'POST') {
     return page(200, formPage(stored));
+  }
+
+  // The form posts from this page. A page on a same-site sibling subdomain
+  // would get the cookies attached too, and whoever wrote the sign-in link
+  // knows the code, so without this a sibling page could confirm for the
+  // signer (threat model 3.4).
+  const origin = checkBrowserOrigin(request);
+  if (!origin.ok) {
+    context.warn(`install handoff POST refused: ${origin.reason} (userId=${stored.record.userId})`);
+    return page(403, messagePage('Request refused', 'Submit the code from the confirmation page itself.'));
   }
 
   const form = new URLSearchParams(await request.text());
@@ -107,8 +129,26 @@ async function installConfirm(
   if (!(await deleteInstallHandoff(handoffId, stored.etag))) {
     return page(410, gonePage(), clearHandoffCookie());
   }
+
+  let client: UserSession | null;
+  try {
+    client = await mintClientSession(sessionToken, stored.record.deviceLabel);
+  } catch (err: unknown) {
+    if (!(err instanceof SessionStoreUnavailableError)) throw err;
+    client = null;
+  }
+  if (!client) {
+    auditHandoff(stored, 'attach', 'client session could not be created');
+    context.error(`install handoff confirmed but no client session could be created (userId=${stored.record.userId})`);
+    return page(
+      500,
+      messagePage('Something went wrong', 'The installer could not be connected. Run it again.'),
+      clearHandoffCookie()
+    );
+  }
+
   const attached = await attachSessionToInstallNonce(stored.record.challenge, {
-    sessionToken,
+    sessionToken: client.sessionToken,
     userId: stored.record.userId,
     email: stored.record.email,
     displayName: stored.record.displayName,
@@ -118,6 +158,10 @@ async function installConfirm(
   });
   auditHandoff(stored, 'attach', attached ? undefined : 'session could not be attached to the install nonce');
   if (!attached) {
+    // Nobody can collect the token, so the row is dead weight.
+    if (client._storageKey) {
+      await deleteSessionByKey(client._storageKey, client.userId).catch(() => undefined);
+    }
     context.error(`install handoff confirmed but could not be stored (userId=${stored.record.userId})`);
     return page(
       500,
@@ -131,6 +175,34 @@ async function installConfirm(
     messagePage('Connected', 'Go back to the installer; it will finish on its own. You can close this tab.'),
     clearHandoffCookie()
   );
+}
+
+/**
+ * Create the installer's own session from the browser session it was confirmed
+ * from: same user and Graph account, a fresh token, kind 'client'. The absolute
+ * lifetime anchor is copied, so connecting a client does not extend how long
+ * this sign-in can be used. Returns null when the browser session is gone.
+ */
+async function mintClientSession(browserToken: string, deviceLabel: string | undefined): Promise<UserSession | null> {
+  const browser = await getSessionByToken(browserToken);
+  if (!browser) return null;
+  const now = Date.now();
+  const client: UserSession = {
+    userId: browser.userId,
+    homeAccountId: browser.homeAccountId,
+    displayName: browser.displayName,
+    email: browser.email,
+    tenantId: browser.tenantId,
+    accessToken: browser.accessToken,
+    expiresAt: browser.expiresAt,
+    sessionToken: randomBytes(32).toString('hex'),
+    sessionCreatedAt: now,
+    sessionAbsoluteCreatedAt: browser.sessionAbsoluteCreatedAt || browser.sessionCreatedAt || now,
+    deviceLabel,
+    kind: 'client',
+  };
+  await storeSession(client);
+  return client;
 }
 
 /**

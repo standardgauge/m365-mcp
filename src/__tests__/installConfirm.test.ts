@@ -9,8 +9,10 @@
  *   - the code derivation, and that install.sh, install.ps1 and the extension
  *     all print the code the server checks;
  *   - GET /api/auth/install-confirm renders the request without the code;
- *   - POST attaches the session only with the right code and only the session
- *     this sign-in created, once;
+ *   - POST acts only on the session this sign-in created, only with the right
+ *     code, once, and hands the installer a new client session rather than the
+ *     browser's own token;
+ *   - POST refuses a request from another origin, a same-site sibling included;
  *   - wrong codes are counted and discard the handoff at the limit;
  *   - "This wasn't me" discards it.
  */
@@ -39,6 +41,16 @@ jest.mock('../services/tableStorage.js', () => ({
   recordInstallHandoffFailure: (id: string, s: StoredInstallHandoff) => recordFailureMock(id, s),
   deleteInstallHandoff: (id: string, etag?: string) => deleteHandoffMock(id, etag),
   attachSessionToInstallNonce: (nonce: string, rec: InstallNonceRecord) => attachMock(nonce, rec),
+}));
+
+import type { UserSession } from '../services/tokenCache.js';
+const getSessionByTokenMock = jest.fn<(t: string) => Promise<UserSession | undefined>>();
+const storeSessionMock = jest.fn<(s: UserSession) => Promise<void>>();
+const deleteSessionByKeyMock = jest.fn<(k: string, u: string) => Promise<void>>();
+jest.mock('../services/tokenCache.js', () => ({
+  getSessionByToken: (t: string) => getSessionByTokenMock(t),
+  storeSession: (s: UserSession) => storeSessionMock(s),
+  deleteSessionByKey: (k: string, u: string) => deleteSessionByKeyMock(k, u),
 }));
 
 // Stand-in for the keyed HMAC: deterministic, and distinct per token.
@@ -110,13 +122,46 @@ function stored(overrides: Partial<StoredInstallHandoff['record']> = {}): Stored
   };
 }
 
-function req(opts: { method?: string; cookie?: string; form?: Record<string, string> }): HttpRequest {
+const HOST = 'mcp.example.com';
+// What a browser sends when the confirmation page's own form posts.
+const FORM_POST_HEADERS: Record<string, string> = {
+  host: HOST,
+  origin: `https://${HOST}`,
+  'sec-fetch-site': 'same-origin',
+};
+
+function req(opts: {
+  method?: string;
+  cookie?: string;
+  form?: Record<string, string>;
+  headers?: Record<string, string>;
+}): HttpRequest {
   const body = new URLSearchParams(opts.form ?? {}).toString();
+  const method = opts.method ?? 'GET';
+  const headers = new Map<string, string>(
+    Object.entries(opts.headers ?? (method === 'POST' ? FORM_POST_HEADERS : { host: HOST }))
+  );
+  if (opts.cookie) headers.set('cookie', opts.cookie);
+  return { method, headers, text: async () => body } as unknown as HttpRequest;
+}
+
+function browserSession(overrides: Partial<UserSession> = {}): UserSession {
   return {
-    method: opts.method ?? 'GET',
-    headers: new Map<string, string>(opts.cookie ? [['cookie', opts.cookie]] : []),
-    text: async () => body,
-  } as unknown as HttpRequest;
+    userId: 'user-1',
+    homeAccountId: 'home-1',
+    displayName: 'Adele Vance',
+    email: 'adele@fabrikam.com',
+    tenantId: 'tenant-1',
+    accessToken: 'graph-access-token',
+    expiresAt: Date.now() + 3_600_000,
+    sessionToken: SESSION_TOKEN,
+    sessionCreatedAt: Date.now() - 1_000,
+    sessionAbsoluteCreatedAt: Date.now() - 60_000,
+    deviceLabel: 'ADELE-LAPTOP',
+    kind: 'browser',
+    _storageKey: 'browser-row',
+    ...overrides,
+  };
 }
 
 const BOTH_COOKIES = `install_handoff=${HANDOFF_ID}; mcp_session=${SESSION_TOKEN}`;
@@ -128,6 +173,11 @@ beforeEach(() => {
   deleteHandoffMock.mockResolvedValue(true);
   attachMock.mockResolvedValue(true);
   recordFailureMock.mockResolvedValue(4);
+  getSessionByTokenMock.mockResolvedValue(browserSession());
+  storeSessionMock.mockImplementation(async (sess) => {
+    sess._storageKey = 'client-row';
+  });
+  deleteSessionByKeyMock.mockResolvedValue(undefined);
 });
 
 // ── Code derivation ─────────────────────────────────────────────────────────
@@ -290,17 +340,78 @@ describe('POST /api/auth/install-confirm', () => {
     expect(attachMock).not.toHaveBeenCalled();
   });
 
-  it('attaches this browser\'s session to the challenge with the right code', async () => {
+  it('attaches a new client session, never the browser\'s own token, with the right code', async () => {
     const res = await confirm(req({ method: 'POST', cookie: BOTH_COOKIES, form: { code: CODE } }), ctx);
     expect(res.status).toBe(200);
     expect(res.body).toContain('Connected');
     expect(deleteHandoffMock).toHaveBeenCalledWith(HANDOFF_ID, 'W/"etag-1"');
+    expect(getSessionByTokenMock).toHaveBeenCalledWith(SESSION_TOKEN);
+
+    expect(storeSessionMock).toHaveBeenCalledTimes(1);
+    const client = storeSessionMock.mock.calls[0][0];
+    expect(client.kind).toBe('client');
+    expect(client.sessionToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(client.sessionToken).not.toBe(SESSION_TOKEN);
+    expect(client.userId).toBe('user-1');
+    expect(client.homeAccountId).toBe('home-1');
+    expect(client.tenantId).toBe('tenant-1');
+    expect(client.deviceLabel).toBe('ADELE-LAPTOP');
+
     expect(attachMock).toHaveBeenCalledTimes(1);
     const [nonce, rec] = attachMock.mock.calls[0];
     expect(nonce).toBe(CHALLENGE);
-    expect(rec.sessionToken).toBe(SESSION_TOKEN);
+    expect(rec.sessionToken).toBe(client.sessionToken);
     expect(rec.userId).toBe('user-1');
     expect(res.cookies?.find((c) => c.name === 'install_handoff')?.maxAge).toBe(0);
+  });
+
+  it('keeps the sign-in\'s absolute lifetime anchor on the client session', async () => {
+    const anchor = Date.now() - 5 * 86_400_000;
+    getSessionByTokenMock.mockResolvedValue(browserSession({ sessionAbsoluteCreatedAt: anchor }));
+    await confirm(req({ method: 'POST', cookie: BOTH_COOKIES, form: { code: CODE } }), ctx);
+    expect(storeSessionMock.mock.calls[0][0].sessionAbsoluteCreatedAt).toBe(anchor);
+  });
+
+  it('attaches nothing when the browser session is gone or storage cannot answer', async () => {
+    const { SessionStoreUnavailableError } = await import('../services/sessionStoreError.js');
+    for (const outcome of [
+      () => getSessionByTokenMock.mockResolvedValue(undefined),
+      () => getSessionByTokenMock.mockRejectedValue(new SessionStoreUnavailableError(new Error('503'))),
+    ]) {
+      jest.clearAllMocks();
+      deleteHandoffMock.mockResolvedValue(true);
+      outcome();
+      const res = await confirm(req({ method: 'POST', cookie: BOTH_COOKIES, form: { code: CODE } }), ctx);
+      expect(res.status).toBe(500);
+      expect(res.body).not.toContain('Connected');
+      expect(storeSessionMock).not.toHaveBeenCalled();
+      expect(attachMock).not.toHaveBeenCalled();
+    }
+  });
+
+  it('deletes the client session when it cannot be attached', async () => {
+    attachMock.mockResolvedValue(false);
+    await confirm(req({ method: 'POST', cookie: BOTH_COOKIES, form: { code: CODE } }), ctx);
+    expect(deleteSessionByKeyMock).toHaveBeenCalledWith('client-row', 'user-1');
+  });
+
+  it('refuses a POST from another origin, a same-site sibling included, with the right code', async () => {
+    const refused: Array<Record<string, string>> = [
+      { host: HOST, origin: 'https://evil.example.com', 'sec-fetch-site': 'same-site' },
+      { host: HOST, origin: 'https://attacker.test', 'sec-fetch-site': 'cross-site' },
+      { host: HOST, origin: `https://${HOST}`, 'sec-fetch-site': 'same-site' },
+      { host: HOST, 'sec-fetch-site': 'same-origin' },
+      { host: HOST, origin: 'null' },
+    ];
+    for (const headers of refused) {
+      for (const form of [{ code: CODE }, { action: 'cancel' }] as Array<Record<string, string>>) {
+        const res = await confirm(req({ method: 'POST', cookie: BOTH_COOKIES, form, headers }), ctx);
+        expect(res.status).toBe(403);
+      }
+    }
+    expect(deleteHandoffMock).not.toHaveBeenCalled();
+    expect(recordFailureMock).not.toHaveBeenCalled();
+    expect(attachMock).not.toHaveBeenCalled();
   });
 
   it('refuses without the session the callback issued, even with the right code', async () => {

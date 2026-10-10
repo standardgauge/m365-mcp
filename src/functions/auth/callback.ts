@@ -153,6 +153,9 @@ async function callback(
       sessionCreatedAt: Date.now(),
       sessionAbsoluteCreatedAt: Date.now(),
       deviceLabel,
+      // The browser's own session. An installer gets a separate client session
+      // at install-confirm, never this token (threat model 7.3).
+      kind: 'browser',
     };
 
     await storeSession(session);
@@ -209,9 +212,10 @@ async function callback(
       : resolveFrontendUrl(process.env.FRONTEND_URL, (m) => context.error(m));
 
     // The console session is what the admin API accepts. It is minted only
-    // here, at an interactive sign-in, and only ever leaves as an HttpOnly
-    // cookie, so the session token the install flow hands to the MCP client
-    // is never enough on its own (services/consoleSession.ts).
+    // here, at an interactive sign-in, bound to this browser session's token,
+    // and only ever leaves as an HttpOnly cookie. The install flow hands the
+    // MCP client a different token, so a client's token is no part of an
+    // admin credential (services/consoleSession.ts).
     const issuedAt = Date.now();
     const consoleSession = consoleCookie(mintConsoleToken(sessionToken, issuedAt), issuedAt);
     return {

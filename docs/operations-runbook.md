@@ -66,6 +66,20 @@ the instance's own origin (or `FRONTEND_URL`'s, for local development), and
 allowed, so an admin can open an `/api/manage/...` URL in the signed-in browser.
 A bearer token, `x-session-token`, or a copied `mcp_session` cookie gets a 401.
 
+The session behind the cookie must also be a browser session. The installers
+and the desktop extension get a separate client session of their own at
+install-confirm, never the browser's token, so a client's token is no part of
+an admin credential. A session from before session kinds were recorded counts
+as neither: the first admin visit after upgrading sends the user through sign-in
+once.
+
+The same Origin check guards the `mcp_session` cookie everywhere else. On
+`/api/mail/settings`, the REST tool routes, `/api/mcp` and `/api/auth/refresh`
+the cookie authenticates only a request from the instance's own pages; a
+request from another origin, a sibling subdomain included, is treated as if it
+carried no cookie and gets a 401. Bearer and `x-session-token` callers are
+unaffected.
+
 The console session lasts 30 minutes idle and never more than 8 hours from the
 sign-in that started it. The admin UI renews it through `/api/auth/me` every
 five minutes while its tab is visible, and sends the user back through sign-in
@@ -199,7 +213,7 @@ Events that are not tool calls:
 |---|---|---|
 | `auth.login` | Browser sign-in completes (`resource` `browser` or `install`), or fails: identity-platform error, state mismatch, missing PKCE verifier or nonce, missing code, foreign tenant (`resource` `tenant:<id>`), callback error | The signed-in user; on failure no user, in the instance's own tenant |
 | `auth.device_login` | A device-code sign-in completes or fails | As above. The address is the one that started the flow |
-| `auth.install_handoff` | The browser enters the installer's code on install-confirm and the session is attached (`resource` `attach`; denied if the callback could not record the pending handoff or the attach failed), the user declines it or it is discarded after five wrong codes (`confirm`, denied), the installer collects it (`poll`), or polls an expired nonce (`poll`, denied) | The signed-in user. Compare the two addresses: `attach` and `confirm` are the browser, `poll` is the machine running the installer |
+| `auth.install_handoff` | The browser enters the installer's code on install-confirm and a new client session is minted and attached (`resource` `attach`; denied if the callback could not record the pending handoff, the client session could not be created, or the attach failed), the user declines it or it is discarded after five wrong codes (`confirm`, denied), the installer collects it (`poll`), or polls an expired nonce (`poll`, denied) | The signed-in user. Compare the two addresses: `attach` and `confirm` are the browser, `poll` is the machine running the installer |
 | `auth.logout` | A logout ended a session, or failed to | The user whose sessions were deleted |
 | `auth.refresh`, `auth.session_renew` | `/api/auth/refresh`, or a request on a session idle past its TTL, renews it or fails to | The session's user |
 | `policy.deny_list.global.add` / `.remove` | A global deny entry changes | The admin; `resource` is `<type>:<path>` |

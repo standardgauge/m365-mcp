@@ -15,6 +15,13 @@ export interface AuthResult {
   session: UserSession;
 }
 
+type TokenSource = 'bearer' | 'header' | 'cookie';
+
+interface TokenCandidate {
+  token: string;
+  source: TokenSource;
+}
+
 /**
  * Extract all candidate session tokens from the request. Returns them in
  * priority order so authenticateRequest can try each until one matches.
@@ -22,24 +29,37 @@ export interface AuthResult {
  * Multiple candidates are needed because the admin UI may send an
  * Authorization: Bearer header containing a Graph access token (not a session
  * token) alongside the mcp_session cookie that IS the session token.
+ *
+ * The cookie is a candidate only when the request passes the browser Origin
+ * check. A browser attaches the cookie on its own, including to a request a
+ * page on a same-site sibling subdomain makes, and SameSite=Lax does not stop
+ * that; the Origin check does (threat model 3.4). The headers need no such
+ * check: a page on another origin cannot set them without a CORS preflight,
+ * and no route answers one.
  */
-function extractSessionTokenCandidates(request: HttpRequest): string[] {
-  const candidates: string[] = [];
+function extractSessionTokenCandidates(request: HttpRequest): TokenCandidate[] {
+  const candidates: TokenCandidate[] = [];
 
   // 1. Authorization header
   const authHeader = request.headers.get('authorization') ?? '';
   if (authHeader.startsWith('Bearer ')) {
-    candidates.push(authHeader.slice(7));
+    candidates.push({ token: authHeader.slice(7), source: 'bearer' });
   }
 
   // 2. x-session-token header
   const headerToken = request.headers.get('x-session-token');
-  if (headerToken) candidates.push(headerToken);
+  if (headerToken) candidates.push({ token: headerToken, source: 'header' });
 
-  // 3. mcp_session cookie
-  const cookieHeader = request.headers.get('cookie') ?? '';
-  const match = cookieHeader.match(/(?:^|;\s*)mcp_session=([^;]+)/);
-  if (match) candidates.push(match[1]);
+  // 3. mcp_session cookie, from this instance's own pages only
+  const cookieToken = readCookie(request, 'mcp_session');
+  if (cookieToken) {
+    const origin = checkBrowserOrigin(request);
+    if (origin.ok) {
+      candidates.push({ token: cookieToken, source: 'cookie' });
+    } else {
+      console.warn(`[auth] mcp_session cookie ignored: ${origin.reason}`);
+    }
+  }
 
   return candidates;
 }
@@ -54,7 +74,8 @@ function extractSessionTokenCandidates(request: HttpRequest): string[] {
  *   1. Authorization: Bearer <token>   — for headless / supergateway clients
  *   2. x-session-token: <token>        — alternate header for tools that
  *                                        reserve Authorization for Graph
- *   3. mcp_session=<token> cookie      — for browser clients (admin SPA)
+ *   3. mcp_session=<token> cookie      — for browser clients (admin SPA),
+ *                                        and only past the Origin check
  *
  * The admin API does not use this: /api/manage/* goes through
  * authenticateConsoleRequest, which accepts the cookie only.
@@ -68,7 +89,7 @@ function extractSessionTokenCandidates(request: HttpRequest): string[] {
  */
 export async function authenticateRequest(request: HttpRequest): Promise<AuthResult | null> {
   const candidates = extractSessionTokenCandidates(request);
-  for (const token of candidates) {
+  for (const { token } of candidates) {
     const result = await authenticateToken(token);
     if (result === 'unknown') continue;
     return result;
@@ -169,8 +190,10 @@ export interface ConsoleAuthResult extends AuthResult {
  * Unlike authenticateRequest, this ignores the bearer and x-session-token
  * headers entirely: the session token comes from the `mcp_session` cookie,
  * and the request must also carry an `mcp_console` cookie bound to that token
- * (see services/consoleSession.ts) and pass the Origin check. So the token an
- * MCP client holds is not an admin-API credential, however it is presented.
+ * (see services/consoleSession.ts) and pass the Origin check, and the session
+ * must be a browser session. The install flow gives an MCP client a separate
+ * client session, so the token it holds is not an admin-API credential, however
+ * it is presented, and not even with a stolen console cookie beside it.
  * Threat model section 7, rows 7.3 and 3.4.
  *
  * Throws SessionStoreUnavailableError when storage cannot answer, as
@@ -192,6 +215,14 @@ export async function authenticateConsoleRequest(request: HttpRequest): Promise<
 
   const result = await authenticateToken(sessionToken);
   if (!result || result === 'unknown') return null;
+  // Only a browser session backs a console session. A row from before session
+  // kinds existed may share its token with an installed client, so it is
+  // refused too; the SPA sends the user through sign-in, which mints a
+  // browser session.
+  if (result.session.kind !== 'browser') {
+    console.warn('[auth] console request refused: session is not a browser session');
+    return null;
+  }
   return { ...result, console: claims, sessionToken };
 }
 
@@ -216,7 +247,7 @@ export async function authenticateConsoleRequest(request: HttpRequest): Promise<
  */
 export async function authenticateRequestAllowExpired(request: HttpRequest): Promise<AuthResult | null> {
   const candidates = extractSessionTokenCandidates(request);
-  for (const token of candidates) {
+  for (const { token } of candidates) {
     const session = await getSessionByToken(token);
     if (session) {
       if (isAbsoluteLifetimeExceeded(session)) {
