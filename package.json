@@ -14,7 +14,7 @@
     "dev": "concurrently \"npm run watch\" \"npm run start\"",
     "dev:admin": "vite --config vite.config.ts",
     "clean": "rimraf dist",
-    "test": "jest --passWithNoTests",
+    "test": "jest",
     "test:watch": "jest --watch"
   },
   "dependencies": {
