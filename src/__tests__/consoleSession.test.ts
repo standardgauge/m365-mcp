@@ -11,7 +11,8 @@
  *     admin credential, whether presented as bearer, x-session-token or a
  *     forged mcp_session cookie, without the console cookie bound to it
  *   - every /api/manage/* route authenticates through authenticateConsoleRequest
- *   - logout is POST only, refuses a cross-origin request, clears mcp_console
+ *   - logout is POST only, refuses a cross-origin request, clears mcp_console,
+ *     and never sends Microsoft back to a host-reserved path
  *   - the admin SPA has no inline executable script and a CSP that refuses one
  */
 
@@ -54,6 +55,7 @@ import {
   verifyConsoleToken,
 } from '../services/consoleSession.js';
 import { adminSpaHeaders } from '../services/securityHeaders.js';
+import { reservedPrefixFor } from '../services/frontendUrl.js';
 import '../functions/auth/logout.js';
 import { injectRuntimeConfig } from '../functions/admin/serveAdmin.js';
 
@@ -254,6 +256,7 @@ describe('logout', () => {
   const httpMock = app.http as unknown as jest.Mock<(name: string, opts: Reg) => void>;
   const reg = httpMock.mock.calls.find((c) => c[0] === 'authLogout')?.[1];
   if (!reg) throw new Error('authLogout handler was not registered');
+  const handler = reg.handler;
   const ctx = { warn: jest.fn(), error: jest.fn() } as unknown as InvocationContext;
 
   it('is registered for POST only', () => {
@@ -277,6 +280,35 @@ describe('logout', () => {
     const cleared = Object.fromEntries((res.cookies ?? []).map((c) => [c.name, c]));
     expect(cleared.mcp_session?.maxAge).toBe(0);
     expect(cleared.mcp_console).toMatchObject({ maxAge: 0, path: '/api' });
+  });
+
+  async function postLogoutTarget(frontendUrl: string | undefined): Promise<string> {
+    const saved = process.env.FRONTEND_URL;
+    if (frontendUrl === undefined) delete process.env.FRONTEND_URL;
+    else process.env.FRONTEND_URL = frontendUrl;
+    try {
+      const res = await handler(req('POST', browserHeaders(`mcp_session=${SESSION_TOKEN}`, 'POST')), ctx);
+      const target = new URL(res.headers?.Location ?? '').searchParams.get('post_logout_redirect_uri');
+      if (!target) throw new Error('no post_logout_redirect_uri');
+      return target;
+    } finally {
+      if (saved === undefined) delete process.env.FRONTEND_URL;
+      else process.env.FRONTEND_URL = saved;
+    }
+  }
+
+  it.each([undefined, '/', `${SELF}/`, `${SELF}/admin`, `${SELF}/admin/settings`, `${SELF}/runtime`, '/admin'])(
+    'sends Microsoft back to the SPA root, never a host-reserved path (FRONTEND_URL=%s)',
+    async (frontendUrl) => {
+      const target = await postLogoutTarget(frontendUrl);
+      expect(new URL(target).origin).toBe(SELF);
+      expect(reservedPrefixFor(target)).toBeNull();
+      expect(new URL(target).pathname).toBe('/');
+    },
+  );
+
+  it('honours a non-reserved absolute FRONTEND_URL, such as the Vite dev server', async () => {
+    expect(await postLogoutTarget('http://localhost:5173/')).toBe('http://localhost:5173/');
   });
 });
 

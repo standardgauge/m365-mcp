@@ -3,6 +3,7 @@ import { authenticateRequest } from '../../services/authMiddleware.js';
 import { deleteAllUserSessions } from '../../services/tokenCache.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { checkBrowserOrigin, expiredConsoleCookie } from '../../services/consoleSession.js';
+import { resolveFrontendUrl } from '../../services/frontendUrl.js';
 
 /**
  * POST /api/auth/logout
@@ -12,7 +13,8 @@ import { checkBrowserOrigin, expiredConsoleCookie } from '../../services/console
  * `user_name`), then
  * redirects to the Microsoft identity-platform logout so the upstream SSO
  * session is cleared too. Post-logout the user lands back on the admin app,
- * where /api/auth/me will 401 and trigger a fresh sign-in.
+ * at the site root (never /admin, which the Functions host reserves), where
+ * /api/auth/me will 401 and trigger a fresh sign-in.
  *
  * Replaces the SPA's old MSAL `logoutRedirect()` — sign-out now clears the
  * server session that actually authorizes API calls, not just client cache.
@@ -48,9 +50,16 @@ async function logout(
 
   // Build the Microsoft logout URL with a post-logout redirect back to the app.
   const tenantId = process.env.AZURE_TENANT_ID ?? 'common';
+  // Same target the callback redirects to after sign-in: the SPA lives at the
+  // site root, and resolveFrontendUrl refuses a path the Functions host
+  // reserves (/admin, /runtime). Microsoft needs an absolute URI, so a
+  // site-relative value is anchored on this request's origin.
+  const frontendUrl = resolveFrontendUrl(process.env.FRONTEND_URL, (m) => context.error(m));
   const proto = request.headers.get('x-forwarded-proto') ?? 'https';
   const host = request.headers.get('x-forwarded-host') ?? request.headers.get('host') ?? '';
-  const postLogoutRedirect = host ? `${proto}://${host}/admin` : '/admin';
+  const postLogoutRedirect = /^https?:\/\//i.test(frontendUrl) || !host
+    ? frontendUrl
+    : new URL(frontendUrl, `${proto}://${host}`).toString();
   const location = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/logout` +
     `?post_logout_redirect_uri=${encodeURIComponent(postLogoutRedirect)}`;
 
