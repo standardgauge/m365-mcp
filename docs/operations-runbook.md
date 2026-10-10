@@ -170,6 +170,40 @@ ContainerAppConsoleLogs_CL
 | order by TimeGenerated desc
 ```
 
+### Host health-check noise
+
+The Container App runs without `AzureWebJobsStorage` by design (see
+`infra/container-app.bicep`). The Functions host still registers its own
+storage health check and cannot be told not to, so that check reports
+`azure.functions.webjobs.storage Unhealthy: Unable to create client for
+AzureWebJobsStorage` on every 30-second publish. The service is unaffected:
+the probes check the app's own `/health`, not the host's health report.
+
+Left alone, the host's health-check publisher writes that report to the
+console on every publish as a `warn:` entry, a header line naming the
+category followed by `Process reporting unhealthy: Unhealthy. Health check
+entries are {...}`. Any console-log alert keyed on warnings then fires
+constantly and real warnings drown. `host.json` sets that category,
+`Microsoft.Azure.WebJobs.Script.Diagnostics.HealthChecks.TelemetryHealthCheckPublisher`,
+to `Error`, which drops the entry. The cost is that the host's own lifecycle
+health reports are not logged either; the probes and `/health` cover the same
+ground. The container boot test in CI fails if the entry comes back.
+
+If an instance still shows it, for example after a host update moves the
+publisher to another category, exclude it from the query rather than
+loosening the alert. The console writes the header and the body as separate
+rows, so drop both:
+
+```
+ContainerAppConsoleLogs_CL
+| where ContainerAppName_s == "m365-mcp"
+| where Log_s !has "TelemetryHealthCheckPublisher"
+| where Log_s !has "azure.functions.webjobs.storage"
+| where Log_s has "warn" or Log_s contains "error"
+| order by TimeGenerated desc
+| take 50
+```
+
 ### Application audit log
 
 Every allowed and denied call on both the REST and MCP surfaces, every
