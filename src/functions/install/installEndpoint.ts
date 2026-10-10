@@ -34,7 +34,24 @@ import { withSecurity, installLandingHeaders } from '../../services/securityHead
 // code before it hands a session to an installer, and 2.9.0 never shows one, so
 // a 2.9.0 extension that has to sign in again cannot finish. The bump is what
 // delivers the code-showing authenticate() to those installs.
-const EXTENSION_VERSION = '2.10.0';
+// Bumped 2.10.0 -> 2.10.1: 2.10.0 reads the session from a keychain service
+// named after this repository's owner, and installs from before the move
+// saved it under the old owner's name. 2.10.0 found nothing and asked every
+// one of them to sign in again. 2.10.1 falls back to the name set in
+// EXTENSION_LEGACY_KEYCHAIN_PREFIX and moves the session across.
+const EXTENSION_VERSION = '2.10.1';
+
+// Keychain service an earlier release of the extension saved the session
+// under, or '' when the deployment never had one. Only a deployment that
+// shipped the extension under another prefix sets
+// EXTENSION_LEGACY_KEYCHAIN_PREFIX; the value is embedded in generated code,
+// so anything outside a plain reverse-DNS charset is ignored.
+function legacyKeychainService(slug: string, keychainService: string): string {
+  const prefix = process.env.EXTENSION_LEGACY_KEYCHAIN_PREFIX ?? '';
+  if (!/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(prefix)) return '';
+  const legacy = prefix + slug;
+  return legacy === keychainService ? '' : legacy;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -194,7 +211,12 @@ function renderPackageJson(slug: string): string {
   }, null, 2) + '\n';
 }
 
-function renderServerJs(mcpUrl: string, mcpName: string, keychainService: string): string {
+function renderServerJs(
+  mcpUrl: string,
+  mcpName: string,
+  keychainService: string,
+  legacyService = '',
+): string {
   return `#!/usr/bin/env node
 /**
  * M365 MCP Extension — Claude Desktop entry point.
@@ -221,6 +243,7 @@ const readline = require('readline');
 const MCP_URL = '${mcpUrl}';
 const MCP_NAME = '${mcpName}';
 const KEYCHAIN_SERVICE = '${keychainService}';
+const LEGACY_KEYCHAIN_SERVICE = ${JSON.stringify(legacyService)};
 const KEYCHAIN_ACCOUNT = 'session-token';
 const EXTENSION_VERSION = '${EXTENSION_VERSION}';
 const POLL_INTERVAL = 2000;
@@ -350,25 +373,47 @@ function secretToolStore(token) {
   ], { input: token, stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
-function secretToolLookup() {
+function secretToolLookup(service = KEYCHAIN_SERVICE) {
   return execFileSync('secret-tool', [
-    'lookup', 'service', KEYCHAIN_SERVICE, 'account', KEYCHAIN_ACCOUNT,
+    'lookup', 'service', service, 'account', KEYCHAIN_ACCOUNT,
   ], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 }
 
-function secretToolClear() {
+function secretToolClear(service = KEYCHAIN_SERVICE) {
   execFileSync('secret-tool', [
-    'clear', 'service', KEYCHAIN_SERVICE, 'account', KEYCHAIN_ACCOUNT,
+    'clear', 'service', service, 'account', KEYCHAIN_ACCOUNT,
   ], { stdio: 'pipe' });
+}
+
+function keychainLookup(service) {
+  return execFileSync('security', [
+    'find-generic-password', '-s', service, '-a', KEYCHAIN_ACCOUNT, '-w'
+  ], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+}
+
+// An earlier release saved the session under LEGACY_KEYCHAIN_SERVICE. On a
+// miss under the current name, read it from there and save it under the
+// current name. The old entry stays, so going back a version still finds it;
+// deleteToken() removes both once the session is dead.
+function loadLegacyToken() {
+  if (!LEGACY_KEYCHAIN_SERVICE) return null;
+  let token = '';
+  try {
+    if (process.platform === 'darwin') token = keychainLookup(LEGACY_KEYCHAIN_SERVICE);
+    else if (process.platform === 'linux') token = secretToolLookup(LEGACY_KEYCHAIN_SERVICE);
+  } catch { return null; }
+  if (!token) return null;
+  try { saveToken(token); } catch { /* still usable for this run */ }
+  process.stderr.write('[' + MCP_NAME + '] Moved the saved session from ' +
+    LEGACY_KEYCHAIN_SERVICE + ' to ' + KEYCHAIN_SERVICE + '.\\n');
+  return token;
 }
 
 function loadToken() {
   // macOS: Keychain
   if (process.platform === 'darwin') {
     try {
-      const token = execFileSync('security', [
-        'find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT, '-w'
-      ], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      const token = keychainLookup(KEYCHAIN_SERVICE);
       if (token) return token;
     } catch { /* keychain miss — fall through */ }
   }
@@ -395,7 +440,7 @@ function loadToken() {
       if (data.token) return data.token;
     }
   } catch { /* ignore */ }
-  return null;
+  return loadLegacyToken();
 }
 
 function saveToken(token) {
@@ -436,13 +481,15 @@ function saveToken(token) {
 }
 
 function deleteToken() {
-  if (process.platform === 'darwin') {
-    try {
-      execFileSync('security', ['delete-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT], { stdio: 'pipe' });
-    } catch { /* ok */ }
-  }
-  if (process.platform === 'linux') {
-    try { secretToolClear(); } catch { /* ok */ }
+  for (const service of [KEYCHAIN_SERVICE, LEGACY_KEYCHAIN_SERVICE].filter(Boolean)) {
+    if (process.platform === 'darwin') {
+      try {
+        execFileSync('security', ['delete-generic-password', '-s', service, '-a', KEYCHAIN_ACCOUNT], { stdio: 'pipe' });
+      } catch { /* ok */ }
+    }
+    if (process.platform === 'linux') {
+      try { secretToolClear(service); } catch { /* ok */ }
+    }
   }
   try { fs.unlinkSync(getTokenFile()); } catch { /* ok */ }
 }
@@ -692,7 +739,13 @@ function generateBundle(mcpUrl: string, slug: string, displayName: string): Buff
   const entries: ZipEntry[] = [
     { name: 'manifest.json', data: Buffer.from(renderManifest(slug, displayName), 'utf-8') },
     { name: 'package.json', data: Buffer.from(renderPackageJson(slug), 'utf-8') },
-    { name: 'server/index.js', data: Buffer.from(renderServerJs(mcpUrl, slug, keychainService), 'utf-8') },
+    {
+      name: 'server/index.js',
+      data: Buffer.from(
+        renderServerJs(mcpUrl, slug, keychainService, legacyKeychainService(slug, keychainService)),
+        'utf-8',
+      ),
+    },
   ];
 
   return buildZip(entries);
@@ -840,7 +893,12 @@ async function extensionUpdateHandler(
         files: {
           'manifest.json': renderManifest(slug, displayName),
           'package.json': renderPackageJson(slug),
-          'server/index.js': renderServerJs(origin, slug, keychainService),
+          'server/index.js': renderServerJs(
+            origin,
+            slug,
+            keychainService,
+            legacyKeychainService(slug, keychainService),
+          ),
         },
       },
     };
