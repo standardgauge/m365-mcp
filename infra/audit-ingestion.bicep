@@ -34,12 +34,15 @@ param dataCollectionRuleName string
 // between the year values, and anything below 4 other than -1, only Azure
 // checks. There is no @minValue because -1 sits below the resource schema's
 // minimum of 4 and Bicep would warn on every build.
+// The two -1 defaults differ: retentionInDays -1 takes the workspace retention,
+// while totalRetentionInDays -1 takes the table's retentionInDays, so leaving
+// total at -1 means no separate long-term retention.
 
 @description('Days the audit table keeps rows interactively queryable: 4 through 730. -1 inherits the workspace default.')
 @maxValue(730)
 param retentionInDays int = -1
 
-@description('Total days kept including long-term retention: 4 through 730, or one of 1095, 1460, 1826, 2191, 2556, 2922, 3288, 3653, 4018, 4383 (3 to 12 years; five years is 1826). -1 inherits the workspace default.')
+@description('Total days kept including long-term retention: 4 through 730, or one of 1095, 1460, 1826, 2191, 2556, 2922, 3288, 3653, 4018, 4383 (3 to 12 years; five years is 1826). -1 uses retentionInDays, with no separate long-term retention.')
 @maxValue(4383)
 param totalRetentionInDays int = -1
 

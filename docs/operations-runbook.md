@@ -317,11 +317,18 @@ az monitor log-analytics workspace table update -g rg-m365-mcp \
   --retention-time 90 --total-retention-time 730
 ```
 
-`--total-retention-time` takes 4 through 730 days, or a whole number of years
-beyond that: 1095, 1460, 1826, 2191, 2556, 2922, 3288, 3653, 4018 or 4383
-(three to twelve years). Five years is **1826**; 1825 is rejected with
-`InvalidParameter`, and through Bicep that fails the whole deployment. The same
-values apply to `totalRetentionInDays` in `infra/audit-ingestion.bicep`.
+`totalRetentionInDays` in `infra/audit-ingestion.bicep` (and the REST API and
+PowerShell) takes 4 through 730 days, or a whole number of years beyond that:
+1095, 1460, 1826, 2191, 2556, 2922, 3288, 3653, 4018 or 4383 (three to twelve
+years). Five years is **1826**; 1825 is rejected with `InvalidParameter`, and
+through Bicep that fails the whole deployment.
+
+The Azure CLI `--total-retention-time` flag only goes up to 2556 (seven years),
+so from the CLI the allowed values are 4 through 730, 1095, 1460, 1826, 2191 or
+2556. For 2922 and above, deploy `infra/audit-ingestion.bicep` with
+`totalRetentionInDays` set, or use the portal, REST API or PowerShell
+([Microsoft docs](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure#configure-table-level-retention)).
+
 `--retention-time` takes 4 through 730 and cannot exceed the total.
 
 Queries (portal: **rg-m365-mcp → m365-mcp-logs → Logs**):
