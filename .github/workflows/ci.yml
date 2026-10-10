@@ -19,7 +19,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
@@ -40,7 +40,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
@@ -133,7 +133,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
@@ -358,9 +358,9 @@ jobs:
 
       # ── Base-OS scan (REPORT-ONLY) ────────────────────────────────────────────
       # OS-layer CVEs live entirely inside Microsoft's vendor base image
-      # (mcr.microsoft.com/azure-functions/node:4-node20, currently debian 11.11).
+      # (mcr.microsoft.com/azure-functions/node:4-node22, currently debian 12).
       # We do not build that image and cannot bump its packages independently —
-      # `4-node20` is a rolling tag CI already re-pulls on every main push, so the
+      # `4-node22` is a rolling tag CI already re-pulls on every main push, so the
       # only remediation available to us is to wait for Microsoft to rebuild (or
       # for Dependabot's docker ecosystem watch to bump the tag). Gating on these
       # therefore reddens CI on every new base-OS CVE wave (e.g. the July-2026

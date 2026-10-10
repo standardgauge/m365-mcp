@@ -4,7 +4,7 @@
 
 # Same ECR Public mirror and digest as the production Dockerfile, so no image
 # in this repo depends on Docker Hub's anonymous pull limit.
-FROM public.ecr.aws/docker/library/node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
+FROM public.ecr.aws/docker/library/node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
 WORKDIR /app
 
 COPY package*.json tsconfig.admin.json vite.config.ts ./

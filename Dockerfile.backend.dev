@@ -6,13 +6,13 @@
 #
 # azure-functions/node images are amd64-only; stage 1 build also runs as amd64
 # so compiled native modules match the runtime image. Keep the builder Node major
-# aligned with the node20 runtime below — Dependabot major node bumps are ignored
+# aligned with the node22 runtime below — Dependabot major node bumps are ignored
 # in .github/dependabot.yml so the two never desync.
 
 # ── Stage 1: build ─────────────────────────────────────────────────────────────
 # Same ECR Public mirror and digest as the production Dockerfile, so no image
 # in this repo depends on Docker Hub's anonymous pull limit.
-FROM --platform=linux/amd64 public.ecr.aws/docker/library/node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
+FROM --platform=linux/amd64 public.ecr.aws/docker/library/node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS builder
 WORKDIR /build
 
 COPY package*.json tsconfig.json ./
@@ -23,12 +23,12 @@ RUN npm run build
 
 # ── Stage 2: runtime ───────────────────────────────────────────────────────────
 # azure-functions/node images are amd64-only; runs under Rosetta on Apple Silicon.
-FROM --platform=linux/amd64 mcr.microsoft.com/azure-functions/node:4-node20
+FROM --platform=linux/amd64 mcr.microsoft.com/azure-functions/node:4-node22
 
 ENV AzureWebJobsScriptRoot=/home/site/wwwroot \
     AzureFunctionsJobHost__Logging__Console__IsEnabled=true \
     FUNCTIONS_EXTENSION_VERSION=~4 \
-    WEBSITE_NODE_DEFAULT_VERSION=~20 \
+    WEBSITE_NODE_DEFAULT_VERSION=~22 \
     ASPNETCORE_URLS=http://+:8080
 
 WORKDIR /home/site/wwwroot
@@ -40,12 +40,13 @@ RUN npm ci --omit=dev
 # dist/functions/, dist/services/, and dist/mcp/
 COPY --from=builder /build/dist/ ./dist/
 
-# Match production: run the host as a non-root user (F8).
-RUN groupadd --system --gid 10001 app \
-    && useradd --system --uid 10001 --gid app --home-dir /home/site --shell /usr/sbin/nologin app \
-    && chown -R app:app /home/site
+# Match production: run the host as a non-root user (F8). Named mcp because the
+# node22 base image already has an `app` user (uid 1654).
+RUN groupadd --system --gid 10001 mcp \
+    && useradd --system --uid 10001 --gid mcp --home-dir /home/site --shell /usr/sbin/nologin mcp \
+    && chown -R mcp:mcp /home/site
 
-USER app
+USER mcp
 
 EXPOSE 8080
 

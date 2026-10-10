@@ -292,7 +292,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             { name: 'AUDIT_DCR_IMMUTABLE_ID',           value: auditIngestion.outputs.dataCollectionRuleImmutableId }
             { name: 'AUDIT_DCR_STREAM_NAME',            value: auditIngestion.outputs.streamName }
             { name: 'FUNCTIONS_EXTENSION_VERSION',      value: '~4' }
-            { name: 'WEBSITE_NODE_DEFAULT_VERSION',     value: '~20' }
+            { name: 'WEBSITE_NODE_DEFAULT_VERSION',     value: '~22' }
           ]
         }
       ]

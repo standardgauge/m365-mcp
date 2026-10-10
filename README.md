@@ -4,7 +4,7 @@ A Microsoft 365 [MCP](https://modelcontextprotocol.io) server that gives Claude 
 
 Every user signs in individually with delegated OAuth. There is no service account and no application-level Graph permission, so the server can only ever reach what the signed-in user could reach themselves. On top of that, a two-tier deny list and per-service read-only switches let an administrator carve out what AI is allowed to touch.
 
-Built on Azure Functions v4 (TypeScript, Node 20), deployed as an Azure Container App, with a React admin UI for managing access controls.
+Built on Azure Functions v4 (TypeScript, Node 22), deployed as an Azure Container App, with a React admin UI for managing access controls.
 
 **License:** AGPL-3.0. See [License](#license).
 

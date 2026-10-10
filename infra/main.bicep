@@ -363,7 +363,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             { name: 'AUDIT_DCR_IMMUTABLE_ID',           value: auditIngestion.outputs.dataCollectionRuleImmutableId }
             { name: 'AUDIT_DCR_STREAM_NAME',            value: auditIngestion.outputs.streamName }
             { name: 'FUNCTIONS_EXTENSION_VERSION',      value: '~4' }
-            { name: 'WEBSITE_NODE_DEFAULT_VERSION',     value: '~20' }
+            { name: 'WEBSITE_NODE_DEFAULT_VERSION',     value: '~22' }
             //: server-side default deny list for sensitive Outlook
             // mail folders. Enforced on top of the admin-managed table so these
             // folders are unreachable even before an admin seeds it and can't be

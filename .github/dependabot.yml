@@ -54,11 +54,11 @@ updates:
       - "docker"
       - "security"
     ignore:
-      # The build-stage Node major MUST track the azure-functions/node:4-node20
+      # The build-stage Node major MUST track the azure-functions/node:4-node22
       # production runtime (Dockerfile stage 2) so compiled native modules match
       # the runtime. Dependabot proposed node:20-slim -> node:26-slim (PR #15,
       #) — Node Current, pre-LTS, and it desyncs the builder from the
-      # node20 runtime. Ignore major node bumps; move the builder deliberately,
+      # node22 runtime. Ignore major node bumps; move the builder deliberately,
       # together with the runtime image, when adopting a new Node LTS.
       #
       # The builder pulls node from the ECR Public mirror, so the dependency

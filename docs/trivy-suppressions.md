@@ -22,12 +22,12 @@ file is the long-form record behind those one-liners.
 ## Why the base-OS layer is report-only — ``
 
 The runtime image's OS layer is Microsoft's vendor base image
-(`mcr.microsoft.com/azure-functions/node:4-node20`, currently `debian 11.11`). We
-do not build that image and cannot bump its OS packages independently. `4-node20`
+(`mcr.microsoft.com/azure-functions/node:4-node22`, currently `debian 12`). We
+do not build that image and cannot bump its OS packages independently. `4-node22`
 is a rolling tag CI already re-pulls fresh on every `main` push, so the only
 remediation available to us for an OS-layer CVE is to wait for Microsoft to
 rebuild the host image — or for Dependabot's docker ecosystem watch
-(`.github/dependabot.yml`) to bump the tag when a newer (e.g. Debian 12) variant
+(`.github/dependabot.yml`) to bump the tag when a newer (e.g. Debian 13) variant
 ships.
 
 Gating on OS-layer findings therefore reddens `main` CI on every new base-OS CVE
@@ -48,8 +48,8 @@ genuinely actionable OS finding (or a base-image bump opportunity) is not hidden
 
 Restore OS-layer gating if we ever own the base image (e.g. switch to a
 self-built runtime), or tighten to gate on specific OS packages we can influence.
-Bumping to a Debian 12 base image (option (a) on the ticket) does not by itself
-justify re-gating: the newer OS still accrues `linux-libc-dev` kernel-header waves,
+The move to the Debian 12 `4-node22` base image did not by itself justify
+re-gating: the newer OS still accrues `linux-libc-dev` kernel-header waves,
 so the report-only posture remains the correct long-term stance for a consumed
 vendor image.
 
@@ -107,7 +107,7 @@ container-scan finding — different scanner, different package source.
 
 It is a **.NET assembly (`MessagePack.dll`) vendored inside the Azure Functions
 host runtime** that ships in our stage-2 base image,
-`mcr.microsoft.com/azure-functions/node:4-node20` (see `Dockerfile`). It is:
+`mcr.microsoft.com/azure-functions/node:4-node22` (see `Dockerfile`). It is:
 
 - **not** an npm dependency of this app — there is no `messagepack` entry in
   `package-lock.json`; and
@@ -116,9 +116,9 @@ host runtime** that ships in our stage-2 base image,
 
 ### Why we suppress rather than bump
 
-We do not build the host and cannot bump the assembly independently. `4-node20`
+We do not build the host and cannot bump the assembly independently. `4-node22`
 is a rolling tag and CI rebuilds the image fresh on every `main` push, yet it
-still ships 2.5.192 — so Microsoft has not yet published a `4-node20` host image
+still ships 2.5.192 — so Microsoft has not yet published a `4-node22` host image
 carrying MessagePack ≥ 2.5.301. With `ignore-unfixed: true` already set, these
 advisories surface only because an upstream fix version exists that the base
 image has not adopted. There is no in-repo change that upgrades a
@@ -137,6 +137,6 @@ HTTP surface. The precondition for exploitation is not met in our deployment.
 ### Exit criteria
 
 Remove the MessagePack IDs from `.trivyignore` (and this section) once a
-`4-node20` base image ships MessagePack ≥ 2.5.301 / 3.1.7. A fresh `main` build
+`4-node22` base image ships MessagePack ≥ 2.5.301 / 3.1.7. A fresh `main` build
 will then pass on its own; if it does not, the assembly is still present and the
 suppression is still warranted — re-date and re-review.
