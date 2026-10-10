@@ -194,6 +194,44 @@ describe('update path containment', () => {
     expect(fs.readdirSync(outside)).toEqual([]);
   });
 
+  it('writes nothing when a symlink escape follows a valid file', () => {
+    const dir = tmpDir();
+    const outside = tmpDir();
+    fs.writeFileSync(path.join(dir, 'manifest.json'), 'old');
+    fs.symlinkSync(outside, path.join(dir, 'server'), 'dir');
+    expect(() =>
+      update.applyUpdate(dir, { 'manifest.json': 'new', 'server/index.js': 'evil' }),
+    ).toThrow(/via a link/);
+    expect(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')).toBe('old');
+    expect(fs.readdirSync(dir).sort()).toEqual(['manifest.json', 'server']);
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  it('writes nothing when a later path runs through a broken link or a file', () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, 'manifest.json'), 'old');
+    fs.symlinkSync(path.join(dir, 'missing'), path.join(dir, 'server'), 'dir');
+    fs.writeFileSync(path.join(dir, 'lib'), 'a file');
+    expect(() =>
+      update.applyUpdate(dir, { 'manifest.json': 'new', 'server/index.js': 'evil' }),
+    ).toThrow(/broken link/);
+    expect(() =>
+      update.applyUpdate(dir, { 'manifest.json': 'new', 'lib/x.js': 'evil' }),
+    ).toThrow(/through a file/);
+    expect(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')).toBe('old');
+  });
+
+  it('does not follow a link planted at the temp name', () => {
+    const dir = tmpDir();
+    const outside = tmpDir();
+    const target = path.join(outside, 'victim');
+    fs.writeFileSync(target, 'untouched');
+    fs.symlinkSync(target, path.join(dir, 'manifest.json.tmp'));
+    update.applyUpdate(dir, { 'manifest.json': 'new' });
+    expect(fs.readFileSync(target, 'utf8')).toBe('untouched');
+    expect(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')).toBe('new');
+  });
+
   it('refuses non-text content', () => {
     const dir = tmpDir();
     expect(() => update.applyUpdate(dir, { 'manifest.json': { a: 1 } })).toThrow(/not text/);

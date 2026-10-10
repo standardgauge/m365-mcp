@@ -95,12 +95,25 @@ function isWithin(root, child) {
   return rel === '' || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
 }
 
+/** True when something, including a dangling link, already sits at `p`. */
+function entryExists(p) {
+  try {
+    fs.lstatSync(p);
+    return true;
+  } catch (err) {
+    if (err.code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
 /**
- * Write every file in `files` under `extDir`. All paths are validated before
- * the first write, so a payload with one bad path changes nothing. Each target
- * directory is re-checked after symlink resolution, so a symlinked directory
- * inside the extension cannot redirect a write outside it. Each file is written
- * to a temp name and renamed into place.
+ * Write every file in `files` under `extDir`. The whole set is checked before
+ * the first write, so a payload with one bad path changes nothing: each path is
+ * validated syntactically, and the deepest directory of each that already
+ * exists is resolved through any symlinks and must still sit inside the
+ * extension directory, so a symlinked directory cannot redirect a write (or a
+ * mkdir) outside it. Each file is then written to a fresh temp name and renamed
+ * into place.
  */
 function applyUpdate(extDir, files) {
   const root = path.resolve(extDir);
@@ -110,18 +123,30 @@ function applyUpdate(extDir, files) {
   });
 
   const realRoot = fs.realpathSync(root);
-  for (const { fullPath, content } of writes) {
-    const dir = path.dirname(fullPath);
-    // Check the deepest directory that already exists before creating anything
-    // below it, so mkdir cannot follow a link out either.
-    let existing = dir;
-    while (!fs.existsSync(existing)) existing = path.dirname(existing);
-    if (!isWithin(realRoot, fs.realpathSync(existing))) {
+  for (const { fullPath } of writes) {
+    let existing = path.dirname(fullPath);
+    while (!entryExists(existing)) existing = path.dirname(existing);
+    let real;
+    try {
+      real = fs.realpathSync(existing);
+    } catch {
+      throw new Error('update path runs through a broken link: ' + fullPath);
+    }
+    if (!isWithin(realRoot, real)) {
       throw new Error('update path escapes the extension directory via a link: ' + fullPath);
     }
-    if (existing !== dir) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.statSync(real).isDirectory()) {
+      throw new Error('update path runs through a file: ' + fullPath);
+    }
+  }
+
+  for (const { fullPath, content } of writes) {
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    // Clear any leftover temp entry without following it, and create the temp
+    // file exclusively, so a planted link at the temp name cannot take the write.
     const tmpPath = fullPath + '.tmp';
-    fs.writeFileSync(tmpPath, content, 'utf8');
+    fs.rmSync(tmpPath, { force: true });
+    fs.writeFileSync(tmpPath, content, { encoding: 'utf8', flag: 'wx' });
     fs.renameSync(tmpPath, fullPath);
   }
 }
