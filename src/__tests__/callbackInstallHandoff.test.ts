@@ -77,7 +77,9 @@ function req(extraCookies = ''): HttpRequest {
       ['code', 'auth-code-123'],
       ['state', STATE],
     ]),
-    headers: new Map<string, string>([['cookie', `oauth_state=${STATE}${extraCookies}`]]),
+    headers: new Map<string, string>([
+      ['cookie', `oauth_state=${STATE}; oauth_pkce=verifier-abc; oauth_nonce=nonce-abc${extraCookies}`],
+    ]),
   } as unknown as HttpRequest;
 }
 
