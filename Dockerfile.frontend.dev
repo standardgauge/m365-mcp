@@ -2,7 +2,9 @@
 # Binds to 0.0.0.0 so the port is reachable from the host and other containers.
 # VITE_API_TARGET is set by docker-compose to route /api proxy to the backend container.
 
-FROM node:20-slim
+# Same ECR Public mirror and digest as the production Dockerfile, so no image
+# in this repo depends on Docker Hub's anonymous pull limit.
+FROM public.ecr.aws/docker/library/node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
 WORKDIR /app
 
 COPY package*.json tsconfig.admin.json vite.config.ts ./

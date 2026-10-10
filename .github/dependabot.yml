@@ -60,6 +60,12 @@ updates:
       #) — Node Current, pre-LTS, and it desyncs the builder from the
       # node20 runtime. Ignore major node bumps; move the builder deliberately,
       # together with the runtime image, when adopting a new Node LTS.
+      #
+      # The builder pulls node from the ECR Public mirror, so the dependency
+      # name carries the registry path. "*library/node" matches that name and
+      # "node" matches the bare Docker Hub one, should it ever come back.
+      - dependency-name: "*library/node"
+        update-types: ["version-update:semver-major"]
       - dependency-name: "node"
         update-types: ["version-update:semver-major"]
 
