@@ -18,15 +18,11 @@
  */
 
 import { TableClient, TableEntity } from '@azure/data-tables';
+import { getTableClient as getStorageTableClient } from './storageClient.js';
 
 const TABLE = 'UserServiceOverrides';
-const AZURITE_CONNECTION_STRING = 'UseDevelopmentStorage=true';
-
 function getTableClient(): TableClient {
-  const conn = process.env.AZURE_STORAGE_CONNECTION_STRING ?? AZURITE_CONNECTION_STRING;
-  const allowInsecureConnection =
-    conn === 'UseDevelopmentStorage=true' || conn.includes('DefaultEndpointsProtocol=http;');
-  return TableClient.fromConnectionString(conn, TABLE, { allowInsecureConnection });
+  return getStorageTableClient(TABLE);
 }
 
 async function ensureTable(): Promise<void> {

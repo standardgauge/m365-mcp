@@ -17,9 +17,12 @@ import { createHmac, randomBytes, createCipheriv, createDecipheriv } from 'crypt
  *    user's row and still decrypt.
  *
  * Both keys (`MCP_SESSION_HMAC_KEY` and `MCP_DATA_ENCRYPTION_KEY`) reach the
- * process as env vars bound to Container App secrets (secretRef). The secrets
- * should be Key Vault references; see "Application keys" in
- * docs/operations-runbook.md for storage, rotation and revocation. Both are
+ * process as env vars bound to Container App secrets (secretRef). The infra/
+ * templates create those secrets as Key Vault references resolved by the app's
+ * runtime identity (infra/key-vault.bicep), so the values live in the vault and
+ * not in the Container App. An instance configured by hand may still hold them
+ * as plain secrets; see "Application keys" in docs/operations-runbook.md for
+ * moving them, rotation and revocation. Both are
  * validated before the Functions host starts (src/startup/checkKeys.ts), so a
  * missing or malformed key stops the container instead of the first sign-in.
  *

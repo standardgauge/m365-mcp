@@ -1,4 +1,5 @@
-import { TableClient, TableServiceClient } from '@azure/data-tables';
+import { TableClient } from '@azure/data-tables';
+import { getTableClient, getTableServiceClient, isStorageConfigured } from './storageClient.js';
 import { createHash } from 'crypto';
 import {
   hashSessionToken,
@@ -10,7 +11,7 @@ import {
   isLegacyIdentityBindingAllowed,
 } from './credentialCrypto.js';
 
-const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+const storageConfigured = isStorageConfigured();
 const INSTALL_NONCES_TABLE = 'mcpInstallNonces';
 
 let sessionsTable: TableClient | null = null;
@@ -19,18 +20,18 @@ let installNoncesTable: TableClient | null = null;
 let initialized = false;
 
 async function ensureTables(): Promise<void> {
-  if (initialized || !connectionString) return;
+  if (initialized || !storageConfigured) return;
 
-  const serviceClient = TableServiceClient.fromConnectionString(connectionString);
+  const serviceClient = getTableServiceClient();
 
   // Create tables if they don't exist
   try { await serviceClient.createTable('mcpSessions'); } catch { /* already exists */ }
   try { await serviceClient.createTable('mcpMsalCache'); } catch { /* already exists */ }
   try { await serviceClient.createTable(INSTALL_NONCES_TABLE); } catch { /* already exists */ }
 
-  sessionsTable = TableClient.fromConnectionString(connectionString, 'mcpSessions');
-  msalCacheTable = TableClient.fromConnectionString(connectionString, 'mcpMsalCache');
-  installNoncesTable = TableClient.fromConnectionString(connectionString, INSTALL_NONCES_TABLE);
+  sessionsTable = getTableClient('mcpSessions');
+  msalCacheTable = getTableClient('mcpMsalCache');
+  installNoncesTable = getTableClient(INSTALL_NONCES_TABLE);
   initialized = true;
 }
 
@@ -87,7 +88,8 @@ function getInstallNoncesTable(): TableClient {
 // lives only on the client, in the OS credential store; during the install
 // handoff it sits briefly, encrypted, in mcpInstallNonces (below). Loss of the HMAC key means every user
 // must re-OAuth, but that's the desired property: the secret-at-rest material
-// is recoverable only via Key Vault, not via storage exfiltration.
+// lives only in Key Vault (infra/), never in storage, so exfiltrating the
+// tables does not yield it.
 
 export interface StoredSession {
   userId: string;
@@ -341,7 +343,7 @@ export async function saveSession(
  * deleted, and the memory cache is the only store.
  */
 export async function sessionRowExists(storageKey: string): Promise<boolean> {
-  if (!connectionString) return true;
+  if (!storageConfigured) return true;
   await ensureTables();
   try {
     await getSessionsTable().getEntity('session', storageKey, { queryOptions: { select: ['RowKey'] } });
@@ -675,7 +677,7 @@ export async function purgeExpiredInstallNonces(nowMs: number = Date.now()): Pro
  * Fire-and-forget; never throws.
  */
 export function maybePurgeExpiredInstallNonces(nowMs: number = Date.now()): void {
-  if (!connectionString || noncePurgeInFlight) return;
+  if (!storageConfigured || noncePurgeInFlight) return;
   if (nowMs - lastNoncePurgeStartedAt < NONCE_PURGE_INTERVAL_MS) return;
   lastNoncePurgeStartedAt = nowMs;
   noncePurgeInFlight = purgeExpiredInstallNonces(nowMs)

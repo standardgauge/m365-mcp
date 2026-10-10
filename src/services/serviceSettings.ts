@@ -1,4 +1,5 @@
 import { TableClient, TableEntity } from '@azure/data-tables';
+import { getTableClient as getStorageTableClient } from './storageClient.js';
 
 const TABLE = 'serviceSettings';
 const ROW_KEY = 'enabledServices';
@@ -8,13 +9,8 @@ const DEFAULT_SERVICES = ['mail', 'sharepoint'];
 // Full list of known service keys (for reference/validation)
 export const ALL_SERVICE_KEYS = ['mail', 'sharepoint', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams'];
 
-const AZURITE_CONNECTION_STRING = 'UseDevelopmentStorage=true';
-
 function getTableClient(): TableClient {
-  const conn = process.env.AZURE_STORAGE_CONNECTION_STRING ?? AZURITE_CONNECTION_STRING;
-  const allowInsecureConnection =
-    conn === 'UseDevelopmentStorage=true' || conn.includes('DefaultEndpointsProtocol=http;');
-  return TableClient.fromConnectionString(conn, TABLE, { allowInsecureConnection });
+  return getStorageTableClient(TABLE);
 }
 
 async function ensureTable(): Promise<void> {

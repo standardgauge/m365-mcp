@@ -18,8 +18,10 @@
 #   --skip-msal  Only purge mcpSessions, leave mcpMsalCache alone (rare)
 #
 # Prerequisites:
-#   - az CLI logged in with read/delete on the storage account behind the
-#     Container App's AZURE_STORAGE_CONNECTION_STRING secret
+#   - az CLI logged in. On an instance deployed from infra/ (shared-key access
+#     off, AZURE_STORAGE_TABLE_ENDPOINT set on the app) the signed-in user needs
+#     Storage Table Data Contributor on the account. On older infra it needs to
+#     read the Container App's azure-storage-connection-string secret.
 #   - jq installed (for JSON parsing)
 
 set -euo pipefail
@@ -53,19 +55,33 @@ if $DRY_RUN; then
 fi
 echo ""
 
-# ── Resolve the storage account connection string from the Container App ──
-echo "==> Reading storage connection string from Container App secret..."
-CONN=$(az containerapp secret show \
+# ── Resolve how to reach storage from the Container App ──
+# Entra auth when the app has a table endpoint (current infra), else the
+# account-key connection string secret (infra predating it).
+echo "==> Reading storage configuration from Container App..."
+ENDPOINT=$(az containerapp show \
   --name "$APP_NAME" \
   --resource-group "$RESOURCE_GROUP" \
-  --secret-name azure-storage-connection-string \
-  --query value -o tsv 2>/dev/null)
+  --query "properties.template.containers[0].env[?name=='AZURE_STORAGE_TABLE_ENDPOINT'].value | [0]" \
+  -o tsv 2>/dev/null || true)
 
-if [[ -z "$CONN" ]]; then
-  echo "ERROR: Could not read 'azure-storage-connection-string' secret from $APP_NAME" >&2
-  exit 1
+if [[ -n "$ENDPOINT" ]]; then
+  ACCOUNT=$(echo "$ENDPOINT" | sed -E 's#^https://([^.]+)\..*#\1#')
+  AUTH=(--account-name "$ACCOUNT" --auth-mode login)
+  echo "    OK: $ACCOUNT, Entra auth as $CURRENT_USER"
+else
+  CONN=$(az containerapp secret show \
+    --name "$APP_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
+    --secret-name azure-storage-connection-string \
+    --query value -o tsv 2>/dev/null || true)
+  if [[ -z "$CONN" ]]; then
+    echo "ERROR: $APP_NAME has neither AZURE_STORAGE_TABLE_ENDPOINT nor an 'azure-storage-connection-string' secret" >&2
+    exit 1
+  fi
+  AUTH=(--connection-string "$CONN")
+  echo "    OK: connection string"
 fi
-echo "    OK"
 
 # ── Helper: list-and-delete every row in a table ──
 purge_table() {
@@ -74,12 +90,17 @@ purge_table() {
   echo "==> Scanning table: $table"
 
   # Use az storage entity query to enumerate. Returns JSON array of entities.
+  # A failed query stops the script rather than reading as an empty table: with
+  # Entra auth, a missing data role is the likely cause, not a clean table.
   local entities
-  entities=$(az storage entity query \
+  if ! entities=$(az storage entity query \
     --table-name "$table" \
-    --connection-string "$CONN" \
+    "${AUTH[@]}" \
     --query "items[].{pk:PartitionKey, rk:RowKey}" \
-    -o json 2>/dev/null || echo "[]")
+    -o json); then
+    echo "ERROR: could not query $table (Entra auth needs Storage Table Data Contributor on the account)" >&2
+    exit 1
+  fi
 
   local count
   count=$(echo "$entities" | jq 'length')
@@ -103,7 +124,7 @@ purge_table() {
       --table-name "$table" \
       --partition-key "$pk" \
       --row-key "$rk" \
-      --connection-string "$CONN" >/dev/null 2>&1 || {
+      "${AUTH[@]}" >/dev/null 2>&1 || {
         echo "    WARN: failed to delete $pk/$rk"
       }
     echo "    deleted: $pk/$rk"

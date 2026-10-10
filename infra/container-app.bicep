@@ -7,6 +7,12 @@ param appName string = 'm365-mcp'
 @description('Container image tag to deploy.')
 param imageTag string = 'latest'
 
+@description('Existing storage account in this resource group. The template grants the app a data role on it; disable shared-key access on it yourself (docs/operations-runbook.md, Storage access).')
+param storageAccountName string
+
+@description('Key Vault name, globally unique. The default is derived from the resource group.')
+param keyVaultName string = 'kv-${uniqueString(resourceGroup().id)}'
+
 // ── Secrets (passed in at deploy time — never hard-code) ──────────────────────
 @secure()
 param azureClientId string
@@ -18,12 +24,11 @@ param azureTenantId string
 param oauthRedirectUri string
 @secure()
 param frontendUrl string
-@secure()
-param azureStorageConnectionString string
 
 // — credential-at-rest hardening keys.
 // Generate fresh values per environment with `openssl rand -hex 32` and pass
-// them in at deploy time. NEVER reuse across tenants or environments.
+// them in at deploy time. NEVER reuse across tenants or environments. They,
+// and azureClientSecret, are written to Key Vault, not to the Container App.
 @secure()
 @description('64-hex-char HMAC-SHA256 key for hashing session tokens at rest.')
 param mcpSessionHmacKey string
@@ -44,12 +49,54 @@ var auditDcrName = '${appName}-audit-dcr'
 // src/__tests__/containerPortInvariant.test.ts holds its port to the image's.
 var probes = loadJsonContent('probes.json')
 
+// Storage Table Data Contributor: read and write entities and create tables.
+// The runtime identity's only role on the storage account.
+var storageTableDataContributorRoleId = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
+
 // AcrPull built-in role
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 
 // Monitoring Metrics Publisher: the only role the Logs Ingestion API needs to
 // accept an upload, and it is granted on the audit DCR alone.
 var monitoringMetricsPublisherRoleId = '3913510d-42f4-4e42-8a64-420c390055eb'
+
+// ── Storage account (brought by the deployment) ──────────────────────────────
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' existing = {
+  name: storageAccountName
+}
+
+// ── Runtime identity: reads Key Vault and Table Storage ───────────────────────
+// User-assigned for the same ordering reason as acrPullIdentity: the Container
+// App resolves its Key Vault references while it is being created, so the
+// identity and its vault role have to exist first.
+resource runtimeIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: '${appName}-runtime'
+  location: location
+}
+
+resource storageDataRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(storageAccount.id, runtimeIdentity.id, storageTableDataContributorRoleId)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageTableDataContributorRoleId)
+    principalId: runtimeIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// ── Key Vault: client secret and credential-at-rest keys ──────────────────────
+module keyVault 'key-vault.bicep' = {
+  name: '${appName}-key-vault'
+  params: {
+    location: location
+    vaultName: keyVaultName
+    readerPrincipalId: runtimeIdentity.properties.principalId
+    logAnalyticsWorkspaceId: logAnalyticsWorkspace.id
+    azureClientSecret: azureClientSecret
+    mcpSessionHmacKey: mcpSessionHmacKey
+    mcpDataEncryptionKey: mcpDataEncryptionKey
+  }
+}
 
 // ── Azure Container Registry ──────────────────────────────────────────────────
 resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
@@ -146,12 +193,14 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
   name: containerAppName
   location: location
   dependsOn: [
-    acrPullRoleAssignment  // ensure AcrPull RBAC is assigned before Container App pulls from ACR
+    acrPullRoleAssignment      // ensure AcrPull RBAC is assigned before Container App pulls from ACR
+    storageDataRoleAssignment  // and the runtime identity can reach storage before the first request
   ]
   identity: {
     type: 'SystemAssigned, UserAssigned'
     userAssignedIdentities: {
       '${acrPullIdentity.id}': {}
+      '${runtimeIdentity.id}': {}
     }
   }
   properties: {
@@ -177,9 +226,13 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           name: 'azure-client-id'
           value: azureClientId
         }
+        // Key Vault references: the Container App stores the URI, the runtime
+        // identity resolves the value. Versioned URIs, so a new version in the
+        // vault does not rotate a key until a deployment points here.
         {
           name: 'azure-client-secret'
-          value: azureClientSecret
+          keyVaultUrl: keyVault.outputs.clientSecretUri
+          identity: runtimeIdentity.id
         }
         {
           name: 'azure-tenant-id'
@@ -194,16 +247,14 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           value: frontendUrl
         }
         {
-          name: 'azure-storage-connection-string'
-          value: azureStorageConnectionString
-        }
-        {
           name: 'mcp-session-hmac-key'
-          value: mcpSessionHmacKey
+          keyVaultUrl: keyVault.outputs.sessionHmacKeyUri
+          identity: runtimeIdentity.id
         }
         {
           name: 'mcp-data-encryption-key'
-          value: mcpDataEncryptionKey
+          keyVaultUrl: keyVault.outputs.dataEncryptionKeyUri
+          identity: runtimeIdentity.id
         }
         {
           name: 'appinsights-connection-string'
@@ -227,10 +278,14 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             { name: 'AZURE_TENANT_ID',                  secretRef: 'azure-tenant-id' }
             { name: 'OAUTH_REDIRECT_URI',               secretRef: 'oauth-redirect-uri' }
             { name: 'FRONTEND_URL',                     secretRef: 'frontend-url' }
-            { name: 'AZURE_STORAGE_CONNECTION_STRING',  secretRef: 'azure-storage-connection-string' }
             { name: 'MCP_SESSION_HMAC_KEY',             secretRef: 'mcp-session-hmac-key' }
             { name: 'MCP_DATA_ENCRYPTION_KEY',          secretRef: 'mcp-data-encryption-key' }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-connection-string' }
+            // Table Storage over Entra auth (src/services/storageClient.ts). Not
+            // secrets: the endpoint is public and the client id names an identity
+            // only this app can obtain tokens for.
+            { name: 'AZURE_STORAGE_TABLE_ENDPOINT',     value: storageAccount.properties.primaryEndpoints.table }
+            { name: 'AZURE_STORAGE_IDENTITY_CLIENT_ID', value: runtimeIdentity.properties.clientId }
             // Audit trail → Log Analytics. Not secrets: the endpoint and rule id
             // only work for a caller holding the publisher role on the rule.
             { name: 'AUDIT_LOGS_INGESTION_ENDPOINT',    value: auditIngestion.outputs.logsIngestionEndpoint }
@@ -282,6 +337,8 @@ output acrLoginServer string = acr.properties.loginServer
 output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
 output containerAppPrincipalId string = containerApp.identity.principalId
 output acrPullIdentityId string = acrPullIdentity.id
+output runtimeIdentityId string = runtimeIdentity.id
+output keyVaultName string = keyVault.outputs.vaultName
 output logAnalyticsWorkspaceName string = logAnalyticsWorkspace.name
 output applicationInsightsName string = applicationInsights.name
 output auditTableName string = auditIngestion.outputs.tableName

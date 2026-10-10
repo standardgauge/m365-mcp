@@ -106,7 +106,7 @@ You need an Azure subscription and an Entra ID tenant you can register an applic
 
 Create a resource group, an Azure Container Registry, a storage account, and a Container App. Naming is yours to choose; record the names because they become the environment block of your deploy workflow.
 
-The Bicep templates under `infra/` provision this. `infra/main.bicep` is the full-stack template (storage account and tables, registry, identity, Log Analytics with the audit table and its data collection rule, Application Insights, environment, Container App); `infra/container-app.bicep` is the same without the storage account, for a deployment that brings its own. Entra setup, in order, with verification checkpoints: [`docs/entra-setup.md`](docs/entra-setup.md).
+The Bicep templates under `infra/` provision this. `infra/main.bicep` is the full-stack template (storage account and tables, Key Vault, registry, identities, Log Analytics with the audit table and its data collection rule, Application Insights, environment, Container App); `infra/container-app.bicep` is the same without the storage account, for a deployment that brings its own. Both put the client secret and the two application keys in Key Vault and bind them to the Container App as Key Vault references, and both reach Table Storage with the app's managed identity instead of an account key; `main.bicep` also turns shared-key access off on the account it creates. Entra setup, in order, with verification checkpoints: [`docs/entra-setup.md`](docs/entra-setup.md).
 
 ### 2. Entra app registration
 
@@ -131,11 +131,12 @@ az containerapp update \
 
 ### 4. Set secrets
 
-Container App environment variables **must** use secret references rather than plain-text values, so the client secret and storage connection string never appear in the revision definition.
+Container App environment variables **must** use secret references rather than plain-text values, so the client secret never appears in the revision definition. The Bicep templates create the client secret and the application keys as Key Vault references; deploying them is the recommended path. Setting a secret by hand with a literal value turns a reference back into a plain Container App secret, so for those three use a reference (see "Application keys" in [`docs/operations-runbook.md`](docs/operations-runbook.md)):
 
 ```bash
 az containerapp secret set --name <app> --resource-group <rg> \
-  --secrets azure-client-id="<value>" azure-client-secret="<value>" ...
+  --secrets azure-client-id="<value>" \
+  azure-client-secret="keyvaultref:<versioned-secret-uri>,identityref:<runtime-identity-resource-id>" ...
 ```
 
 Secrets are picked up by a new revision, so follow this with an `az containerapp update --image ...`.
@@ -245,7 +246,9 @@ Copy `.env.example` to `.env` for local work, or set these as Container App secr
 | `AZURE_TENANT_ID` | Yes | Entra directory (tenant) ID |
 | `OAUTH_REDIRECT_URI` | Yes | Must match a registered redirect URI exactly |
 | `FRONTEND_URL` | Yes | Base URL of the admin UI, used for post-login redirects |
-| `AZURE_STORAGE_CONNECTION_STRING` | Production | Table Storage account. Unset locally falls back to the Azurite emulator |
+| `AZURE_STORAGE_TABLE_ENDPOINT` | Production | Table endpoint of the storage account (`https://<account>.table.core.windows.net`). The server authenticates with its managed identity, so the account can run with shared-key access off. Takes precedence over the connection string. Set by the Bicep |
+| `AZURE_STORAGE_IDENTITY_CLIENT_ID` | With the endpoint | Client ID of the user-assigned identity holding Storage Table Data Contributor on the account. Unset uses the system-assigned identity. Set by the Bicep |
+| `AZURE_STORAGE_CONNECTION_STRING` | No | Account-key connection string, used only when `AZURE_STORAGE_TABLE_ENDPOINT` is unset: local development and instances whose infra predates it. Both unset falls back to the Azurite emulator |
 | `AUDIT_LOG_RETENTION_DAYS` | No | Days of `auditLog` rows to keep. Older rows are purged about once a day while the server is in use. Defaults to `365`; `0` keeps every row. See the operations runbook |
 | `RATE_LIMIT_<ROUTE>_PER_MINUTE` | No | Requests per client address per minute, per replica, on the unauthenticated routes. `<ROUTE>` is `LOGIN` (default `30`), `DEVICE` (`10`), `INSTALL_POLL` (`120`) or `MCP` (`1200`); `0` turns that route's limiter off. See the operations runbook |
 | `RATE_LIMIT_TRUSTED_PROXY_HOPS` | No | Proxies in front of the app that append to `X-Forwarded-For`. Default `1`, the Container Apps ingress; set `2` behind Front Door or an Application Gateway |

@@ -412,15 +412,28 @@ new revision. Do not generate a new key to get past it unless you mean to sign
 every user out.
 
 ### Issue: Azure Table Storage connection errors
-```
-# Verify the connection string secret is set
-az containerapp secret list -n m365-mcp -g rg-m365-mcp \
-  --query "[?name==azure-storage-connection-string].name" -o tsv
 
-# Verify the storage account is accessible
+The server reaches storage with its runtime identity (see
+[Storage access](#storage-access)). A `403 AuthorizationPermissionMismatch` means
+the identity has no data role on the account; `KeyBasedAuthenticationNotPermitted`
+means something is still presenting an account key to an account that refuses
+them, usually an instance whose app predates `AZURE_STORAGE_TABLE_ENDPOINT`.
+
+```
+# Which path is the app on? An endpoint means Entra auth.
+az containerapp show -n m365-mcp -g rg-m365-mcp \
+  --query "properties.template.containers[0].env[?starts_with(name,'AZURE_STORAGE')].{name:name,value:value}" -o table
+
+# Does the runtime identity hold its role on the account?
+az role assignment list --scope "$(az storage account show -n stm365mcp -g rg-m365-mcp --query id -o tsv)" \
+  --query "[?roleDefinitionName=='Storage Table Data Contributor'].principalName" -o tsv
+
+# Is the account up?
 az storage account show -n stm365mcp -g rg-m365-mcp --query "statusOfPrimary" -o tsv
 # Expected: available
 ```
+
+A role assignment made a moment ago can take a few minutes to apply.
 
 ### Issue: OAuth redirect URI mismatch (after domain change)
 ```
@@ -614,13 +627,17 @@ URI section above).
 ### AZURE_CLIENT_SECRET (recommended every 12 months)
 
   1. Entra ID → App registrations → your M365 MCP app registration → Certificates & secrets → New client secret → copy value. Leave the old secret in place.
-  2. Update the Container App secret and roll a new revision:
+  2. Write it to the vault as a new version, point the reference at it, and roll a new revision (variables as in [Storage: Key Vault references](#storage-key-vault-references)):
 ```
+SECRET_URI=$(az keyvault secret set --vault-name "$VAULT" -n azure-client-secret \
+  --value "<new-value>" --query id -o tsv)
+
 az containerapp secret set -n m365-mcp -g rg-m365-mcp \
-  --secrets azure-client-secret="<new-value>"
+  --secrets "azure-client-secret=keyvaultref:${SECRET_URI},identityref:${IDENTITY}"
 
 az containerapp update -n m365-mcp -g rg-m365-mcp --revision-suffix "$(date +%Y%m%d%H%M)"
 ```
+     Rotating the client secret does not sign anyone out. The next Bicep deployment writes whatever its `azureClientSecret` parameter holds, so update that too.
 
   3. Verify sign-in and one tool call, then delete the old secret from the Entra app registration.
 
@@ -731,32 +748,51 @@ after the revision had passed `/health`.
 
 ### Storage: Key Vault references
 
-Keep both keys in Azure Key Vault and bind the Container App secrets to them as
-Key Vault references, so the value lives in one place with access control,
-versioning, soft delete and an access log. The Container App's system-assigned
-identity (present in both Bicep templates) needs **Key Vault Secrets User** on
-the vault.
+Both keys, and `AZURE_CLIENT_SECRET`, live in Azure Key Vault. The Container
+App holds Key Vault references to them, not the values, so the value lives in
+one place with access control, versioning, soft delete and an access log, and
+`az containerapp secret show` returns a URI. Reading a value takes a data-plane
+role on the vault; Contributor on the resource group does not include one.
+
+The Bicep templates set all of this up (`infra/key-vault.bicep`): an RBAC-mode
+vault with soft delete and purge protection, the three secrets written from the
+template parameters, a user-assigned **runtime identity** (`<app>-runtime`)
+holding **Key Vault Secrets User** on the vault, and references resolved through
+that identity. It is user-assigned because the app resolves its references
+while it is being created, before a system-assigned identity could be granted
+anything. The vault name defaults to `kv-` plus a hash of the resource group.
+
+The commands below use:
 
 ```
-VAULT=kv-m365-mcp            # an RBAC-mode vault with soft delete and purge protection
-VAULT_ID=$(az keyvault show -n "$VAULT" --query id -o tsv)
-PRINCIPAL=$(az containerapp show -n m365-mcp -g rg-m365-mcp --query identity.principalId -o tsv)
+VAULT=$(az keyvault list -g rg-m365-mcp --query "[0].name" -o tsv)   # the deployment's keyVaultName output
+IDENTITY=$(az identity show -g rg-m365-mcp -n m365-mcp-runtime --query id -o tsv)
+```
 
-az role assignment create --assignee-object-id "$PRINCIPAL" \
+An instance set up by hand before the templates did this may bind its
+references through the system-assigned identity instead. Use
+`IDENTITY=system` there, or move it onto the templates.
+
+**Moving an instance onto Key Vault by hand.** Store the *current* values to
+keep everyone signed in; new values are a rotation (below).
+
+```
+az role assignment create --assignee-object-id "$(az identity show -g rg-m365-mcp -n m365-mcp-runtime --query principalId -o tsv)" \
   --assignee-principal-type ServicePrincipal \
-  --role "Key Vault Secrets User" --scope "$VAULT_ID"
+  --role "Key Vault Secrets User" --scope "$(az keyvault show -n "$VAULT" --query id -o tsv)"
 
-# Store the current values (moving an existing deployment) or fresh ones (a new
-# deployment). Moving the current values keeps everyone signed in; new values
-# are a rotation (below).
 HMAC_URI=$(az keyvault secret set --vault-name "$VAULT" -n mcp-session-hmac-key \
-  --value "$(openssl rand -hex 32)" --query id -o tsv)
+  --value "<current-hmac-key>" --query id -o tsv)
 DATA_URI=$(az keyvault secret set --vault-name "$VAULT" -n mcp-data-encryption-key \
-  --value "$(openssl rand -hex 32)" --query id -o tsv)
+  --value "<current-data-key>" --query id -o tsv)
+SECRET_URI=$(az keyvault secret set --vault-name "$VAULT" -n azure-client-secret \
+  --value "<current-client-secret>" --query id -o tsv)
 
+az containerapp identity assign -n m365-mcp -g rg-m365-mcp --user-assigned "$IDENTITY"
 az containerapp secret set -n m365-mcp -g rg-m365-mcp --secrets \
-  "mcp-session-hmac-key=keyvaultref:${HMAC_URI},identityref:system" \
-  "mcp-data-encryption-key=keyvaultref:${DATA_URI},identityref:system"
+  "mcp-session-hmac-key=keyvaultref:${HMAC_URI},identityref:${IDENTITY}" \
+  "mcp-data-encryption-key=keyvaultref:${DATA_URI},identityref:${IDENTITY}" \
+  "azure-client-secret=keyvaultref:${SECRET_URI},identityref:${IDENTITY}"
 
 az containerapp update -n m365-mcp -g rg-m365-mcp --revision-suffix "$(date +%Y%m%d%H%M)"
 ```
@@ -765,24 +801,79 @@ az containerapp update -n m365-mcp -g rg-m365-mcp --revision-suffix "$(date +%Y%
 a versionless reference, writing a new version in the vault rotates the key on
 whichever revision happens to start next, which signs everyone out at a time
 nobody chose. With a versioned reference the key changes only when you change
-the reference.
+the reference. The templates bind versioned URIs too.
 
 Two traps:
 
-- **The shipped Bicep writes these secrets as plain values** from its
-  `mcpSessionHmacKey` and `mcpDataEncryptionKey` parameters. Re-running it after
-  switching to Key Vault references replaces the references with whatever the
-  parameters hold. If those differ from the vault, that is an unplanned
-  rotation. Pass the current values, or re-apply the references afterwards.
-- **`az containerapp secret set name=<value>`** with a literal value does the
-  same: it silently turns a reference back into a plain secret.
+- **Every Bicep deployment writes its key parameters into the vault** as a new
+  version and points the references at it. Deploying with the values already
+  in the vault is harmless; deploying with different ones is a rotation. Pass
+  the current values (`az keyvault secret show --vault-name "$VAULT" -n <name>
+  --query value -o tsv`), never fresh ones, unless you mean to rotate.
+- **`az containerapp secret set name=<value>`** with a literal value silently
+  turns a reference back into a plain Container App secret.
 
 Confirm what is bound (values are not printed):
 
 ```
 az containerapp secret list -n m365-mcp -g rg-m365-mcp \
-  --query "[?starts_with(name,'mcp-')].{name:name,keyVaultUrl:keyVaultUrl}" -o table
+  --query "[?keyVaultUrl!=null].{name:name,keyVaultUrl:keyVaultUrl,identity:identity}" -o table
 ```
+
+`azure-client-secret`, `mcp-session-hmac-key` and `mcp-data-encryption-key`
+should all appear.
+
+Who read them: the vault sends its audit log to the instance's Log Analytics
+workspace. Reads by anything other than the runtime identity deserve a look.
+
+```
+AzureDiagnostics
+| where ResourceProvider == "MICROSOFT.KEYVAULT" and OperationName == "SecretGet"
+| project TimeGenerated, identity_claim_oid_g, CallerIPAddress, id_s, ResultSignature
+```
+
+### Storage access
+
+The server reaches Table Storage with the same runtime identity, which holds
+**Storage Table Data Contributor** on the account and nothing else there. The
+app gets `AZURE_STORAGE_TABLE_ENDPOINT` and `AZURE_STORAGE_IDENTITY_CLIENT_ID`
+instead of a connection string, and `infra/main.bicep` creates the account
+with shared-key access off, so no account key, connection string or key-signed
+SAS works against it. `infra/container-app.bicep` grants the role on an account
+you bring but cannot change that account's settings; turn shared-key access
+off on it yourself (the last step below).
+
+Operators read and purge tables with their own Entra identity
+(`--auth-mode login`), which needs the same role on the account:
+
+```
+az role assignment create --assignee "<you@example.com>" \
+  --role "Storage Table Data Contributor" \
+  --scope "$(az storage account show -n stm365mcp -g rg-m365-mcp --query id -o tsv)"
+```
+
+**Moving an instance off the connection string.** Order matters: an app still
+on the connection string stops working the moment shared-key access goes off.
+
+  1. Deploy a release that reads `AZURE_STORAGE_TABLE_ENDPOINT` (any release carrying `src/services/storageClient.ts`). It keeps using the connection string until the endpoint is set.
+  2. Re-run the Bicep, or by hand: assign the runtime identity to the app (`az containerapp identity assign`), grant it Storage Table Data Contributor on the account, and set the two variables:
+```
+az containerapp update -n m365-mcp -g rg-m365-mcp \
+  --set-env-vars "AZURE_STORAGE_TABLE_ENDPOINT=https://stm365mcp.table.core.windows.net" \
+  "AZURE_STORAGE_IDENTITY_CLIENT_ID=$(az identity show -g rg-m365-mcp -n m365-mcp-runtime --query clientId -o tsv)" \
+  --remove-env-vars AZURE_STORAGE_CONNECTION_STRING \
+  --revision-suffix "$(date +%Y%m%d%H%M)"
+```
+  3. Confirm `/health`, one sign-in and one tool call on the new revision, then drop the old secret: `az containerapp secret remove -n m365-mcp -g rg-m365-mcp --secret-names azure-storage-connection-string`.
+  4. Turn shared-key access off and rotate both account keys, since the old connection string sat in the app's secrets and in deployment history:
+```
+az storage account update -n stm365mcp -g rg-m365-mcp --allow-shared-key-access false
+az storage account keys renew -n stm365mcp -g rg-m365-mcp --key primary
+az storage account keys renew -n stm365mcp -g rg-m365-mcp --key secondary
+```
+
+Sessions survive all four steps: the tables and the application keys are
+unchanged.
 
 ### Rotation
 
@@ -813,15 +904,15 @@ retired once the new revision is ready.
 Procedure, both keys (drop the line for the key you are not rotating):
 
 ```
-VAULT=kv-m365-mcp
+# VAULT and IDENTITY as in "Storage: Key Vault references" above
 HMAC_URI=$(az keyvault secret set --vault-name "$VAULT" -n mcp-session-hmac-key \
   --value "$(openssl rand -hex 32)" --query id -o tsv)
 DATA_URI=$(az keyvault secret set --vault-name "$VAULT" -n mcp-data-encryption-key \
   --value "$(openssl rand -hex 32)" --query id -o tsv)
 
 az containerapp secret set -n m365-mcp -g rg-m365-mcp --secrets \
-  "mcp-session-hmac-key=keyvaultref:${HMAC_URI},identityref:system" \
-  "mcp-data-encryption-key=keyvaultref:${DATA_URI},identityref:system"
+  "mcp-session-hmac-key=keyvaultref:${HMAC_URI},identityref:${IDENTITY}" \
+  "mcp-data-encryption-key=keyvaultref:${DATA_URI},identityref:${IDENTITY}"
 
 az containerapp update -n m365-mcp -g rg-m365-mcp --revision-suffix "$(date +%Y%m%d%H%M)"
 
@@ -835,6 +926,8 @@ previous secret versions and roll another revision, and the old sessions
 work again. After the purge they are gone either way. Once you are satisfied,
 disable the previous versions in the vault
 (`az keyvault secret set-attributes --id <old-version-uri> --enabled false`).
+The next Bicep deployment writes its own parameter values back into the vault,
+so update the parameters to the new keys before it runs.
 
 A deployment still on plain Container App secrets rotates the same way with
 `--secrets mcp-session-hmac-key="$(openssl rand -hex 32)"` in place of the
@@ -863,12 +956,13 @@ depends on what was exposed.
      This is what invalidates the stolen refresh tokens.
   3. Rotate `AZURE_CLIENT_SECRET` and delete the old one. Refresh tokens issued
      to this app can only be redeemed with its client credentials, which sit in
-     the same Container App as the keys, so assume they went together.
+     the same vault as the keys, so assume they went together.
   4. Read the application audit log and Entra sign-in logs for the exposure
      window.
-- **The vault itself, or the app's identity.** Both keys, plus
-  `AZURE_CLIENT_SECRET` if it is stored there: do all of the above, and review
-  the vault's role assignments before writing new versions into it.
+- **The vault itself, or the app's runtime identity.** Both keys and
+  `AZURE_CLIENT_SECRET`, and with the identity also read and write on every
+  table: do all of the above, and review the vault's and the storage account's
+  role assignments before writing new versions into the vault.
 
 **A key that is lost** (secret deleted or disabled in the vault) is not an
 outage straight away: running replicas already hold the value. But the next
@@ -916,7 +1010,7 @@ and the post-incident rotation list) are in
   1. Pin the instance (`gh variable delete AUTO_UPDATE -R <fork>`) so nothing rolls mid-teardown.
   2. Tell users; the extension will report "Session expired" and can be removed from Claude Desktop.
   3. Export the audit log if the record is needed. The authoritative copy is `M365McpAudit_CL` in the Log Analytics workspace, which step 4 deletes; a SIEM that already ingests it keeps its own copy.
-  4. `az group delete -n rg-m365-mcp`: Container App, environment, ACR, storage (every session, cache and audit row) and the Log Analytics workspace (including the audit table) go together.
+  4. `az group delete -n rg-m365-mcp`: Container App, environment, ACR, storage (every session, cache and audit row), the Log Analytics workspace (including the audit table) and the Key Vault go together. The vault has purge protection, so it and its secrets stay recoverable in soft delete for 90 days and its name cannot be reused until then; that is intended, since the data key in it is what decrypts any copy of the tables.
   5. Delete the app registration in Entra, or at least the client secret and the consent grants; every refresh token the instance held becomes unusable.
   6. Delete the fork, or leave it pinned as a record.
 
