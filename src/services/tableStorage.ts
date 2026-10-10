@@ -425,8 +425,11 @@ export async function loadSessionByToken(token: string): Promise<StoredSession |
   let entity: Record<string, unknown>;
   try {
     entity = await getSessionsTable().getEntity('session', rowKey);
-  } catch {
-    return null;
+  } catch (err) {
+    // Only a missing row is a token miss. A throttle, outage or auth failure
+    // has to surface as a server error, not as an unknown token.
+    if (isNotFound(err)) return null;
+    throw err;
   }
   if (entity.sessionTokenHash !== targetHash) return null;
   return entityToSession(entity, token);

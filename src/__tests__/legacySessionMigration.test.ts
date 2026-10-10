@@ -19,6 +19,8 @@ type Entity = Record<string, unknown> & { partitionKey: string; rowKey: string; 
 const tables = new Map<string, Map<string, Entity>>();
 let etagCounter = 0;
 const calls = { list: 0, get: 0 };
+/** When set, the next getEntity throws this instead of reading. */
+let getFault: Error | null = null;
 
 function tableFor(name: string): Map<string, Entity> {
   if (!tables.has(name)) tables.set(name, new Map());
@@ -31,6 +33,11 @@ function makeTableClient(name: string) {
   return {
     async getEntity(pk: string, rk: string) {
       calls.get++;
+      if (getFault) {
+        const fault = getFault;
+        getFault = null;
+        throw fault;
+      }
       const row = rows().get(key(pk, rk));
       if (!row) throw Object.assign(new Error('not found'), { statusCode: 404 });
       return { ...row };
@@ -119,6 +126,7 @@ function session(userId: string, sessionToken: string): StoredSession {
 
 beforeEach(() => {
   tables.clear();
+  getFault = null;
   jest.spyOn(console, 'log').mockImplementation(() => {});
   jest.spyOn(console, 'warn').mockImplementation(() => {});
 });
@@ -209,5 +217,23 @@ describe('unknown bearer token', () => {
     sessions().get(`session|${rowKey}`)!.sessionTokenHash = 'f'.repeat(64);
 
     await expect(loadSessionByToken('tok-d')).resolves.toBeNull();
+  });
+});
+
+describe('storage failure on the point read', () => {
+  // Only a 404 is a token miss. Anything else must not turn a valid token
+  // into an unknown one.
+  test.each([
+    ['throttled (429)', Object.assign(new Error('too many requests'), { statusCode: 429 })],
+    ['unavailable (503)', Object.assign(new Error('server busy'), { statusCode: 503 })],
+    ['forbidden (403)', Object.assign(new Error('auth failed'), { statusCode: 403 })],
+    ['network error (no status)', Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })],
+  ])('%s is rethrown, not reported as a miss', async (_label, fault) => {
+    await saveSession(session('user-e', 'tok-e'));
+    getFault = fault;
+
+    await expect(loadSessionByToken('tok-e')).rejects.toBe(fault);
+    // The row is still there and the next read finds it.
+    expect((await loadSessionByToken('tok-e'))?.userId).toBe('user-e');
   });
 });
