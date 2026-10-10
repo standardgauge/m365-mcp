@@ -228,6 +228,10 @@ describe('update path containment', () => {
     [{ 'manifest.json': 'new', './x.js': 'a', 'x.js': 'b' }, /same path twice/],
     [{ 'manifest.json': 'new', 'X.js': 'a', 'x.js': 'b' }, /same path twice/],
     [{ 'manifest.json': 'new', 'x.js': 'a', 'x.js.tmp': 'b' }, /temp name/],
+    [{ 'manifest.json': 'new', 'x.js.tmp': 'b', 'x.js': 'a' }, /temp name/],
+    [{ 'manifest.json': 'new', 'x.tmp/index.js': 'a', x: 'b' }, /temp name/],
+    [{ 'manifest.json': 'new', x: 'b', 'x.tmp/index.js': 'a' }, /temp name/],
+    [{ 'manifest.json': 'new', 'X.TMP/a/b.js': 'a', x: 'b' }, /temp name/],
   ])('writes nothing when payload entries collide with each other (%#)', (files, err) => {
     const dir = tmpDir();
     fs.writeFileSync(path.join(dir, 'manifest.json'), 'old');

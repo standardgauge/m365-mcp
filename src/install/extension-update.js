@@ -107,27 +107,40 @@ function entryExists(p) {
 }
 
 /**
- * Refuse a payload whose paths collide with each other: two entries naming the
- * same file, one entry that is an ancestor directory of another (it would be
- * written as a file and then needed as a directory), or one entry that is
- * another's temp name. Paths are compared case-insensitively, since the
- * extension directory may sit on a case-insensitive filesystem.
+ * Refuse a payload whose paths collide with each other. Every entry claims two
+ * names, its target and its temp name, and no claimed name may repeat or sit
+ * beneath another: two entries naming the same file, one entry that is an
+ * ancestor directory of another (it would be written as a file and then needed
+ * as a directory), and one entry that is, or lies under, another's temp name
+ * would each fail partway through the write pass. Paths are compared
+ * case-insensitively, since the extension directory may sit on a
+ * case-insensitive filesystem.
  */
 function checkPayloadConflicts(root, writes) {
-  const keys = new Set();
+  const claimed = new Map();
+  const claim = (key, isTemp, fullPath) => {
+    const prior = claimed.get(key);
+    if (prior !== undefined) {
+      if (!isTemp && !prior) throw new Error('update names the same path twice: ' + fullPath);
+      throw new Error('update entry collides with a temp name: ' + key);
+    }
+    claimed.set(key, isTemp);
+  };
   for (const { fullPath } of writes) {
     const key = path.relative(root, fullPath).split(path.sep).join('/').toLowerCase();
-    if (keys.has(key)) throw new Error('update names the same path twice: ' + fullPath);
-    keys.add(key);
+    claim(key, false, fullPath);
+    claim(key + '.tmp', true, fullPath);
   }
-  for (const key of keys) {
+  for (const key of claimed.keys()) {
     const parts = key.split('/');
     for (let i = 1; i < parts.length; i++) {
-      if (keys.has(parts.slice(0, i).join('/'))) {
-        throw new Error('update writes a file where another entry needs a directory: ' + key);
+      const ancestor = parts.slice(0, i).join('/');
+      if (!claimed.has(ancestor)) continue;
+      if (claimed.get(ancestor)) {
+        throw new Error('update entry lies under another entry\'s temp name: ' + key);
       }
+      throw new Error('update writes a file where another entry needs a directory: ' + key);
     }
-    if (keys.has(key + '.tmp')) throw new Error('update entry collides with a temp name: ' + key + '.tmp');
   }
 }
 
