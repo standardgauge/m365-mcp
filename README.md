@@ -115,10 +115,8 @@ See [Entra ID app registration and permissions](#entra-id-app-registration-and-p
 ### 3. Build and deploy
 
 ```bash
-# Client and tenant IDs are build args because the admin UI needs them at build time.
+# The image carries no tenant configuration; the app reads it at runtime.
 docker build --platform linux/amd64 \
-  --build-arg AZURE_CLIENT_ID=<client-id> \
-  --build-arg AZURE_TENANT_ID=<tenant-id> \
   -t <acr-server>/<app-name>:<tag> .
 
 docker push <acr-server>/<app-name>:<tag>

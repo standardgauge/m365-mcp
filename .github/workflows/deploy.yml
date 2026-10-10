@@ -17,14 +17,10 @@ name: Deploy
 #                          applied to the app as the setting of the same name
 #                          (see the README). Unset leaves the app's value alone.
 #
-# And these repository SECRETS:
+# And this repository SECRET:
 #   AZURE_CREDENTIALS   service principal JSON with Contributor on the resource
 #                       group and AcrPush on the registry. Used by azure/login
 #                       and by az acr login, so no ACR admin user is needed.
-#   AZURE_CLIENT_ID     your Entra app client ID. Baked into the admin SPA at
-#                       build time; the backend reads its own from a Container
-#                       App secret.
-#   AZURE_TENANT_ID     your Microsoft 365 tenant ID. Same dual purpose.
 
 # An automatic deploy starts when CI finishes on main, not when main moves. On
 # a push trigger this workflow raced CI on the same commit, so a red main
@@ -184,8 +180,6 @@ jobs:
             ${{ steps.meta.outputs.image }}
             ${{ env.ACR_NAME }}.azurecr.io/${{ env.CONTAINER_APP_NAME }}:latest
           build-args: |
-            AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}
-            AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}
             GIT_SHA=${{ env.DEPLOY_SHA }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

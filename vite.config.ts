@@ -9,10 +9,6 @@ export default defineConfig({
     outDir: resolve(__dirname, 'dist/admin'),
     emptyOutDir: true,
   },
-  define: {
-    __MSAL_CLIENT_ID__: JSON.stringify(process.env.AZURE_CLIENT_ID ?? ''),
-    __MSAL_TENANT_ID__: JSON.stringify(process.env.AZURE_TENANT_ID ?? ''),
-  },
   server: {
     port: 5173,
     proxy: {
