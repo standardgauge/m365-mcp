@@ -33,6 +33,8 @@ jest.mock('@azure/functions', () => ({
 }));
 
 process.env.MCP_INSTANCE_NAME = 'Test M365 MCP';
+// Update signing derives its key from the HMAC key.
+process.env.MCP_SESSION_HMAC_KEY = crypto.randomBytes(32).toString('hex');
 
 import '../functions/install/installEndpoint.js';
 
@@ -51,13 +53,11 @@ function getHandler(name: string): Handler {
 }
 
 async function renderServerJs(origin: string): Promise<string> {
-  const url = new URL(origin);
+  // The served origin comes from OAUTH_REDIRECT_URI, never request headers
+  // (AC-427), so point it at the fake server for this render.
+  process.env.OAUTH_REDIRECT_URI = new URL('/api/auth/callback', origin).toString();
   const req = {
-    headers: new Map<string, string>([
-      ['host', url.host],
-      ['x-forwarded-proto', url.protocol.replace(':', '')],
-      ['x-forwarded-host', url.host],
-    ]),
+    headers: new Map<string, string>(),
     query: { get: () => null, has: () => false },
   } as unknown as HttpRequest;
   const res = await getHandler('extensionUpdate')(req, {} as InvocationContext);

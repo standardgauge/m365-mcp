@@ -51,6 +51,16 @@ jest.mock('../services/securityHeaders.js', () => ({
   withSecurity: (handler: unknown) => handler,
 }));
 
+// The update payload is signed; extensionUpdate.test.ts covers that.
+// Here only the served code matters, so the signer is a stand-in.
+jest.mock('../services/extensionSigning.js', () => ({
+  extensionPublicKey: () => 'test-public-key',
+  signExtensionPayload: (payload: unknown) => ({ payload: JSON.stringify(payload), signature: '' }),
+}));
+
+// Served code takes its origin from OAUTH_REDIRECT_URI, not the Host header.
+process.env.OAUTH_REDIRECT_URI = 'https://mcp.example.com/api/auth/callback';
+
 import '../functions/auth/installConfirm.js';
 import '../functions/install/installEndpoint.js';
 import {
