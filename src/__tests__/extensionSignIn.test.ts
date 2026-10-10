@@ -53,8 +53,8 @@ function getHandler(name: string): Handler {
 }
 
 async function renderServerJs(origin: string): Promise<string> {
-  // The served origin comes from OAUTH_REDIRECT_URI, never request headers
-  // (AC-427), so point it at the fake server for this render.
+  // The served origin comes from OAUTH_REDIRECT_URI, never request headers,
+  // so point it at the fake server for this render.
   process.env.OAUTH_REDIRECT_URI = new URL('/api/auth/callback', origin).toString();
   const req = {
     headers: new Map<string, string>(),
