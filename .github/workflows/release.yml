@@ -1,0 +1,183 @@
+name: Release artifacts
+
+# Gives every published release a software bill of materials and a signed
+# statement of where it came from, so someone running this server can check
+# what a version contains and that it was built here, from the tagged commit,
+# by this workflow. docs/supply-chain.md is the verifier's side of this file.
+#
+# On a published release it builds the image from the tagged commit, catalogues
+# it with syft (SPDX and CycloneDX, OS packages and npm packages both), packs
+# the tagged source, and signs a SLSA build provenance attestation over all of
+# it through GitHub's Sigstore instance. The files go on the release; the
+# attestations are fetched by digest with `gh attestation verify`.
+#
+# A pull request that touches the build runs the same job, attestation and
+# verification included, and stops short of the release upload. Nothing else
+# exercises this path between releases, and a release is the wrong time to
+# find out it is broken.
+#
+# GitHub signs attestations only for public repositories (or private ones on
+# Enterprise Cloud). A private fork runs everything up to the SBOM and skips
+# the signing; its own deploys carry build provenance in the registry instead
+# (deploy.yml, `provenance: mode=max`).
+on:
+  release:
+    types: [published]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - Dockerfile
+      - package.json
+      - package-lock.json
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: SBOM and build provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write      # Sigstore signing certificate for the attestation
+      attestations: write  # store the attestation against the subject digests
+    env:
+      # A fork's pull request gets no id-token, and a private repository on a
+      # plan without attestations cannot store one. Both still build the SBOM.
+      ATTEST: >-
+        ${{ github.event.repository.private == false &&
+            (github.event_name == 'release' ||
+             github.event.pull_request.head.repo.full_name == github.repository) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # On a release, github.sha is the commit the tag points at, and that is
+      # what the image is built from and what /health will report.
+      - name: Resolve version
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.event.release.tag_name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "release" ]; then V="$TAG"; else V="pr-${PR}"; fi
+          if ! echo "$V" | grep -qE '^[a-zA-Z0-9._-]+$'; then
+            echo "::error::Invalid version '$V': only [a-zA-Z0-9._-] allowed"
+            exit 1
+          fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "Building ${V} from ${GITHUB_SHA}"
+
+      # GitHub generates a tag's source archive on request and nothing signs
+      # it. This one is a file on the release whose digest is attested.
+      - name: Pack the source
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          git archive --format=tar.gz --prefix="m365-mcp-${VERSION}/" \
+            -o "release-assets/m365-mcp-${VERSION}-source.tar.gz" "$GITHUB_SHA"
+
+      - name: Build image (local daemon only, never pushed)
+        run: docker build --build-arg GIT_SHA="$GITHUB_SHA" -t "m365-mcp:${VERSION}" .
+
+      - name: Install syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.54.0
+
+      - name: Generate SBOM (SPDX and CycloneDX)
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          set -euo pipefail
+          "$SYFT" scan "docker:m365-mcp:${VERSION}" \
+            --source-name m365-mcp --source-version "$VERSION" \
+            -o "spdx-json=release-assets/m365-mcp-${VERSION}.spdx.json" \
+            -o "cyclonedx-json=release-assets/m365-mcp-${VERSION}.cdx.json"
+
+      # An SBOM that parses but misses the application's own packages is worse
+      # than none. Every production dependency in package.json must appear in
+      # both documents at exactly the version the lockfile resolves.
+      - name: Check the SBOM lists every production dependency at its locked version
+        run: |
+          set -euo pipefail
+          spdx="release-assets/m365-mcp-${VERSION}.spdx.json"
+          cdx="release-assets/m365-mcp-${VERSION}.cdx.json"
+          echo "SPDX packages: $(jq '.packages | length' "$spdx"); CycloneDX components: $(jq '.components | length' "$cdx")"
+          missing=0
+          for name in $(jq -r '.dependencies | keys[]' package.json); do
+            version=$(jq -r --arg p "node_modules/$name" '.packages[$p].version // empty' package-lock.json)
+            [ -n "$version" ] || { echo "::error::$name is not in package-lock.json"; missing=1; continue; }
+            jq -e --arg n "$name" --arg v "$version" \
+              'any(.packages[]; .name == $n and .versionInfo == $v)' "$spdx" > /dev/null \
+              || { echo "::error::SPDX SBOM lacks $name@$version"; missing=1; }
+            jq -e --arg n "$name" --arg v "$version" \
+              'any(.components[]; ((if (.group // "") != "" then .group + "/" else "" end) + .name) == $n and .version == $v)' "$cdx" > /dev/null \
+              || { echo "::error::CycloneDX SBOM lacks $name@$version"; missing=1; }
+          done
+          [ "$missing" -eq 0 ]
+          echo "every production dependency is listed at its locked version"
+
+      - name: Checksums
+        working-directory: release-assets
+        run: sha256sum -- * | tee SHA256SUMS
+
+      - name: Attest build provenance
+        if: env.ATTEST == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-assets/*
+
+      # Prove the attestation verifies the way a customer will check it, rather
+      # than that the signing step exited 0.
+      - name: Verify the attestations
+        if: env.ATTEST == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for f in release-assets/*; do
+            gh attestation verify "$f" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA" > /dev/null
+            echo "verified: $(basename "$f")"
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: release-assets/
+          if-no-files-found: error
+
+  # The only job that can write to the repository, and it runs on releases only.
+  publish:
+    name: Attach to the release
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write  # gh release upload
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Upload SBOMs, source and checksums to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
+          {
+            echo "### Release assets for ${TAG}"
+            echo
+            echo '```'
+            cat release-assets/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

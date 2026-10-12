@@ -17,6 +17,8 @@
   how deny lists and the site allow-list apply to both search surfaces
 - [SharePoint MCP server spec](sharepoint-mcp-server-spec.md) — the SharePoint
   tool surface
+- [Supply chain](supply-chain.md) — the SBOM and signed provenance on each
+  release, the provenance on each deployed image, and how to verify both
 - [Trivy suppressions](trivy-suppressions.md) — why each image-scan finding is
   suppressed, and what would un-suppress it
 

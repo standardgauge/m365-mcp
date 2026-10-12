@@ -408,9 +408,9 @@ and, through the extension's auto-update (4.3), every user's desktop.
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
 | 11.1 | T, E | Malicious or compromised change lands on `main`. | Protected branch: pull request, required CI (type check, lint, tests, identifier scan, dependency audit, secrets scan, CodeQL, non-root container boot test), squash only, no force push. Tenant deploys start only from a successful CI run on the exact commit being deployed (`deploy.yml`, `workflow_run`), so a `main` that goes red after merge ships nowhere. | Actions are pinned by tag rather than SHA; deploy forks authenticate with a long-lived principal secret. All tracked separately. |
-| 11.2 | T | Dependency compromise. | `npm audit` gate, Dependabot. | Dependabot cooldown tracked separately. SBOM and image provenance tracked separately. |
+| 11.2 | T | Dependency compromise. | `npm audit` gate, Dependabot with a 7-day cooldown on every ecosystem. Each release carries an SBOM of the image (SPDX and CycloneDX) with a signed build provenance attestation, and each deploy attaches a provenance statement listing every base-image digest to the image ([supply-chain.md](supply-chain.md)). | None. |
 | 11.3 | E | Container escape or host-level foothold. | Image runs as a non-root user; CI fails a build that runs anything as root. | None in this model's scope. |
-| 11.4 | R | Cannot tell what is running. | `/health` reports the deployed commit. | None. |
+| 11.4 | R | Cannot tell what is running. | `/health` reports the deployed commit. The deployed image carries a provenance statement naming the repository and commit it was built from, held unsigned in the operator's own registry; releases are verifiable with `gh attestation verify` ([supply-chain.md](supply-chain.md)). | None. |
 
 ---
 
