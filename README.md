@@ -440,3 +440,5 @@ Licensed under the GNU Affero General Public License, version 3. See [LICENSE](L
 for the full text.
 
 The network clause is deliberate: if you run a modified version of this server as a service, you owe your users the source of your modifications. Running it unmodified inside your own organisation carries no such obligation, which is the ordinary case for a company deploying it for its own staff.
+
+This is the licence the project keeps. There is no proprietary edition, no commercial licence on offer, and no plan to relicense. That is what makes contributing simple: because nobody needs rights beyond the AGPL, a contribution needs no copyright assignment and no contributor licence agreement, only a sign-off. See [CONTRIBUTING.md](CONTRIBUTING.md).
