@@ -65,7 +65,7 @@ async function listEventsHandler(
     end: e.end,
     location: e.location?.displayName ?? null,
     organizer: e.organizer?.emailAddress?.address ?? null,
-    attendees: (e.attendees ?? []).map((a: any) => a.emailAddress?.address),
+    attendees: (e.attendees ?? []).map((a: { emailAddress?: { address?: string } }) => a.emailAddress?.address),
     isAllDay: e.isAllDay ?? false,
     webLink: e.webLink,
   }));

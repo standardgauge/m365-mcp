@@ -161,6 +161,7 @@ function defaultResource(req: HttpRequest, options?: PolicyOptions): string | un
     'eventId', 'notebookId', 'sectionId', 'contactId', 'attachmentId',
   ];
   for (const name of pathParamNames) {
+    // eslint-disable-next-line security/detect-object-injection -- name iterates the literal pathParamNames list
     const v = req.params?.[name];
     if (v) parts.push(v);
   }

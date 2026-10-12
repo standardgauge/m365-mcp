@@ -62,6 +62,7 @@ function parseKey(name: CryptoKeyEnvVar, raw: string | undefined): { key: Buffer
   if (!hex) {
     return {
       error:
+        // eslint-disable-next-line security/detect-object-injection -- name is the CryptoKeyEnvVar union, not caller input
         `${name} env var is not set. ${KEY_PURPOSE[name]} ` +
         'Bind a 64-hex-char key from Key Vault before starting the container.',
     };
@@ -78,6 +79,7 @@ function parseKey(name: CryptoKeyEnvVar, raw: string | undefined): { key: Buffer
 }
 
 function getKey(name: CryptoKeyEnvVar): Buffer {
+  // eslint-disable-next-line security/detect-object-injection -- name is the CryptoKeyEnvVar union, not caller input
   const parsed = parseKey(name, process.env[name]);
   if ('error' in parsed) throw new Error(parsed.error);
   return parsed.key;
@@ -99,6 +101,7 @@ function getDek(): Buffer {
 export function cryptoKeyProblems(env: NodeJS.ProcessEnv = process.env): string[] {
   const problems: string[] = [];
   for (const name of CRYPTO_KEY_ENV_VARS) {
+    // eslint-disable-next-line security/detect-object-injection -- name iterates the CRYPTO_KEY_ENV_VARS constant
     const parsed = parseKey(name, env[name]);
     if ('error' in parsed) problems.push(parsed.error);
   }

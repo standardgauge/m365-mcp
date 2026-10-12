@@ -40,6 +40,7 @@ async function getAuditLog(
     const headers = ['timestamp', 'userEmail', 'deviceLabel', 'operation', 'resource', 'result', 'reason', 'source', 'ip', 'before', 'after'];
     const rows = entries.map(e =>
       headers.map(h => {
+        // eslint-disable-next-line security/detect-object-injection -- h iterates the literal headers list above
         const v = (e as unknown as Record<string, unknown>)[h];
         const s = v == null ? '' : String(v);
         return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;

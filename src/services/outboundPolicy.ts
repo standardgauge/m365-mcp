@@ -143,8 +143,10 @@ async function readRow(tenantId: string, rowKey: string): Promise<OutboundPolicy
     const entity = await getTableClient().getEntity<Record<string, unknown>>(tenantId, rowKey);
     const policy: OutboundPolicy = defaultModes();
     for (const channel of OUTBOUND_CHANNELS) {
+      // eslint-disable-next-line security/detect-object-injection -- channel iterates the OUTBOUND_CHANNELS constant
       const value = entity[channel];
       if (value === undefined || value === null) continue;
+      // eslint-disable-next-line security/detect-object-injection -- channel iterates the OUTBOUND_CHANNELS constant
       policy[channel] = isMode(value) ? value : 'block';
     }
     if (typeof entity.updatedAt === 'string') policy.updatedAt = entity.updatedAt;
@@ -199,11 +201,15 @@ export async function getOutboundEnforcement(
   ]);
   const effective = {} as Record<OutboundChannel, EffectiveOutboundMode>;
   for (const channel of OUTBOUND_CHANNELS) {
+    // eslint-disable-next-line security/detect-object-injection -- channel iterates the OUTBOUND_CHANNELS constant
     const t = tenant[channel];
+    // eslint-disable-next-line security/detect-object-injection -- channel iterates the OUTBOUND_CHANNELS constant
     const u = user[channel];
     // Tenant wins a tie, so an admin reading the result sees the tenant-wide
     // setting named as the reason rather than an incidental per-user copy.
+    // eslint-disable-next-line security/detect-object-injection -- t and u are OutboundMode values readRow already validated; channel is from OUTBOUND_CHANNELS
     if (RANK[t] >= RANK[u]) effective[channel] = { mode: t, enforcedBy: t === 'allow' ? null : 'tenant' };
+    // eslint-disable-next-line security/detect-object-injection -- channel iterates the OUTBOUND_CHANNELS constant
     else effective[channel] = { mode: u, enforcedBy: 'user' };
   }
   return { tenant, user, effective };
@@ -361,6 +367,7 @@ const NOTIFYING_EVENT_FIELDS = ['subject', 'body', 'start', 'end', 'location', '
 
 /** True when an event PATCH would send an update to the event's attendees. */
 export function eventPatchNotifies(patch: Record<string, unknown>): boolean {
+  // eslint-disable-next-line security/detect-object-injection -- f iterates the NOTIFYING_EVENT_FIELDS constant
   return NOTIFYING_EVENT_FIELDS.some((f) => patch[f] !== undefined);
 }
 

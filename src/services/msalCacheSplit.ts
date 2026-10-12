@@ -31,6 +31,7 @@ export function splitMsalCacheByAccount(serialized: string): Map<string, string>
   const byAccount = new Map<string, Record<string, Section>>();
 
   for (const section of ACCOUNT_SECTIONS) {
+    // eslint-disable-next-line security/detect-object-injection -- section iterates the ACCOUNT_SECTIONS constant
     const entries = cache[section];
     if (!isSection(entries)) continue;
     for (const [key, entry] of Object.entries(entries)) {
@@ -47,6 +48,7 @@ export function splitMsalCacheByAccount(serialized: string): Map<string, string>
         };
         byAccount.set(homeAccountId, partition);
       }
+      // eslint-disable-next-line security/detect-object-injection -- section is from ACCOUNT_SECTIONS; key is an own key of the cache msal-node itself serialized, not request input
       partition[section][key] = entry;
     }
   }

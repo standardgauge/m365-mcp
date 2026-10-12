@@ -2252,7 +2252,6 @@ const tools: ToolDef[] = [
         }
         contacts = filtered;
       }
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const cleaned = contacts.map(({ parentFolderId: _pf, ...rest }: { parentFolderId: string; [key: string]: unknown }) => rest);
       // Surface truncation so a recency-capped page never reads as the whole
       // address book. No q returns Graph's default ordering capped at
@@ -2617,6 +2616,9 @@ const tools: ToolDef[] = [
 // ── JSON-RPC handler ──
 
 const toolMap = new Map(tools.map((t) => [t.name, t]));
+// Map lookup rather than object indexing: tools/call hands us the tool name as
+// caller-supplied text, and a Map has no prototype chain to walk.
+const toolServiceByName = new Map(Object.entries(TOOL_SERVICE_MAP));
 
 // The login endpoint is a function route served at the site root, never under
 // whatever subpath the SPA lives at, so the auth link is built from the ORIGIN
@@ -2675,7 +2677,7 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
         const userDisabled = await getUserServiceOverrides(tenantId, auth.userId);
         const mailIndexingOff = await isMailIndexingDisabled(tenantId, auth.userId);
         visibleTools = tools.filter((t) => {
-          const svc = TOOL_SERVICE_MAP[t.name];
+          const svc = toolServiceByName.get(t.name);
           if (!svc) return true;
           if (!enabled.includes(svc)) return false;
           if (userDisabled.includes(svc)) return false;
@@ -2714,7 +2716,7 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
     try {
       // Enforce enabledServices — reject tools for disabled service categories
       const tenantId = getTenantIdFromSession(auth!.session);
-      const toolService = TOOL_SERVICE_MAP[toolName];
+      const toolService = toolServiceByName.get(toolName);
       if (toolService) {
         const enabled = await getEnabledServices(tenantId);
         if (!enabled.includes(toolService)) {

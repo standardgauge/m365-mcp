@@ -24,7 +24,6 @@ const mockCheckDenyList = jest.fn<
 >();
 const mockGraphPost = jest.fn<(payload: unknown) => Promise<unknown>>();
 const mockGraphGet = jest.fn<() => Promise<unknown>>();
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mockGraphApi = jest.fn((_path?: string): any => {
   const chain = { post: mockGraphPost, get: mockGraphGet, select: () => chain };
   return chain;

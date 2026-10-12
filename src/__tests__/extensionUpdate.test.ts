@@ -39,7 +39,6 @@ interface UpdateModule {
   resolveUpdatePath: (extDir: string, filePath: string) => string;
   applyUpdate: (extDir: string, files: Record<string, unknown>) => void;
 }
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const update = require('../install/extension-update.js') as UpdateModule;
 
 type Handler = (req: HttpRequest, ctx: InvocationContext) => Promise<{

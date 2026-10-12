@@ -81,6 +81,7 @@ function pickAddress(a: unknown): PhysicalAddress | undefined {
   const src = a as Record<string, unknown>;
   const out: PhysicalAddress = {};
   for (const k of ADDRESS_SUBFIELDS) {
+    // eslint-disable-next-line security/detect-object-injection -- k iterates the ADDRESS_SUBFIELDS constant
     if (src[k] !== undefined) out[k] = src[k] as string;
   }
   return Object.keys(out).length > 0 ? out : undefined;
@@ -111,11 +112,13 @@ export function buildContactBody(args: Record<string, any>): Record<string, unkn
     'spouseName',
   ];
   for (const f of stringFields) {
+    // eslint-disable-next-line security/detect-object-injection -- f iterates the literal stringFields list
     if (args[f] !== undefined) contact[f] = args[f];
   }
 
   const arrayFields = ['businessPhones', 'homePhones', 'categories'];
   for (const f of arrayFields) {
+    // eslint-disable-next-line security/detect-object-injection -- f iterates the literal arrayFields list
     if (args[f] !== undefined) contact[f] = args[f];
   }
 
@@ -212,6 +215,7 @@ export async function runContactBatch(
   const sendable: number[] = [];
   contacts.forEach((c, index) => {
     if (!c || typeof c !== 'object' || c.givenName === undefined || c.givenName === null || c.givenName === '') {
+      // eslint-disable-next-line security/detect-object-injection -- index is the forEach position in contacts
       results[index] = { index, status: 'failed', error: 'givenName is required' };
     } else {
       sendable.push(index);
@@ -225,6 +229,7 @@ export async function runContactBatch(
       method: 'POST',
       url,
       headers: { 'Content-Type': 'application/json' },
+      // eslint-disable-next-line security/detect-object-injection -- originalIndex is an array position collected from forEach above
       body: buildContactBody(contacts[originalIndex]),
     }));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -234,6 +239,7 @@ export async function runContactBatch(
       responses = batchResult?.responses ?? [];
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'batch request failed';
+      // eslint-disable-next-line security/detect-object-injection -- originalIndex is an array position collected from forEach above
       for (const originalIndex of chunk) results[originalIndex] = { index: originalIndex, status: 'failed', error: msg };
       continue;
     }
@@ -243,9 +249,11 @@ export async function runContactBatch(
     chunk.forEach((originalIndex, j) => {
       const r = byId.get(String(j));
       if (r && r.status >= 200 && r.status < 300) {
+        // eslint-disable-next-line security/detect-object-injection -- originalIndex is an array position collected from forEach above
         results[originalIndex] = { index: originalIndex, status: 'created', id: r.body?.id };
       } else {
         const error = r?.body?.error?.message ?? `Graph returned status ${r?.status ?? 'unknown'}`;
+        // eslint-disable-next-line security/detect-object-injection -- originalIndex is an array position collected from forEach above
         results[originalIndex] = { index: originalIndex, status: 'failed', error };
       }
     });

@@ -84,11 +84,13 @@ async function manageOutboundPolicy(
     }
     const modes: Partial<OutboundModes> = {};
     for (const channel of OUTBOUND_CHANNELS) {
+      // eslint-disable-next-line security/detect-object-injection -- channel iterates the OUTBOUND_CHANNELS constant
       const value = body[channel];
       if (value === undefined) continue;
       if (typeof value !== 'string' || !(OUTBOUND_MODES as readonly string[]).includes(value)) {
         return { status: 400, jsonBody: { error: `${channel} must be one of ${OUTBOUND_MODES.join(', ')}` } };
       }
+      // eslint-disable-next-line security/detect-object-injection -- channel iterates the OUTBOUND_CHANNELS constant
       modes[channel] = value as OutboundMode;
     }
     if (Object.keys(modes).length === 0) {
