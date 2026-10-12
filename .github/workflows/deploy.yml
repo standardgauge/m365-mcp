@@ -183,6 +183,13 @@ jobs:
             GIT_SHA=${{ env.DEPLOY_SHA }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # BuildKit attaches a SLSA provenance statement to the image in the
+          # registry, next to it in the same image index: the repository and
+          # commit it was built from, this workflow run, the build arguments,
+          # and the digest of every base image. mode=max records all of that;
+          # the default (min) leaves out the materials. It stays in your
+          # registry, unsigned. docs/supply-chain.md shows how to read it.
+          provenance: mode=max
 
       # The image listens on 8080 (it runs as a non-root user, which cannot bind
       # ports below 1024), but this workflow only swaps the image and never
