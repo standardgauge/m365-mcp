@@ -12,12 +12,28 @@
 #
 # Usage: scripts/dco-check.sh <base> [head]   (head defaults to HEAD)
 # Exit 0 clean, 1 when a commit is unsigned or its sign-off does not match the
-# author. Needs real history for the range, so a shallow clone fetches first.
+# author, 2 when the range cannot be resolved. Needs real history for the range, so a shallow clone fetches first.
 # Merge commits are skipped: they carry no authorship of their own.
 set -euo pipefail
 
 BASE="${1:?usage: dco-check.sh <base> [head]}"
 HEAD_REF="${2:-HEAD}"
+
+# Resolve the range before walking it. A loop fed by process substitution never
+# sees rev-list's exit status, so an unresolvable ref (an unfetched origin/main,
+# a typo, a shallow clone missing the base) would walk zero commits and report
+# clean. Fail closed instead.
+for ref in "${BASE}" "${HEAD_REF}"; do
+  if ! git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null; then
+    echo "dco-check: cannot resolve '${ref}' to a commit; fetch it first." >&2
+    exit 2
+  fi
+done
+
+if ! commits="$(git rev-list --no-merges "${BASE}..${HEAD_REF}")"; then
+  echo "dco-check: git rev-list failed for ${BASE}..${HEAD_REF}." >&2
+  exit 2
+fi
 
 fail=0
 checked=0
@@ -44,7 +60,7 @@ while read -r sha; do
          "but authored by ${author}" >&2
     fail=1
   fi
-done < <(git rev-list --no-merges "${BASE}..${HEAD_REF}")
+done <<< "${commits}"
 
 if [ "${fail}" -ne 0 ]; then
   echo "dco-check: sign-off missing or mismatched in ${BASE}..${HEAD_REF} (see above)." >&2
