@@ -83,6 +83,28 @@ jobs:
       - name: No deployment-specific identifiers in the tree
         run: bash scripts/identifier-scan.sh
 
+  # ── DCO sign-off (pull requests) ─────────────────────────────────────────────
+  # Contributions arrive under the repository's own licence with a Developer
+  # Certificate of Origin sign-off on every commit (CONTRIBUTING.md). The script
+  # walks base..head and fails on a commit with no Signed-off-by trailer, or one
+  # whose trailer names someone other than the author. Merge commits are skipped.
+  # It refuses a shallow range outright (exit 2), hence the full fetch.
+  dco:
+    name: DCO Sign-off
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # the check walks base..head and exits 2 on a shallow cut
+
+      - name: Every commit is signed off by its author
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/dco-check.sh "$BASE_SHA" "$HEAD_SHA"
+
   codeql:
     name: CodeQL SAST
     runs-on: ubuntu-latest
