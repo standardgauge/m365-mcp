@@ -15,7 +15,8 @@ bash scripts/identifier-scan.sh   # no deployment-specific names in the tree
 
 Run all four before opening a pull request. CI runs the same set plus a
 dependency audit, a secrets scan, CodeQL, and a container boot test that fails
-if the image runs anything as root.
+if the image runs anything as root or if its installer surface fails its
+release gates (`docs/installer-release-gates.md`).
 
 ## Lint warnings are failures
 

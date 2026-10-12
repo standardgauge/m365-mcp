@@ -19,6 +19,9 @@
   tool surface
 - [Supply chain](supply-chain.md) — the SBOM and signed provenance on each
   release, the provenance on each deployed image, and how to verify both
+- [Installer release gates](installer-release-gates.md) — the three checks the
+  public install routes pass on every pull request, against the source and the
+  built image, and how to run them against a deployment
 - [Trivy suppressions](trivy-suppressions.md) — why each image-scan finding is
   suppressed, and what would un-suppress it
 
