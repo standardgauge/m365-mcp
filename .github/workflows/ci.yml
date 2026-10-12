@@ -165,7 +165,12 @@ jobs:
   #   3. Docker reports the image's own HEALTHCHECK healthy, and
   #   4. trivy's DS-0002 ("image user should not be root") and DS-0026 ("no
   #      HEALTHCHECK defined") ran against the Dockerfile and passed, so a
-  #      regression fails here, not at release.
+  #      regression fails here, not at release, and
+  #   5. the installer surface passes its release gates
+  #      (scripts/installer-release-gates.js): served URLs come from the
+  #      configured origin under forged host headers, the update payload
+  #      verifies against the key in the served extension, and the config the
+  #      installers write holds no token.
   container-boot:
     name: Container Boot (PR)
     runs-on: ubuntu-latest
@@ -201,12 +206,16 @@ jobs:
       # No AzureWebJobsStorage, matching infra/container-app.bicep: without it
       # the Functions host keeps secrets and logs on the local filesystem, which
       # is the path a non-root user might not be able to write. Throwaway keys,
-      # generated per run, satisfy the startup key check.
+      # generated per run, satisfy the startup key check. OAUTH_REDIRECT_URI is
+      # the origin the install routes bake into served code; the installer
+      # gates below fetch them through localhost with forged host headers and
+      # expect this origin and no other.
       - name: Boot container
         run: |
           docker run -d --name "$CONTAINER" -p 8080:8080 \
             -e MCP_SESSION_HMAC_KEY="$(openssl rand -hex 32)" \
             -e MCP_DATA_ENCRYPTION_KEY="$(openssl rand -hex 32)" \
+            -e OAUTH_REDIRECT_URI="https://mcp.example.com/api/auth/callback" \
             "$IMAGE"
 
       - name: Wait for /health to serve JSON from this build
@@ -246,6 +255,17 @@ jobs:
             exit 1
           fi
           echo "/azure-functions-host/Secrets is writable by uid $(docker exec "$CONTAINER" id -u)"
+
+      # The install routes are public and serve code that goes on to hold a
+      # bearer token on every user's machine. src/__tests__/installReleaseGates.test.ts
+      # holds the three properties that make that safe against the source;
+      # this holds them against the image as built, through the same script,
+      # with forged Host, X-Forwarded-Host and Forwarded headers on every
+      # request. pwsh (on the runner) runs the PowerShell installer's config
+      # writer; bash and python3 run the shell one. Go-live checklist item 9
+      # is the same check on a deployment.
+      - name: Installer release gates on the booted image
+        run: node scripts/installer-release-gates.js http://localhost:8080 https://mcp.example.com
 
       # The image's HEALTHCHECK is what Docker and Trivy DS-0026 read; Container
       # Apps runs infra/probes.json instead. Docker runs the first check one

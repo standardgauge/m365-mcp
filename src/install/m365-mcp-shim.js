@@ -46,7 +46,7 @@
  *
  * Usage:
  *   printf '%s' "$TOKEN" | node m365-mcp-shim.js --store-token <name>
- *   node m365-mcp-shim.js --streamableHttp https://host/api/mcp --token-store <name>
+ *   node m365-mcp-shim.js --streamableHttp https://<host>/api/mcp --token-store <name>
  *
  * The supergateway-style `--header "Authorization:Bearer <token>"` still works,
  * so a config written by an older installer keeps running until it is re-run.

@@ -695,8 +695,11 @@ push code at users: every URL baked into served code comes from
 `OAUTH_REDIRECT_URI` and never from a forwarded host header, and every update
 payload is signed with a key derived from this instance's HMAC key, which the
 served extension verifies ([threat model](threat-model.md), row 4.3). Both
-hold in the code; this item shows they hold on this deployment, with this
-configuration.
+hold in the code, and CI checks them on every pull request against the source
+and the built image ([installer release gates](installer-release-gates.md));
+this item shows they hold on this deployment, with this configuration.
+`node scripts/installer-release-gates.js <instance-url> <instance-url>` runs
+9.1 and 9.2 in one go, with forged host headers on every request.
 
 - [ ] **9.1 Check: served code names the configured origin, and only it.**
 
