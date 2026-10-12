@@ -13,8 +13,8 @@ wrong. This file supersedes `docs/aad-setup.md`, which had drifted: it described
 an Azure Functions deployment that no longer exists and named an app
 registration from a tenant this project no longer targets.
 
-The step order for a whole tenant, with checkpoints, is
-`onboarding-a-tenant.md`.
+The step order for a whole tenant, with a check per item, is the
+[customer go-live checklist](customer-go-live.md).
 
 ---
 

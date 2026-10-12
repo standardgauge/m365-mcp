@@ -6,7 +6,9 @@ the same shape for any tenant with the resource names swapped. \
 **Last updated:** October 2026
 
 
-Standing a tenant up from nothing starts with [`entra-setup.md`](entra-setup.md).
+Standing a tenant up from nothing is the [customer go-live
+checklist](customer-go-live.md); its Entra items draw on
+[`entra-setup.md`](entra-setup.md).
 
 * * *
 
