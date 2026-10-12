@@ -820,6 +820,14 @@ the second variable. If you would rather not wait,
 skip to step 3 directly and accept that every user re-authenticates once, or run
 `infra/scripts/purge-credentials.sh` for the same effect.
 
+The admin console reports where this stands. The **Readiness** panel at the top
+of the Admin view shows each variable as *Enforced* or *Open*, with the raw
+value beside it so a near miss (`yes`, `1`) is visible, and
+`GET /api/manage/readiness` (Global Administrator, console session) returns the
+same report as JSON. Until both read *Enforced* the window is open, however
+long ago the release was deployed. Nothing else notices, so check the panel
+rather than relying on memory of having run step 3.
+
 ### MSAL token cache: one row per account
 
 `mcpMsalCache` holds one row per signed-in account: partition `account`, row

@@ -10,6 +10,7 @@ import UserManagement from './components/UserManagement';
 import EmailOutputPolicy from './components/EmailOutputPolicy';
 import OutboundPolicy from './components/OutboundPolicy';
 import AuditLog from './components/AuditLog';
+import ReadinessChecks from './components/ReadinessChecks';
 import { readRuntimeConfig } from './runtimeConfig';
 
 // Instance display name is injected by the Azure Function serving index.html.
@@ -187,6 +188,7 @@ function AppContent() {
       <main className="main-content">
         {view === 'admin' ? (
           <div className="admin-view">
+            <ReadinessChecks />
             <CollapsibleSection storageKey="connected-services" title="Connected Services">
               <ConnectedServices
                 enabledServices={enabledServices}

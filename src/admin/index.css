@@ -133,6 +133,36 @@ body {
 .welcome-banner p { font-size: 13px; color: #374151; line-height: 1.5; }
 .section-hint { font-size: 13px; color: #666; margin-bottom: 12px; line-height: 1.4; }
 
+/* ── Readiness ─────────────────────────────────────────────────────────────── */
+.readiness-card--open { background: #fffbeb; border-color: #fcd34d; }
+.readiness-card--open h2 { color: #92400e; }
+.readiness-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.readiness-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid #eee;
+  border-radius: 4px;
+  background: #fafafa;
+}
+.readiness-check--open { border-color: #fcd34d; background: #fef3c7; }
+.readiness-status {
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 3px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.readiness-check--ok .readiness-status { background: #e6f4ea; color: #067d06; border: 1px solid #b7e0c0; }
+.readiness-check--open .readiness-status { background: #fff; color: #92400e; border: 1px solid #fcd34d; }
+.readiness-info { display: flex; flex-direction: column; gap: 2px; }
+.readiness-title { font-size: 13px; font-weight: 600; }
+.readiness-desc { font-size: 12px; color: #374151; line-height: 1.4; }
+.readiness-desc code { font-size: 12px; }
+
 /* ── Collapsible sections ──────────────────────────────────────────────────── */
 .collapsible-header {
   cursor: pointer;
