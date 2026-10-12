@@ -1,5 +1,8 @@
 # Documentation
 
+- [Customer go-live checklist](customer-go-live.md) — the ordered, tickable
+  list a new tenant's deployment has to pass before its first user, with a
+  check and a record entry per item
 - [Threat model](threat-model.md) — assets, trust boundaries, threats with
   current mitigations and gaps, and penetration test scope
 - [Entra setup](entra-setup.md) — the app registration, redirect URIs, client
