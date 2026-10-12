@@ -1,18 +1,55 @@
 # Contributing
 
-## Pull requests are not accepted yet
+## Pull requests are open
 
 This is the development repository: every change lands here first and every
-deployment tracks it. Outside pull requests are still closed, for a different
-reason than mechanics. The copyright holder keeps the option of offering this
-server under terms other than the AGPL to organisations that need that, and
-that option only survives while every line is the holder's to license. Opening
-the door to outside patches means first choosing a contributor agreement (a DCO
-sign-off or a CLA), and that choice has not been made.
+deployment tracks it. Outside pull requests are welcome.
 
-This is a current constraint, not a position on outside contribution. If that
-changes, this file changes with it, and the agreement will be in this
-repository before the first outside pull request is merged.
+Contributions arrive under the licence this project already uses. There is no
+contributor licence agreement to sign and nothing is assigned to anyone. The
+project is AGPL-3.0, your contribution is AGPL-3.0, and your copyright stays
+yours. That is possible because there is no proprietary edition of this server
+and no plan to relicense it, so no one needs rights beyond the AGPL to keep the
+project's options open.
+
+What stands in place of an agreement is a sign-off on each commit.
+
+### Sign your commits
+
+```bash
+git commit -s -m "Fix the thing"
+```
+
+which appends a trailer naming you:
+
+```text
+Signed-off-by: Your Name <you@example.com>
+```
+
+The address has to match the commit author. By adding it you certify the
+[Developer Certificate of Origin 1.1](https://developercertificate.org/): that
+you wrote the change, or otherwise have the right to submit it under this
+project's licence.
+
+Check a range before you push:
+
+```bash
+bash scripts/dco-check.sh origin/main HEAD
+```
+
+**If your employer owns the code you write, the sign-off says you have their
+permission to send it.** Some employers restrict contributing to AGPL projects
+specifically. Find that out before you write the change rather than after.
+
+An unsigned commit is a mechanical problem with a mechanical fix: `git commit
+--amend -s` for the last one, or rebase and sign the range. It is not a
+judgement about the change.
+
+### How a change lands
+
+[AGENTS.md](AGENTS.md) has the rest: one topic per pull request, the checks to
+run first, and how review findings get answered. It applies to everyone,
+including maintainers.
 
 ## What is useful
 
@@ -35,6 +72,6 @@ evaluating exactly as configured.
 
 ## Licence
 
-This project is AGPL-3.0. By filing an issue you are not assigning anything;
-by opening a pull request, were we to accept one, you would be contributing
-under that licence.
+This project is AGPL-3.0. By filing an issue you are not assigning anything; by
+opening a pull request you are contributing under that licence, and saying so
+with the sign-off above.

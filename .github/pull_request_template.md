@@ -2,6 +2,10 @@
 
 <!-- What does this PR do? Why? -->
 
+## Sign-off
+
+- [ ] Every commit carries `Signed-off-by` with the address matching its author (`git commit -s`), per [CONTRIBUTING.md](../CONTRIBUTING.md)
+
 ## Security Checklist
 
 - [ ] Does this change touch auth or middleware? (`src/functions/auth/`, `src/middleware/`)
