@@ -12,7 +12,10 @@
 #
 # Usage: scripts/dco-check.sh <base> [head]   (head defaults to HEAD)
 # Exit 0 clean, 1 when a commit is unsigned or its sign-off does not match the
-# author, 2 when the range cannot be resolved. Needs real history for the range, so a shallow clone fetches first.
+# author, 2 when the range cannot be walked in full: a ref that does not
+# resolve, no merge-base between the two, or a shallow clone whose cut falls
+# inside the range. It never fetches; a shallow clone runs `git fetch
+# --unshallow` (in CI, `fetch-depth: 0`) first.
 # Merge commits are skipped: they carry no authorship of their own.
 set -euo pipefail
 
@@ -30,9 +33,35 @@ for ref in "${BASE}" "${HEAD_REF}"; do
   fi
 done
 
+# Both refs resolving is not enough. In a shallow clone the tip of each branch
+# can be present while the commits between them are not: rev-list then stops at
+# the shallow cut and reports whatever it managed to walk as the whole range.
+# Two checks close that. The refs must share a merge-base, which a cut above the
+# fork point removes, and no commit inside the range may be a shallow graft,
+# which a cut below the fork point (reachable through another parent of a merge)
+# would leave behind.
+if ! git merge-base "${BASE}" "${HEAD_REF}" >/dev/null 2>&1; then
+  echo "dco-check: no merge-base between '${BASE}' and '${HEAD_REF}'; the" \
+       "history between them is missing (shallow clone?). Fetch it first." >&2
+  exit 2
+fi
+
 if ! commits="$(git rev-list --no-merges "${BASE}..${HEAD_REF}")"; then
   echo "dco-check: git rev-list failed for ${BASE}..${HEAD_REF}." >&2
   exit 2
+fi
+
+if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+  shallow_file="$(git rev-parse --git-path shallow)"
+  # grep reads the whole list rather than stopping at the first match, so
+  # rev-list is never cut off by SIGPIPE, which pipefail would report as a
+  # failed pipeline and turn a hit into a miss.
+  if [ -s "${shallow_file}" ] \
+     && git rev-list "${BASE}..${HEAD_REF}" | grep -xF -f "${shallow_file}" >/dev/null; then
+    echo "dco-check: ${BASE}..${HEAD_REF} crosses a shallow-clone boundary, so" \
+         "part of the range is not available to check. Fetch it first." >&2
+    exit 2
+  fi
 fi
 
 fail=0
