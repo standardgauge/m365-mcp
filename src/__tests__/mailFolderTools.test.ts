@@ -244,7 +244,6 @@ describe('toolManifest — mail folder tools', () => {
 describe('schema sync — manifest catalog vs live tools/list', () => {
   const FOLDER_TOOLS = ['create_mail_folder', 'rename_mail_folder', 'move_mail_folder'];
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function shape(inputSchema: any) {
     const props: Record<string, unknown> = {};
     for (const [name, spec] of Object.entries(inputSchema.properties ?? {})) {
@@ -270,7 +269,6 @@ describe('schema sync — manifest catalog vs live tools/list', () => {
     for (const name of FOLDER_TOOLS) {
       expect(manifestByName[name]).toBeDefined();
       expect(liveByName[name]).toBeDefined();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect(shape(manifestByName[name].inputSchema as any)).toEqual(shape(liveByName[name].inputSchema as any));
     }
   });

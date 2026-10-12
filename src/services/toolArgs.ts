@@ -72,6 +72,7 @@ export function findUnsupportedArgs(
       continue;
     }
     unsupported.push(
+      // eslint-disable-next-line security/detect-object-injection -- key is an own key of args (Object.keys) and declared.has(key) makes it an own key of props; both are reads
       ...findUnsupportedInValue((args as Record<string, unknown>)[key], props[key], path),
     );
   }

@@ -8,7 +8,7 @@ the server is and how to deploy it; this file covers how changes are made.
 ```bash
 npm ci
 npx tsc --noEmit          # type check
-npx eslint .              # lint
+npx eslint . --max-warnings 0   # lint; warnings fail, see below
 npm test                  # Jest, the whole suite
 bash scripts/identifier-scan.sh   # no deployment-specific names in the tree
 ```
@@ -16,6 +16,28 @@ bash scripts/identifier-scan.sh   # no deployment-specific names in the tree
 Run all four before opening a pull request. CI runs the same set plus a
 dependency audit, a secrets scan, CodeQL, and a container boot test that fails
 if the image runs anything as root.
+
+## Lint warnings are failures
+
+`npx eslint .` reports zero warnings on `main`, and CI runs it with
+`--max-warnings 0` so it stays that way. The security rules
+(`eslint-plugin-security`) are configured at `warn` because they are
+heuristics, not proofs: `security/detect-object-injection` fires on every
+`obj[key]` where `key` is a variable, and most of those index a lookup map by a
+key from a constant list or type union.
+
+When one fires on your change, do one of two things:
+
+- Fix it. Look a caller-supplied name up in a `Map`, not a plain object, so
+  there is no prototype chain to walk. Type a value instead of reaching for
+  `any`.
+- Suppress it on that one line with the reason attached:
+  `// eslint-disable-next-line security/detect-object-injection -- key iterates
+  the FIELDS constant`. The reason is the review artefact; a bare disable, a
+  file-wide disable, or a disable without `--` is a finding.
+
+A disable that no longer suppresses anything is itself a warning and fails the
+build. Delete it rather than leave it.
 
 ## How a change lands
 

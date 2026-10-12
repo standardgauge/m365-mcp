@@ -197,6 +197,7 @@ const crcTable = (() => {
   for (let i = 0; i < 256; i++) {
     let c = i;
     for (let j = 0; j < 8; j++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    // eslint-disable-next-line security/detect-object-injection -- i is the 0..255 loop counter of a fixed-size Uint32Array
     table[i] = c;
   }
   return table;
@@ -204,6 +205,7 @@ const crcTable = (() => {
 
 function crc32(buf: Buffer): number {
   let crc = 0xffffffff;
+  // eslint-disable-next-line security/detect-object-injection -- index is masked to 0..255 on a 256-entry Uint32Array; i is the Buffer offset
   for (let i = 0; i < buf.length; i++) crc = crcTable[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
   return (crc ^ 0xffffffff) >>> 0;
 }
@@ -920,11 +922,15 @@ function generateBundle(mcpUrl: string, slug: string, displayName: string): Buff
 
 // ── Landing page ─────────────────────────────────────────────────────────────
 
+const HTML_ESCAPES = new Map([
+  ['<', '&lt;'],
+  ['>', '&gt;'],
+  ['&', '&amp;'],
+]);
+
 function renderLandingPage(origin: string, slug: string): string {
   const instanceName = process.env.MCP_INSTANCE_NAME ?? 'M365 MCP';
-  const escaped = instanceName.replace(/[<>&]/g, (c) =>
-    ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c] ?? c)
-  );
+  const escaped = instanceName.replace(/[<>&]/g, (c) => HTML_ESCAPES.get(c) ?? c);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1101,6 +1107,7 @@ function readInstallFile(name: string): string {
   ];
   for (const p of candidates) {
     try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- name is a template filename from a string literal or module constant, never request input; the directory is fixed
       return fs.readFileSync(p, 'utf-8');
     } catch { /* try next candidate */ }
   }

@@ -125,7 +125,6 @@ function parseZipEntries(buf: Buffer): Array<{ name: string; content: string }> 
 
 // ── isNewerVersion: the real one, from the module inlined into server/index.js ──
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { isNewerVersion } = require('../install/extension-update.js') as {
   isNewerVersion: (remote: string, local: string) => boolean;
 };

@@ -55,10 +55,12 @@ function envName(route: RateLimitedRoute): string {
 }
 
 export function limitFor(route: RateLimitedRoute): number {
+  // eslint-disable-next-line security/detect-object-injection -- route is the RateLimitedRoute union, not caller input
+  const fallback = DEFAULT_LIMITS[route];
   const raw = process.env[envName(route)];
-  if (raw === undefined || raw.trim() === '') return DEFAULT_LIMITS[route];
+  if (raw === undefined || raw.trim() === '') return fallback;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < 0) return DEFAULT_LIMITS[route];
+  if (!Number.isInteger(n) || n < 0) return fallback;
   return n;
 }
 
