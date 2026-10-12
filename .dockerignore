@@ -8,6 +8,8 @@ local.settings.json
 .env
 .env.*
 *.env
+# Dev-only compose inputs (dev/azurite.env carries the Azurite emulator key)
+dev/
 
 # OS / editor noise
 .DS_Store
