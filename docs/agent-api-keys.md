@@ -161,6 +161,14 @@ Enforced in code and covered by `agentKeyEnforcement.test.ts` and
   it).
 - See a tool it may not call: `tools/list` is filtered by the key's policy and
   `tools/call` refuses as the backstop, both logged as denied.
+- Write through REST on a service it is read-only on. The policy wrapper treats
+  every method other than GET, HEAD and OPTIONS as mutating whether or not the
+  route sets `mutating`, so a write route that forgets the flag still fails
+  closed. The same gate now covers the tenant's own read-only setting on REST.
+- Use the SharePoint admin views. `GET /api/sharepoint/sites?admin=true` gives
+  a key the same narrowed list as without the flag, and
+  `GET /api/sharepoint/resolve-site` refuses a key, even when the owner is a
+  Global Administrator.
 
 ## Routes
 
@@ -218,5 +226,5 @@ the remedy is revocation.
 - `agentKeys.test.ts`: key shape, requested-policy validation, the intersection, site narrowing.
 - `authAgentKey.test.ts`: the authentication path, every refusal, the cap, touch rate, the refresh path.
 - `manageAgentKeys.test.ts`: both routes, console-only, minting binds a client session with the inherited anchor, admin boundaries, audit rows.
-- `agentKeyEnforcement.test.ts`: REST checks, `tools/list` and `tools/call` under a key, and the routes a key must never reach.
+- `agentKeyEnforcement.test.ts`: REST checks, the SharePoint REST write and admin routes end to end through the wrapper, `tools/list` and `tools/call` under a key, and the routes a key must never reach.
 - `agentKeyReminder.test.ts`: lead time by lifetime, the event's shape, failure handling, deletion.

@@ -23,6 +23,12 @@ async function resolveSiteHandler(
   _context: InvocationContext,
   auth: AuthResult,
 ): Promise<HttpResponseInit> {
+  // An agent key is narrower than its owner's session; resolving arbitrary
+  // sites is an admin-console capability a key never carries.
+  if (auth.session.agentKey) {
+    return { status: 403, jsonBody: { error: 'Not available to an agent key' } };
+  }
+
   const accessToken = await getValidAccessTokenForSession(auth.session);
 
   const isAdmin = await checkGlobalAdmin(auth.userId, accessToken);

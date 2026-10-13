@@ -156,9 +156,25 @@ export interface PolicyOptions {
   /**
    * Marks the route as a mutating (write) operation. When set, the wrapper
    * refuses the request with 403 if the service is in read-only mode for the
-   * tenant. Read routes omit this flag.
+   * tenant or for the agent key. Any method other than GET, HEAD or OPTIONS is
+   * treated as mutating whether or not the flag is set, so a write route that
+   * forgets it fails closed (see isMutatingRequest).
    */
   mutating?: boolean;
+}
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * Whether the read-only gate applies to this request: the route says it
+ * mutates, or the method is not a safe one. Every non-GET route behind the
+ * wrapper writes to Graph, and several were registered without `mutating`,
+ * which let a read-only service or key write through REST.
+ */
+export function isMutatingRequest(req: HttpRequest, options?: PolicyOptions): boolean {
+  if (options?.mutating) return true;
+  const method = (req.method ?? 'GET').toUpperCase();
+  return !SAFE_METHODS.has(method);
 }
 
 /** Extract a resource string from common HTTP route params and query strings. */
@@ -234,7 +250,8 @@ export function withPolicyEnforcement(
       // 2. Admin bypass — ONLY for routes that explicitly opt in via
       //    adminBypass: true (admin config endpoints like manageAllowedSites,
       //    manageServices, denyList). Data routes never skip enforcement.
-      if (options?.adminBypass && req.query.get('admin') === 'true') {
+      //    Never for an agent key: a key is narrower than its owner's session.
+      if (options?.adminBypass && req.query.get('admin') === 'true' && !auth.session.agentKey) {
         const { checkGlobalAdmin } = await import('./authMiddleware.js');
         const isAdmin = await checkGlobalAdmin(auth.userId);
         if (isAdmin) {
@@ -283,8 +300,8 @@ export function withPolicyEnforcement(
       }
 
       // 3c. Read-only mode? Block mutating routes when the service is
-      //     configured read-only for the tenant.
-      if (options?.mutating) {
+      //     configured read-only for the tenant or the agent key.
+      if (isMutatingRequest(req, options)) {
         const readOnlyViolation = await checkReadOnly(auth.userId, service, auth.session);
         if (readOnlyViolation) {
           logAccess({
