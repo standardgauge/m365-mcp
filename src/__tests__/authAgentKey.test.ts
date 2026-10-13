@@ -10,6 +10,8 @@
  *   - last-use is recorded at most every AGENT_KEY_TOUCH_INTERVAL_MS
  *   - the key never passes authenticateRequestAllowExpired (the refresh path)
  *   - a storage failure on the key lookup is a 503-class error, not a 401
+ *   - a live key marks the request scope with its id, so the deny list reads
+ *     the key's own entries; outside a request scope the key is refused
  */
 import { jest } from '@jest/globals';
 import { randomBytes } from 'crypto';
@@ -56,6 +58,7 @@ jest.mock('../services/auditLog.js', () => ({
 import { authenticateRequest, authenticateRequestAllowExpired } from '../services/authMiddleware.js';
 import { SessionStoreUnavailableError } from '../services/sessionStoreError.js';
 import { AGENT_KEY_TOUCH_INTERVAL_MS, generateAgentKeyToken } from '../services/agentKeys.js';
+import { currentAgentKeyId, runWithClientAddress } from '../services/clientAddress.js';
 
 const TENANT = 'tenant-a';
 const USER = 'user-1';
@@ -81,6 +84,11 @@ function req(token: string): HttpRequest {
   return { method: 'POST', headers: new Map([['authorization', `Bearer ${token}`]]) } as unknown as HttpRequest;
 }
 
+/** authenticateRequest inside a request scope, as withSecurity runs every route. */
+function authenticate(request: HttpRequest) {
+  return runWithClientAddress(request, () => authenticateRequest(request));
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockGetSessionByToken.mockResolvedValue(undefined);
@@ -93,7 +101,7 @@ beforeEach(() => {
 
 describe('authenticateRequest with an agent key', () => {
   it('resolves a live key to its session with the key context attached', async () => {
-    const auth = await authenticateRequest(req(KEY));
+    const auth = await authenticate(req(KEY));
     expect(auth).not.toBeNull();
     expect(auth!.userId).toBe(USER);
     expect(auth!.session.agentKey).toEqual({
@@ -109,20 +117,20 @@ describe('authenticateRequest with an agent key', () => {
   it('does not attach the context to the cached session object', async () => {
     const cached = session();
     mockGetSessionByStorageKey.mockResolvedValue(cached);
-    const auth = await authenticateRequest(req(KEY));
+    const auth = await authenticate(req(KEY));
     expect(auth!.session).not.toBe(cached);
     expect(cached.agentKey).toBeUndefined();
   });
 
   it("applies the tenant's key policy on top of the key's own", async () => {
     mockTenantPolicy.mockResolvedValue({ allowKeys: true, disabledServices: ['sharepoint'], readOnlyServices: ['mail', 'calendar'], maxKeyLifetimeDays: 365, ownersMayWiden: true });
-    const auth = await authenticateRequest(req(KEY));
+    const auth = await authenticate(req(KEY));
     expect(auth!.session.agentKey!.policy).toEqual({ services: ['mail'], readOnlyServices: ['mail'], allowedSites: [] });
   });
 
   it('is unauthenticated when no key row matches', async () => {
     mockLoadKey.mockResolvedValue(null);
-    expect(await authenticateRequest(req(KEY))).toBeNull();
+    expect(await authenticate(req(KEY))).toBeNull();
     expect(mockLogAccess).not.toHaveBeenCalled();
   });
 
@@ -131,7 +139,7 @@ describe('authenticateRequest with an agent key', () => {
     ['expired', { expiresAt: Date.now() - 5 }, 'key expired'],
   ])('refuses a %s key and audits the refusal', async (_name, over, reason) => {
     mockLoadKey.mockResolvedValue(record(over));
-    expect(await authenticateRequest(req(KEY))).toBeNull();
+    expect(await authenticate(req(KEY))).toBeNull();
     expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({
       operation: 'auth.agent_key', result: 'denied', reason, resource: 'abc123def456', userId: USER, tenantId: TENANT,
     }));
@@ -140,19 +148,19 @@ describe('authenticateRequest with an agent key', () => {
 
   it('refuses every key when the tenant has disabled them', async () => {
     mockTenantPolicy.mockResolvedValue({ allowKeys: false, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365, ownersMayWiden: true });
-    expect(await authenticateRequest(req(KEY))).toBeNull();
+    expect(await authenticate(req(KEY))).toBeNull();
     expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ result: 'denied', reason: expect.stringContaining('disabled') }));
   });
 
   it('refuses a key whose session row is gone', async () => {
     mockGetSessionByStorageKey.mockResolvedValue(undefined);
-    expect(await authenticateRequest(req(KEY))).toBeNull();
+    expect(await authenticate(req(KEY))).toBeNull();
     expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ result: 'denied', reason: expect.stringContaining('no longer exists') }));
   });
 
   it('refuses a key whose session belongs to someone else', async () => {
     mockGetSessionByStorageKey.mockResolvedValue(session({ userId: 'someone-else' }));
-    expect(await authenticateRequest(req(KEY))).toBeNull();
+    expect(await authenticate(req(KEY))).toBeNull();
   });
 
   it("caps the bound session by the key's own lifetime, not the 30-day sign-in cap", async () => {
@@ -161,24 +169,51 @@ describe('authenticateRequest with an agent key', () => {
     const created = Date.now() - 45 * day;
     mockLoadKey.mockResolvedValue(record({ createdAt: created, expiresAt: created + 90 * day }));
     mockGetSessionByStorageKey.mockResolvedValue(session({ sessionCreatedAt: Date.now() - day, sessionAbsoluteCreatedAt: created }));
-    expect(await authenticateRequest(req(KEY))).not.toBeNull();
+    expect(await authenticate(req(KEY))).not.toBeNull();
 
     // The same key with its session's anchor somehow older than the key's lifetime is refused.
     mockGetSessionByStorageKey.mockResolvedValue(session({ sessionCreatedAt: Date.now() - day, sessionAbsoluteCreatedAt: Date.now() - 100 * day }));
-    expect(await authenticateRequest(req(KEY))).toBeNull();
+    expect(await authenticate(req(KEY))).toBeNull();
   });
 
   it('records last use, but not on every call', async () => {
-    await authenticateRequest(req(KEY));
+    await authenticate(req(KEY));
     expect(mockTouch).toHaveBeenCalledTimes(1);
     mockLoadKey.mockResolvedValue(record({ lastUsedAt: Date.now() - AGENT_KEY_TOUCH_INTERVAL_MS / 2 }));
-    await authenticateRequest(req(KEY));
+    await authenticate(req(KEY));
     expect(mockTouch).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces a key-store outage as SessionStoreUnavailableError', async () => {
     mockLoadKey.mockRejectedValue(new Error('503 from storage'));
-    await expect(authenticateRequest(req(KEY))).rejects.toBeInstanceOf(SessionStoreUnavailableError);
+    await expect(authenticate(req(KEY))).rejects.toBeInstanceOf(SessionStoreUnavailableError);
+  });
+
+  it('marks the request scope with the key id', async () => {
+    const r = req(KEY);
+    const seen = await runWithClientAddress(r, async () => {
+      expect(currentAgentKeyId()).toBeUndefined();
+      await authenticateRequest(r);
+      return currentAgentKeyId();
+    });
+    expect(seen).toBe('abc123def456');
+  });
+
+  it('does not mark the scope for a key it refuses', async () => {
+    mockLoadKey.mockResolvedValue(record({ revokedAt: Date.now() - 5 }));
+    const r = req(KEY);
+    const seen = await runWithClientAddress(r, async () => {
+      await authenticateRequest(r);
+      return currentAgentKeyId();
+    });
+    expect(seen).toBeUndefined();
+  });
+
+  it("refuses a key outside a request scope, where its deny entries could not apply", async () => {
+    expect(await authenticateRequest(req(KEY))).toBeNull();
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({
+      operation: 'auth.agent_key', result: 'denied', reason: expect.stringContaining('request scope'),
+    }));
   });
 
   it('is not a credential for the refresh path', async () => {

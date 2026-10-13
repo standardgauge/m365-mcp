@@ -41,6 +41,7 @@ const mockCreateReminder = jest.fn<(s: UserSession, r: AgentKeyRecord) => Promis
 const mockDeleteReminder = jest.fn<(s: UserSession, id: string) => Promise<void>>();
 const mockSetReminder = jest.fn<(r: AgentKeyRecord, id: string) => Promise<void>>();
 const mockGetSessionByStorageKey = jest.fn<(k: string) => Promise<UserSession | undefined>>();
+const mockClearKeyDeny = jest.fn<(keyId: string) => Promise<void>>();
 
 jest.mock('../services/authMiddleware.js', () => ({
   authenticateConsoleRequest: () => mockConsoleAuth(),
@@ -84,6 +85,9 @@ jest.mock('../services/agentKeys.js', () => ({
   getTenantAgentKeyPolicy: () => mockGetPolicy(),
   setTenantAgentKeyPolicy: (t: unknown, p: unknown) => mockSetPolicy(t as string, p as TenantAgentKeyPolicy),
   setAgentKeyReminder: (r: unknown, id: unknown) => mockSetReminder(r as AgentKeyRecord, id as string),
+}));
+jest.mock('../services/denyList.js', () => ({
+  clearAgentKeyDenyEntries: (k: unknown) => mockClearKeyDeny(k as string),
 }));
 jest.mock('../services/securityHeaders.js', () => ({ withSecurity: (h: unknown) => h }));
 jest.mock('@azure/functions', () => ({ app: { http: jest.fn() } }));
@@ -134,6 +138,7 @@ beforeEach(() => {
   mockUserDisabled.mockResolvedValue([]);
   mockStoreSession.mockResolvedValue();
   mockDeleteSessionByKey.mockResolvedValue();
+  mockClearKeyDeny.mockResolvedValue();
   mockCreateKey.mockImplementation(async (_t, id, i) => rec({ keyId: id, label: i.label, policy: i.policy, expiresAt: i.expiresAt }));
   mockFindKey.mockResolvedValue(rec());
   mockListKeys.mockResolvedValue([rec()]);
@@ -351,6 +356,14 @@ describe('DELETE /api/manage/agent-keys', () => {
     // Reminder removal comes before the session goes.
     expect(mockDeleteReminder.mock.invocationCallOrder[0]).toBeLessThan(mockDeleteSessionByKey.mock.invocationCallOrder[0]);
     expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ operation: 'policy.agent_key.revoke', result: 'allowed', resource: 'key:k1' }));
+    expect(mockClearKeyDeny).toHaveBeenCalledWith('k1');
+  });
+  it("still revokes when the key's deny entries cannot be removed", async () => {
+    mockFindKey.mockResolvedValue(rec());
+    mockClearKeyDeny.mockRejectedValue(new Error('storage 503'));
+    const r = await keys(req('DELETE', undefined, { keyId: 'k1' }), ctx);
+    expect(r.status).toBe(200);
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ operation: 'policy.agent_key.revoke', result: 'allowed' }));
   });
   it('still revokes when the reminder cannot be removed', async () => {
     mockFindKey.mockResolvedValue(rec({ reminderEventId: 'evt-1' }));

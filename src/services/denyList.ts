@@ -1,10 +1,13 @@
 import { TableClient, TableEntity, odata } from '@azure/data-tables';
 import { getTableClient as getStorageTableClient } from './storageClient.js';
+import { currentAgentKeyId } from './clientAddress.js';
 
 const GLOBAL_TABLE = 'GlobalDenyList';
 const USER_TABLE = 'UserDenyList';
 
 export type DenyListType = 'sharepoint' | 'mail' | 'calendar' | 'onedrive' | 'onenote' | 'contacts' | 'teams';
+
+export const DENY_LIST_TYPES: readonly DenyListType[] = ['sharepoint', 'mail', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams'];
 
 export interface DenyListEntry {
   partitionKey: string;
@@ -155,6 +158,33 @@ export async function clearUserDenyList(
   await Promise.all(entries.map((e) => client.deleteEntity(e.partitionKey, e.rowKey)));
 }
 
+// ── Per-key deny list ─────────────────────────────────────────────────────────
+//
+// An agent key (agentKeys.ts) can be kept out of a folder, mail folder or
+// calendar its owner may still see. Its entries are ordinary tier 2 rows under
+// a synthetic subject, `key:<keyId>`, which cannot collide with a user id (an
+// Entra object id, a GUID). loadDeniedPaths adds that subject whenever the
+// request being handled authenticated with the key, so every deny check
+// inherits the key's entries without the call site knowing keys exist.
+
+const AGENT_KEY_SUBJECT_PREFIX = 'key:';
+
+/** The tier 2 subject an agent key's own deny entries are stored under. */
+export function agentKeyDenySubject(keyId: string): string {
+  return `${AGENT_KEY_SUBJECT_PREFIX}${keyId}`;
+}
+
+/** True when a tier 2 subject names an agent key rather than a user. */
+export function isAgentKeyDenySubject(subject: string): boolean {
+  return subject.startsWith(AGENT_KEY_SUBJECT_PREFIX);
+}
+
+/** Delete every deny entry a key carries, across all types. */
+export async function clearAgentKeyDenyEntries(keyId: string): Promise<void> {
+  const subject = agentKeyDenySubject(keyId);
+  await Promise.all(DENY_LIST_TYPES.map((type) => clearUserDenyList(subject, type)));
+}
+
 // ── Config-driven default deny lists ──────────────────────────────────────────
 
 /**
@@ -204,9 +234,22 @@ export function getDefaultDenyPaths(type: DenyListType): string[] {
  * signed-in caller alone. When the caller reaches another user's mailbox or
  * calendar through delegation, it is the caller *and* the owner of that data
  * (see `resolveDenySubject` in mailboxOwner.ts): an owner who hides a folder
- * from AI hides it from every agent, not only their own.
+ * from AI hides it from every agent, not only their own. A request made with
+ * an agent key also reads that key's own entries; see effectiveSubjects.
  */
 export type DenySubject = string | readonly string[];
+
+/**
+ * The tier 2 subjects a check reads: the ones the caller named, plus the
+ * agent key the current request authenticated with, if any. The key is added
+ * here rather than at each call site so no check can forget it.
+ */
+function effectiveSubjects(subject: DenySubject): string[] {
+  const ids = typeof subject === 'string' ? [subject] : [...subject];
+  const keyId = currentAgentKeyId();
+  if (keyId) ids.push(agentKeyDenySubject(keyId));
+  return [...new Set(ids)];
+}
 
 /** Default + global + every subject's per-user entries, as a flat path list. */
 async function loadDeniedPaths(
@@ -214,7 +257,7 @@ async function loadDeniedPaths(
   subject: DenySubject,
   type: DenyListType
 ): Promise<string[]> {
-  const userIds = typeof subject === 'string' ? [subject] : [...new Set(subject)];
+  const userIds = effectiveSubjects(subject);
   const [globalEntries, ...userEntryLists] = await Promise.all([
     listGlobalDenyEntries(tenantId, type),
     ...userIds.map((id) => listUserDenyEntries(id, type)),
@@ -334,7 +377,7 @@ function matchesSearchDenyList(path: string, deniedPaths: string[]): boolean {
  * inside the tree, so a hit under a denied folder must be dropped even when the
  * deny entry names only the folder (bare name or partial path). Uses
  * {@link matchesSearchDenyList} for that ancestor-segment matching while drawing
- * on the same default + global + per-user deny sources as
+ * on the same default + global + per-user (and per-key) deny sources as
  * {@link filterDeniedPaths}. Callers must set each item's `path` to a resolved
  * site-relative path; items with no matchable path are the caller's to drop
  * (fail closed) before this runs. Fails closed (drops all) when storage is down.
@@ -343,14 +386,7 @@ export async function filterDeniedSearchHits<
   T extends { path?: string; webUrl?: string; id?: string; name?: string }
 >(tenantId: string, userId: string, items: T[]): Promise<T[]> {
   try {
-    const [globalEntries, userEntries] = await Promise.all([
-      listGlobalDenyEntries(tenantId, 'sharepoint'),
-      listUserDenyEntries(userId, 'sharepoint'),
-    ]);
-    const allDenied = [
-      ...getDefaultDenyPaths('sharepoint'),
-      ...[...globalEntries, ...userEntries].map((e) => e.path),
-    ];
+    const allDenied = await loadDeniedPaths(tenantId, userId, 'sharepoint');
     return items.filter((item) => {
       const primary = item.path ?? item.webUrl ?? item.id ?? '';
       if (primary && matchesSearchDenyList(primary, allDenied)) return false;

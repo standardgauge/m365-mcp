@@ -7,6 +7,7 @@ import { getEnabledServices } from '../../services/serviceSettings.js';
 import { getUserServiceOverrides } from '../../services/userServiceOverrides.js';
 import { storeSession, deleteSessionByKey, getSessionByStorageKey, getTenantIdFromSession } from '../../services/tokenCache.js';
 import { createKeyExpiryReminder, deleteKeyExpiryReminder } from '../../services/agentKeyReminder.js';
+import { clearAgentKeyDenyEntries } from '../../services/denyList.js';
 import type { UserSession } from '../../services/tokenCache.js';
 import {
   AGENT_KEY_LABEL_MAX,
@@ -44,6 +45,9 @@ import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from '../..
  *        only a narrowing is accepted. A Global Administrator may only
  *        narrow another user's key. The key value never changes.
  * DELETE /api/manage/agent-keys?keyId=<id>      revoke; own keys, or any key as Global Administrator
+ *
+ * A key's own folder, mail-folder and calendar deny entries are managed
+ * through /api/manage/deny-list/user with `keyId` (getDenyList.ts).
  *
  * Browser-only, like every /api/manage route: a console session is required,
  * so neither an installed client's token nor an agent key can mint or list
@@ -190,6 +194,13 @@ async function manageAgentKeys(request: HttpRequest, context: InvocationContext)
           }
         }
         await deleteSessionByKey(record.sessionStorageKey, record.userId);
+        // The key's own deny entries are inert once it is revoked;
+        // removing them is housekeeping, so a failure is logged, not fatal.
+        try {
+          await clearAgentKeyDenyEntries(keyId);
+        } catch (err: unknown) {
+          context.warn(`[agent-keys] deny entries for key ${keyId} not removed:`, err instanceof Error ? err.message : err);
+        }
         logAccess({
           ...auditActor(auth.session),
           operation: 'policy.agent_key.revoke',

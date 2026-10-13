@@ -15,6 +15,7 @@ import { getValidAccessToken } from './tokenCache.js';
 import { checkBrowserOrigin, readCookie, verifyConsoleToken, CONSOLE_COOKIE } from './consoleSession.js';
 import type { ConsoleClaims } from './consoleSession.js';
 import { auditActor, logAccess } from './auditLog.js';
+import { markRequestAgentKey } from './clientAddress.js';
 
 // Well-known roleTemplateId for the Global Administrator built-in role
 const GLOBAL_ADMIN_ROLE_TEMPLATE_ID = '62e90394-69f5-4237-9190-012177145e10';
@@ -184,6 +185,11 @@ async function authenticateAgentKey(token: string): Promise<AuthResult | null | 
     touchAgentKey(record, now).catch((err) =>
       console.error('[auth] Failed to record agent key use:', err instanceof Error ? err.message : err));
   }
+
+  // The key's own deny entries are read from the request scope (denyList.ts
+  // effectiveSubjects). Outside a request scope they could not apply, so the
+  // key is refused rather than let through with its owner's deny list alone.
+  if (!markRequestAgentKey(record.keyId)) return refuse('no request scope to carry the key\'s deny entries');
 
   const policy = effectiveAgentKeyPolicy(record.policy, tenantPolicy);
   // A copy: the cached session stays free of request-scoped context, and

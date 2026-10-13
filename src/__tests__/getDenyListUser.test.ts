@@ -36,6 +36,12 @@ jest.mock('../services/authMiddleware.js', () => ({
 
 jest.mock('../services/tokenCache.js', () => ({
   getTenantId: jest.fn<(userId: string) => Promise<string>>().mockResolvedValue('test-tenant'),
+  getTenantIdFromSession: () => 'test-tenant',
+}));
+
+jest.mock('../services/agentKeys.js', () => ({
+  findAgentKey: jest.fn<() => Promise<null>>().mockResolvedValue(null),
+  getTenantAgentKeyPolicy: jest.fn(),
 }));
 
 jest.mock('../services/denyList.js', () => ({
@@ -47,6 +53,9 @@ jest.mock('../services/denyList.js', () => ({
   addGlobalDenyEntry: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
   removeGlobalDenyEntry: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
   clearUserDenyList: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+  agentKeyDenySubject: (keyId: string) => `key:${keyId}`,
+  isAgentKeyDenySubject: (s: string) => s.startsWith('key:'),
+  DENY_LIST_TYPES: ['sharepoint', 'mail', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams'],
 }));
 
 jest.mock('@azure/functions', () => ({

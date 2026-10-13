@@ -33,6 +33,7 @@ On top of the user's and the tenant's policy, a key carries its own:
 | `services` | The services the key may use | narrow: a subset of what the user can use |
 | `readOnlyServices` | Services whose write tools the key may not call | narrow: adds to the tenant's read-only set |
 | `allowedSites` | SharePoint sites the key may see | narrow: intersects the tenant's allow-list |
+| deny entries | Folders, mail folders, calendars and the like the key may not reach | narrow: added to the owner's and the tenant's deny lists (see **A key's own deny entries**) |
 | `expiresInDays` | How long the key lives, 1 to 365 | bound by the tenant's maximum |
 
 A Global Administrator sets a tenant-wide **key policy** that no key can
@@ -172,11 +173,63 @@ a widening reaches wherever the key lives. A tenant that wants the stricter
 model sets `ownersMayWiden` off, and administrators are narrow-only in every
 case, since a key acts on its owner's data and widening is theirs to decide.
 
+## A key's own deny entries
+
+A key can be kept out of one folder, mail folder or calendar its owner can
+still see: the owner's Claude may read the Board mail folder, the reporting
+app holding a key may not. These are deny entries of the same kind as the
+personal deny list, held on the key.
+
+**Storage.** They are ordinary tier 2 rows in `UserDenyList` under a
+synthetic subject, `key:<keyId>` (`agentKeyDenySubject` in
+[`denyList.ts`](../src/services/denyList.ts)), so they match exactly as the
+owner's entries do: same canonicalisation, same case-insensitive prefix rule,
+names as well as paths, the ancestor-segment rule for search hits. The
+subject cannot collide with a user's, which is an Entra object id.
+
+**Enforcement.** When `authenticateAgentKey` accepts a key it records the
+key id on the request scope (`markRequestAgentKey` in
+[`clientAddress.ts`](../src/services/clientAddress.ts), the same
+`AsyncLocalStorage` that carries the audit address), and `loadDeniedPaths`
+adds `key:<keyId>` to the subjects of every check made while that request is
+handled. Every caller of `isPathDenied`, `checkDenyList`,
+`filterDeniedPaths` and `filterDeniedSearchHits`, on REST and on MCP, inherits
+the key's entries without being changed or knowing keys exist. Delegated
+access still adds the data owner's subject alongside, so a key reading a
+shared mailbox is held to its own entries, its owner's and the mailbox
+owner's.
+
+The scope is set by `withSecurity`, which wraps every route. A key presented
+somewhere without a request scope would have its own entries silently
+skipped, so it is refused there instead ("no request scope to carry the
+key's deny entries").
+
+**Who may change them.** Through `/api/manage/deny-list/user` with `keyId`
+in place of `targetUserId`, under the same rules as **Editing a key**:
+
+| Actor | May |
+|---|---|
+| Owner | add and remove |
+| Owner, tenant `ownersMayWiden` off | add only; removing an entry widens the key |
+| Global Administrator, another user's key | read and add; not remove |
+
+A revoked key's entries cannot be changed, and revocation deletes them
+(best effort; a revoked key's rows are inert either way). The key subject is
+refused as a `targetUserId`, so the narrow-only rules cannot be stepped round
+through the personal-list path. Changes are audited as
+`policy.deny_list.agent_key.add` and `.remove`, with the resource
+`key:<keyId>/<type>:<path>` and the entry before and after.
+
+**UI.** **My Settings → Agent Keys → Folders** on a key opens its list and
+the same folder browsers the personal deny list uses, limited to the key's
+services and, for SharePoint, to the key's sites. Block there writes to the
+key, not to the owner.
+
 ## What ends a key
 
 | Event | Effect |
 |---|---|
-| Owner or admin revokes it | Row marked, calendar reminder removed, session row deleted. Other replicas drop their cached session within `SESSION_REVALIDATE_MS` (30 s), the same bound as logout. |
+| Owner or admin revokes it | Row marked, calendar reminder removed, session row deleted, its own deny entries removed. Other replicas drop their cached session within `SESSION_REVALIDATE_MS` (30 s), the same bound as logout. |
 | Its own expiry (`expiresInDays`, 1 to the tenant maximum, at most 365) | Refused at the next request. The key's session is capped by the same instant. |
 | The owner signs out, or their sessions are purged | `deleteAllUserSessions` removes the key's session too. Refused with "the session the key is bound to no longer exists". |
 | Entra revokes the owner's refresh token, or it lapses from inactivity | The silent renewal fails at the next renewal window and the key's session ends. |
@@ -221,12 +274,15 @@ Enforced in code and covered by `agentKeyEnforcement.test.ts` and
 | `POST /api/manage/agent-keys` | any console user | mint: `{ label, services, expiresInDays, readOnlyServices?, allowedSites?, reminder? }` → `201 { key, keyId, reminder, … }`, the key once |
 | `PATCH /api/manage/agent-keys?keyId=` | owner (either way, or narrow-only per tenant policy); Global Administrator (narrow only) | edit: `{ label?, services?, readOnlyServices?, allowedSites? }` → `200 { widened, … }` |
 | `DELETE /api/manage/agent-keys?keyId=` | owner, or Global Administrator | revoke |
+| `GET /api/manage/deny-list/user?type=&keyId=` | owner, or Global Administrator | the key's own deny entries of one type |
+| `POST`, `DELETE /api/manage/deny-list/user` with `{ type, path, keyId }` | owner (remove only if owners may widen); Global Administrator (add only) | add or remove one of the key's own deny entries |
 | `GET /api/manage/agent-key-policy` | any console user | the tenant's key policy, so the form can show what is grantable |
 | `POST /api/manage/agent-key-policy` | Global Administrator | `{ allowKeys?, disabledServices?, readOnlyServices?, maxKeyLifetimeDays?, ownersMayWiden? }`, merged over the stored policy |
 
 Every change is audited with before and after: `policy.agent_key.create`,
 `policy.agent_key.update`, `policy.agent_key.revoke`,
-`policy.agent_key_policy.set`, and the admin refusals under the same names.
+`policy.agent_key_policy.set`, `policy.deny_list.agent_key.add` and
+`.remove`, and the admin refusals under the same names.
 
 The UI is **My Settings → Agent Keys** for owners and **Admin → Agent Keys**
 for the tenant policy and the list of every key.
@@ -259,9 +315,6 @@ the remedy is revocation.
   expires. Tenants that rely on CA for "corporate machines only" should treat
   keys as server-side credentials and keep lifetimes short. In the threat
   model's gap register; tracked separately.
-- A key cannot yet carry its own folder, mail-folder or calendar deny
-  entries; it inherits the owner's. Also in the gap register; tracked
-  separately.
 - Nothing yet alerts on a burst of refusals or a destructive call under a
   key; the audit rows are there to be consumed. Tracked separately.
 
@@ -272,3 +325,5 @@ the remedy is revocation.
 - `manageAgentKeys.test.ts`: both routes, console-only, minting binds a client session anchored at the key, the tenant ceiling, reminder success and failure, editing by owner and by administrator under both tenant settings, admin boundaries, audit rows.
 - `agentKeyEnforcement.test.ts`: REST checks, the SharePoint REST write and admin routes end to end through the wrapper, `tools/list` and `tools/call` under a key, and the routes a key must never reach.
 - `agentKeyReminder.test.ts`: lead time by lifetime, the event's shape, failure handling, deletion.
+- `agentKeyDenyList.test.ts`: a key's own deny entries applied by `isPathDenied`, `filterDeniedPaths` and `filterDeniedSearchHits` under the key and not under the owner's session, another key, or no request scope; delegated subjects alongside; clearing on revoke.
+- `agentKeyDenyListRoute.test.ts`: the `keyId` path of the deny-list route, owner and administrator rules under both tenant settings, revoked and unknown keys, and the key subject refused as a `targetUserId`.
