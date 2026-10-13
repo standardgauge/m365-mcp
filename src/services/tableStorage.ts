@@ -441,6 +441,24 @@ export async function loadSessionByToken(token: string): Promise<StoredSession |
 }
 
 /**
+ * Look up a session by its RowKey, for a caller that holds the RowKey rather
+ * than the token (an agent API key's row names its session this way). The
+ * returned session has no token in memory. Null on a missing row; any other
+ * failure propagates, as in loadSessionByToken.
+ */
+export async function loadSessionByStorageKey(storageKey: string): Promise<StoredSession | null> {
+  await ensureTables();
+  let entity: Record<string, unknown>;
+  try {
+    entity = await getSessionsTable().getEntity('session', storageKey);
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
+  return entityToSession(entity);
+}
+
+/**
  * Re-key every session row that is not stored under RowKey =
  * sessionTokenHash[:32]. Those are legacy rows (RowKey = userId) written
  * before multi-session support; the token lookup no longer scans for them.

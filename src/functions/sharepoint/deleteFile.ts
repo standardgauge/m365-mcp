@@ -25,7 +25,7 @@ async function deleteSharepointFileHandler(
   if (driveId) assertOpaqueId(driveId, 'driveId');
 
   // Enforce allowedSites policy
-  const siteViolation = await checkAllowedSite(userId, siteId);
+  const siteViolation = await checkAllowedSite(userId, siteId, auth.session);
   if (siteViolation) {
     return { status: siteViolation.status, jsonBody: { error: siteViolation.error } };
   }
@@ -41,7 +41,7 @@ async function deleteSharepointFileHandler(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const meta: any = await graph.api(`${dp}/items/${itemId}`).select('name,parentReference').get();
   const filePath = `${meta.parentReference?.path ?? ''}/${meta.name}`;
-  const denyViolation = await checkDenyList(userId, 'sharepoint', filePath);
+  const denyViolation = await checkDenyList(userId, 'sharepoint', filePath, auth.session);
   if (denyViolation) {
     return { status: denyViolation.status, jsonBody: { error: denyViolation.error } };
   }
@@ -56,6 +56,7 @@ app.http('deleteSharepointFile', {
   authLevel: 'anonymous',
   route: 'api/sharepoint/files/{itemId}/delete',
   handler: withSecurity(withPolicyEnforcement('sharepoint', deleteSharepointFileHandler, {
+    mutating: true,
     getSiteId: (req) => req.query.get('siteId') ?? undefined,
   })),
 });

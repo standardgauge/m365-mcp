@@ -29,7 +29,7 @@ async function createSharepointFolderHandler(
   if (body.parentId) assertOpaqueId(body.parentId, 'parentId');
 
   // Enforce allowedSites policy (body-level siteId not available to wrapper)
-  const siteViolation = await checkAllowedSite(userId, body.siteId);
+  const siteViolation = await checkAllowedSite(userId, body.siteId, auth.session);
   if (siteViolation) {
     return { status: siteViolation.status, jsonBody: { error: siteViolation.error } };
   }
@@ -46,7 +46,7 @@ async function createSharepointFolderHandler(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const parentMeta: any = await graph.api(`${drivePath}/items/${body.parentId}`).select('name,parentReference').get();
     const parentPath = `${parentMeta.parentReference?.path ?? ''}/${parentMeta.name}`;
-    const denyViolation = await checkDenyList(userId, 'sharepoint', `${parentPath}/${body.name}`);
+    const denyViolation = await checkDenyList(userId, 'sharepoint', `${parentPath}/${body.name}`, auth.session);
     if (denyViolation) {
       return { status: denyViolation.status, jsonBody: { error: denyViolation.error } };
     }
@@ -77,5 +77,5 @@ app.http('createSharepointFolder', {
   methods: ['POST'],
   authLevel: 'anonymous',
   route: 'api/sharepoint/folders',
-  handler: withSecurity(withPolicyEnforcement('sharepoint', createSharepointFolderHandler)),
+  handler: withSecurity(withPolicyEnforcement('sharepoint', createSharepointFolderHandler, { mutating: true })),
 });

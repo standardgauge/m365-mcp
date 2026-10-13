@@ -3,7 +3,7 @@ import { getValidAccessTokenForSession, getTenantId } from '../../services/token
 import { createGraphClient } from '../../services/graphClient.js';
 import { filterAndDisambiguateSites } from '../../services/sharepointFilter.js';
 import { withPolicyEnforcement } from '../../services/policyEnforcement.js';
-import { getAllowedSites } from '../../services/serviceSettings.js';
+import { effectiveAllowedSites } from '../../services/agentKeys.js';
 import { checkGlobalAdmin } from '../../services/authMiddleware.js';
 import type { AuthResult } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
@@ -55,10 +55,15 @@ async function listSitesHandler(
   // doesn't return it).
   //
   // For non-admin requests, enforce the allowedSites filter as usual.
-  const isAdminRequest = request.query.get('admin') === 'true';
+  //
+  // An agent key never gets the admin inventory: it is narrower than its
+  // owner's session, and a key scoped to one site must not enumerate every
+  // site because its owner happens to be a Global Admin. The admin UI runs on
+  // a browser session, never a key.
+  const isAdminRequest = request.query.get('admin') === 'true' && !auth.session.agentKey;
   const isAdmin = isAdminRequest ? await checkGlobalAdmin(userId, accessToken) : false;
   const tenantId = await getTenantId(userId);
-  const allowed = await getAllowedSites(tenantId);
+  const allowed = await effectiveAllowedSites(tenantId, auth.session);
 
   if (isAdmin) {
     // Union: include allowedSites entries that Graph search didn't return,

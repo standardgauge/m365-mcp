@@ -2,7 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/fu
 import { getValidAccessTokenForSession, getTenantId } from '../../services/tokenCache.js';
 import { createGraphClient } from '../../services/graphClient.js';
 import { filterDeniedSearchHits } from '../../services/denyList.js';
-import { getAllowedSites } from '../../services/serviceSettings.js';
+import { effectiveAllowedSites } from '../../services/agentKeys.js';
 import {
   SEARCH_DRIVE_ITEM_FIELDS,
   searchFetchSize,
@@ -50,7 +50,7 @@ async function searchSharepointHandler(
   // `contentSources` source constraint is invalid for a driveItem query and made
   // every search error, so scoping is post-filter only; over-fetch a
   // wider window when a scope is active so filtering still fills maxResults.
-  const allowedSites = await getAllowedSites(tenantId);
+  const allowedSites = await effectiveAllowedSites(tenantId, auth.session);
   // An explicit siteId (validated in-allow-list upstream) narrows the post-filter
   // to that single site; otherwise the full allow-list applies (empty = allow all).
   const scopeSites = siteId ? [{ id: siteId }] : allowedSites;

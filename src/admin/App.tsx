@@ -9,6 +9,7 @@ import CollapsibleSection from './components/CollapsibleSection';
 import UserManagement from './components/UserManagement';
 import EmailOutputPolicy from './components/EmailOutputPolicy';
 import OutboundPolicy from './components/OutboundPolicy';
+import AgentKeyPolicy from './components/AgentKeyPolicy';
 import AuditLog from './components/AuditLog';
 import ReadinessChecks from './components/ReadinessChecks';
 import { readRuntimeConfig } from './runtimeConfig';
@@ -201,6 +202,9 @@ function AppContent() {
             </CollapsibleSection>
             <CollapsibleSection storageKey="outbound-policy" title="Outbound Policy">
               <OutboundPolicy userId={userId} enabledServices={enabledServices} />
+            </CollapsibleSection>
+            <CollapsibleSection storageKey="agent-key-policy" title="Agent Keys" defaultCollapsed>
+              <AgentKeyPolicy userId={userId} enabledServices={enabledServices} allowedSites={allowedSites} />
             </CollapsibleSection>
             <CollapsibleSection storageKey="user-management" title="User Management">
               <UserManagement

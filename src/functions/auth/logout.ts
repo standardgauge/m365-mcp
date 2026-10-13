@@ -44,6 +44,11 @@ async function logout(
   let auth: Awaited<ReturnType<typeof authenticateRequest>> = null;
   try {
     auth = await authenticateRequest(request);
+    if (auth?.session.agentKey) {
+      // A key ends with its own revocation, not by signing its owner out.
+      logAccess({ ...auditActor(auth.session), operation: 'auth.logout', result: 'denied', reason: 'agent keys cannot sign the user out', source: 'http' });
+      return { status: 403, jsonBody: { error: 'Forbidden' } };
+    }
     if (auth) {
       await deleteAllUserSessions(auth.userId);
       logAccess({ ...auditActor(auth.session), operation: 'auth.logout', result: 'allowed', source: 'http' });

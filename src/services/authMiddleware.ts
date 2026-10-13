@@ -1,6 +1,15 @@
 import { HttpRequest } from '@azure/functions';
-import { getSessionByToken, SESSION_TTL_MS, storeSession, isAbsoluteLifetimeExceeded } from './tokenCache.js';
+import { getSessionByToken, getSessionByStorageKey, SESSION_TTL_MS, storeSession, isAbsoluteLifetimeExceeded } from './tokenCache.js';
 import type { UserSession } from './tokenCache.js';
+import {
+  looksLikeAgentKey,
+  loadAgentKeyByToken,
+  getTenantAgentKeyPolicy,
+  effectiveAgentKeyPolicy,
+  touchAgentKey,
+  AGENT_KEY_TOUCH_INTERVAL_MS,
+} from './agentKeys.js';
+import { SessionStoreUnavailableError } from './sessionStoreError.js';
 import { createGraphClient, acquireTokenSilent } from './graphClient.js';
 import { getValidAccessToken } from './tokenCache.js';
 import { checkBrowserOrigin, readCookie, verifyConsoleToken, CONSOLE_COOKIE } from './consoleSession.js';
@@ -107,12 +116,95 @@ export async function authenticateRequest(request: HttpRequest): Promise<AuthRes
  * not be used. Storage failures propagate as SessionStoreUnavailableError.
  */
 async function authenticateToken(token: string): Promise<AuthResult | null | 'unknown'> {
+  if (looksLikeAgentKey(token)) return authenticateAgentKey(token);
   const session = await getSessionByToken(token);
   if (!session) return 'unknown';
+  return authenticateSession(session);
+}
 
+/**
+ * Resolve an agent API key (services/agentKeys.ts) to the session it is bound
+ * to, then put that session through the same lifetime checks as any other.
+ * The result's session carries the key's context, which the policy checks
+ * read to narrow the request. 'unknown' when no key row matches, so the
+ * remaining candidates are tried; null when the key exists but may not be
+ * used (revoked, expired, keys disabled for the tenant, or its session gone).
+ */
+async function authenticateAgentKey(token: string): Promise<AuthResult | null | 'unknown'> {
+  let record: Awaited<ReturnType<typeof loadAgentKeyByToken>>;
+  try {
+    record = await loadAgentKeyByToken(token);
+  } catch (err) {
+    throw new SessionStoreUnavailableError(err);
+  }
+  if (!record) return 'unknown';
+
+  const now = Date.now();
+  const refuse = (reason: string): null => {
+    logAccess({
+      tenantId: record!.tenantId,
+      userId: record!.userId,
+      userEmail: record!.userEmail,
+      deviceLabel: `agent-key:${record!.label}#${record!.keyId}`,
+      operation: 'auth.agent_key',
+      resource: record!.keyId,
+      result: 'denied',
+      reason,
+      source: 'http',
+    });
+    console.warn(`[auth] agent key ${record!.keyId} refused: ${reason}`);
+    return null;
+  };
+
+  if (record.revokedAt) return refuse('key revoked');
+  if (record.expiresAt && now >= record.expiresAt) return refuse('key expired');
+
+  let tenantPolicy: Awaited<ReturnType<typeof getTenantAgentKeyPolicy>>;
+  try {
+    tenantPolicy = await getTenantAgentKeyPolicy(record.tenantId);
+  } catch (err) {
+    throw new SessionStoreUnavailableError(err);
+  }
+  if (!tenantPolicy.allowKeys) return refuse('agent keys are disabled for this tenant');
+
+  const session = await getSessionByStorageKey(record.sessionStorageKey);
+  if (!session) return refuse('the session the key is bound to no longer exists');
+  if (session.userId !== record.userId || session.tenantId !== record.tenantId) {
+    return refuse('the key and its session disagree on identity');
+  }
+
+  // The key's session was minted with the key and anchored at its creation,
+  // so its absolute cap is the key's own lifetime (owner-chosen, within the
+  // tenant maximum), not the 30 days a sign-in gets. expiresAt was already
+  // checked above; this keeps the cap honest if the two ever disagree.
+  const result = await authenticateSession(session, Math.max(0, record.expiresAt - record.createdAt));
+  if (!result) return null;
+
+  if (now - record.lastUsedAt > AGENT_KEY_TOUCH_INTERVAL_MS) {
+    touchAgentKey(record, now).catch((err) =>
+      console.error('[auth] Failed to record agent key use:', err instanceof Error ? err.message : err));
+  }
+
+  const policy = effectiveAgentKeyPolicy(record.policy, tenantPolicy);
+  // A copy: the cached session stays free of request-scoped context, and
+  // nothing a handler writes back through storeSession carries it either
+  // (saveSession writes named columns only).
+  const scoped: UserSession = {
+    ...result.session,
+    agentKey: { keyId: record.keyId, label: record.label, policy },
+  };
+  return { userId: result.userId, session: scoped };
+}
+
+/**
+ * Lifetime checks on a loaded session: absolute cap, renewal window with
+ * silent refresh, sliding-window touch. Shared by the session-token and
+ * agent-key paths.
+ */
+async function authenticateSession(session: UserSession, maxLifetimeMs?: number): Promise<AuthResult | null> {
   // Reject sessions past absolute lifetime before any refresh/touch —
   // prevents silent-renewal of a stolen token through normal request paths.
-  if (isAbsoluteLifetimeExceeded(session)) {
+  if (isAbsoluteLifetimeExceeded(session, Date.now(), maxLifetimeMs)) {
     console.warn(
       `[auth] Session for user ${session.userId} exceeded absolute lifetime — forcing re-OAuth`
     );

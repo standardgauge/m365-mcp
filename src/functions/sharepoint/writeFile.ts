@@ -29,13 +29,13 @@ async function writeSharepointFileHandler(
   if (body.driveId) assertOpaqueId(body.driveId, 'driveId');
 
   // Enforce allowedSites policy (body-level siteId not available to wrapper)
-  const siteViolation = await checkAllowedSite(userId, body.siteId);
+  const siteViolation = await checkAllowedSite(userId, body.siteId, auth.session);
   if (siteViolation) {
     return { status: siteViolation.status, jsonBody: { error: siteViolation.error } };
   }
 
   // Enforce deny-list policy
-  const denyViolation = await checkDenyList(userId, 'sharepoint', body.path);
+  const denyViolation = await checkDenyList(userId, 'sharepoint', body.path, auth.session);
   if (denyViolation) {
     return { status: denyViolation.status, jsonBody: { error: denyViolation.error } };
   }
@@ -71,5 +71,5 @@ app.http('writeSharepointFile', {
   methods: ['PUT'],
   authLevel: 'anonymous',
   route: 'api/sharepoint/files',
-  handler: withSecurity(withPolicyEnforcement('sharepoint', writeSharepointFileHandler)),
+  handler: withSecurity(withPolicyEnforcement('sharepoint', writeSharepointFileHandler, { mutating: true })),
 });
