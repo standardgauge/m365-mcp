@@ -13,7 +13,7 @@ import type { TenantAgentKeyPolicy } from '../../services/agentKeys.js';
  * GET  /api/manage/agent-key-policy   any signed-in console user, so the key
  *                                     form can show what a key may be granted
  * POST /api/manage/agent-key-policy   Global Administrator
- *      { allowKeys?, disabledServices?, readOnlyServices?, maxKeyLifetimeDays? }
+ *      { allowKeys?, disabledServices?, readOnlyServices?, maxKeyLifetimeDays?, ownersMayWiden? }
  *
  * The policy is read on every key-authenticated request, so a change here
  * applies to existing keys at once; nothing has to be re-minted.
@@ -33,8 +33,11 @@ async function manageAgentKeyPolicy(request: HttpRequest, context: InvocationCon
 
     const body = (await request.json().catch(() => null)) as Partial<Record<keyof TenantAgentKeyPolicy, unknown>> | null;
     if (!body || typeof body !== 'object') return { status: 400, jsonBody: { error: 'JSON body required' } };
-    if (body.allowKeys === undefined && body.disabledServices === undefined && body.readOnlyServices === undefined && body.maxKeyLifetimeDays === undefined) {
-      return { status: 400, jsonBody: { error: 'Provide allowKeys, disabledServices, readOnlyServices and/or maxKeyLifetimeDays' } };
+    if (body.allowKeys === undefined && body.disabledServices === undefined && body.readOnlyServices === undefined && body.maxKeyLifetimeDays === undefined && body.ownersMayWiden === undefined) {
+      return { status: 400, jsonBody: { error: 'Provide allowKeys, disabledServices, readOnlyServices, maxKeyLifetimeDays and/or ownersMayWiden' } };
+    }
+    if (body.ownersMayWiden !== undefined && typeof body.ownersMayWiden !== 'boolean') {
+      return { status: 400, jsonBody: { error: 'ownersMayWiden must be a boolean' } };
     }
     if (body.maxKeyLifetimeDays !== undefined) {
       const d = Number(body.maxKeyLifetimeDays);
@@ -62,6 +65,7 @@ async function manageAgentKeyPolicy(request: HttpRequest, context: InvocationCon
       disabledServices: body.disabledServices === undefined ? before.disabledServices : (body.disabledServices as string[]),
       readOnlyServices: body.readOnlyServices === undefined ? before.readOnlyServices : (body.readOnlyServices as string[]),
       maxKeyLifetimeDays: body.maxKeyLifetimeDays === undefined ? before.maxKeyLifetimeDays : Number(body.maxKeyLifetimeDays),
+      ownersMayWiden: body.ownersMayWiden === undefined ? before.ownersMayWiden : (body.ownersMayWiden as boolean),
     });
     await setTenantAgentKeyPolicy(tenantId, next);
     logAccess({

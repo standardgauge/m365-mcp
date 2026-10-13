@@ -1,19 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import KeyScopeFields, { isNarrowingOf, serviceNames } from './KeyScopeFields';
+import type { KeyPolicy, SitePick } from './KeyScopeFields';
 
-const SERVICE_LABELS: Record<string, string> = {
-  mail: 'Mail', sharepoint: 'SharePoint', calendar: 'Calendar', onedrive: 'OneDrive',
-  onenote: 'OneNote', contacts: 'Contacts', teams: 'Teams',
-};
-const SERVICE_ORDER = ['mail', 'sharepoint', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams'];
-
-interface SitePick { id: string; name: string }
-interface KeyPolicy { services: string[]; readOnlyServices: string[]; allowedSites: SitePick[] }
 interface AgentKey {
   keyId: string; label: string; userId: string; userEmail: string; policy: KeyPolicy;
   createdAt: number; expiresAt: number; lastUsedAt: number | null; revokedAt: number | null; revokedBy: string | null;
-  reminderSet?: boolean;
+  reminderSet?: boolean; policyUpdatedAt?: number | null;
 }
-interface TenantPolicy { allowKeys: boolean; disabledServices: string[]; readOnlyServices: string[]; maxKeyLifetimeDays: number }
+interface TenantPolicy { allowKeys: boolean; disabledServices: string[]; readOnlyServices: string[]; maxKeyLifetimeDays: number; ownersMayWiden: boolean }
 type ReminderResult = { eventId: string } | { skipped: string } | { error: string };
 
 interface Props {
@@ -27,10 +21,11 @@ interface Props {
 function when(ms: number | null | undefined): string {
   return ms ? new Date(ms).toLocaleString() : 'never';
 }
+const EMPTY: KeyPolicy = { services: [], readOnlyServices: [], allowedSites: [] };
 
 /**
  * The caller's own agent API keys: a credential for an agent or app that is
- * narrower than their session. Minted here, shown once, revocable here.
+ * narrower than their session. Minted, edited and revoked here; shown once.
  */
 export default function AgentKeys({ userId, grantableServices, allowedSites }: Props) {
   const [keys, setKeys] = useState<AgentKey[] | null>(null);
@@ -38,21 +33,22 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
   const [statusMsg, setStatusMsg] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [label, setLabel] = useState('');
-  const [services, setServices] = useState<string[]>([]);
-  const [readOnly, setReadOnly] = useState<string[]>([]);
-  const [sitePicks, setSitePicks] = useState<string[]>([]);
+  const [scope, setScope] = useState<KeyPolicy>(EMPTY);
   const [expiresInDays, setExpiresInDays] = useState<string>('90');
   const [wantReminder, setWantReminder] = useState(true);
   const [saving, setSaving] = useState(false);
   const [minted, setMinted] = useState<{ key: string; label: string; keyId: string; reminder?: ReminderResult } | null>(null);
   const [copied, setCopied] = useState(false);
   const [confirmRevoke, setConfirmRevoke] = useState<AgentKey | null>(null);
+  const [editing, setEditing] = useState<AgentKey | null>(null);
+  const [editLabel, setEditLabel] = useState('');
+  const [editScope, setEditScope] = useState<KeyPolicy>(EMPTY);
 
   const headers = { 'x-user-id': userId, 'Content-Type': 'application/json' };
 
   const flash = (kind: 'ok' | 'error', text: string) => {
     setStatusMsg({ kind, text });
-    setTimeout(() => setStatusMsg(null), kind === 'ok' ? 2500 : 5000);
+    setTimeout(() => setStatusMsg(null), kind === 'ok' ? 2500 : 6000);
   };
 
   const load = useCallback(async () => {
@@ -71,17 +67,21 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
 
   useEffect(() => { load(); }, [load]);
 
-  const grantable = SERVICE_ORDER.filter((s) =>
-    grantableServices.includes(s) && !(tenantPolicy?.disabledServices ?? []).includes(s));
+  const grantable = grantableServices.filter((s) => !(tenantPolicy?.disabledServices ?? []).includes(s));
+  const tenantReadOnly = tenantPolicy?.readOnlyServices ?? [];
   const keysAllowed = tenantPolicy?.allowKeys !== false;
+  const ownersMayWiden = tenantPolicy?.ownersMayWiden !== false;
   const maxDays = Math.min(365, tenantPolicy?.maxKeyLifetimeDays ?? 365);
   const daysValue = Number(expiresInDays);
   const daysValid = Number.isInteger(daysValue) && daysValue >= 1 && daysValue <= maxDays;
 
-  const toggleIn = (list: string[], v: string, on: boolean) => (on ? [...new Set([...list, v])] : list.filter((x) => x !== v));
-
   const resetForm = () => {
-    setLabel(''); setServices([]); setReadOnly([]); setSitePicks([]); setExpiresInDays(String(Math.min(90, maxDays))); setWantReminder(true); setShowForm(false);
+    setLabel(''); setScope(EMPTY); setExpiresInDays(String(Math.min(90, maxDays))); setWantReminder(true); setShowForm(false);
+  };
+
+  const parseError = async (res: Response) => {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return data.error ?? `HTTP ${res.status}`;
   };
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -90,20 +90,53 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
     try {
       const body: Record<string, unknown> = {
         label: label.trim(),
-        services,
-        readOnlyServices: readOnly.filter((s) => services.includes(s)),
+        services: scope.services,
+        readOnlyServices: scope.readOnlyServices.filter((s) => scope.services.includes(s)),
+        expiresInDays: daysValue,
+        reminder: wantReminder,
       };
-      if (services.includes('sharepoint') && sitePicks.length > 0 && allowedSites) {
-        body.allowedSites = allowedSites.filter((s) => sitePicks.includes(s.id));
-      }
-      body.expiresInDays = daysValue;
-      body.reminder = wantReminder;
+      if (scope.services.includes('sharepoint') && scope.allowedSites.length > 0) body.allowedSites = scope.allowedSites;
       const res = await fetch('/api/manage/agent-keys', { method: 'POST', credentials: 'same-origin', headers, body: JSON.stringify(body) });
-      const data = (await res.json()) as { key?: string; keyId?: string; label?: string; error?: string; reminder?: ReminderResult };
-      if (!res.ok || !data.key) throw new Error(data.error ?? `HTTP ${res.status}`);
-      setMinted({ key: data.key, label: data.label ?? label, keyId: data.keyId ?? '', reminder: data.reminder });
+      if (!res.ok) throw new Error(await parseError(res));
+      const data = (await res.json()) as { key: string; keyId: string; label: string; reminder?: ReminderResult };
+      setMinted({ key: data.key, label: data.label, keyId: data.keyId, reminder: data.reminder });
       setCopied(false);
       resetForm();
+      await load();
+    } catch (err: unknown) {
+      flash('error', err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const startEdit = (k: AgentKey) => {
+    setEditing(k);
+    setEditLabel(k.label);
+    setEditScope({ services: [...k.policy.services], readOnlyServices: [...k.policy.readOnlyServices], allowedSites: k.policy.allowedSites.map((s) => ({ ...s })) });
+  };
+
+  const editWidens = editing ? !isNarrowingOf(editScope, editing.policy) : false;
+  const editBlocked = editWidens && !ownersMayWiden;
+
+  const handleEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editing) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/manage/agent-keys?keyId=${encodeURIComponent(editing.keyId)}`, {
+        method: 'PATCH', credentials: 'same-origin', headers,
+        body: JSON.stringify({
+          label: editLabel.trim(),
+          services: editScope.services,
+          readOnlyServices: editScope.readOnlyServices.filter((s) => editScope.services.includes(s)),
+          allowedSites: editScope.services.includes('sharepoint') ? editScope.allowedSites : [],
+        }),
+      });
+      if (!res.ok) throw new Error(await parseError(res));
+      const data = (await res.json()) as { widened?: boolean };
+      flash('ok', data.widened ? `“${editLabel.trim()}” widened. The app holding it has the new access from its next call.` : `“${editLabel.trim()}” updated.`);
+      setEditing(null);
       await load();
     } catch (err: unknown) {
       flash('error', err instanceof Error ? err.message : String(err));
@@ -116,10 +149,7 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
     setConfirmRevoke(null);
     try {
       const res = await fetch(`/api/manage/agent-keys?keyId=${encodeURIComponent(k.keyId)}`, { method: 'DELETE', credentials: 'same-origin', headers });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(data.error ?? `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(await parseError(res));
       flash('ok', `Revoked “${k.label}”.`);
       await load();
     } catch (err: unknown) {
@@ -150,6 +180,15 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
         calendar a few days before it. Signing out everywhere ends your keys too, and each one stops working
         the moment you revoke it here. The key value is shown once.
       </p>
+      <p className="section-hint">
+        <strong>One key per app.</strong> Keys are cheap to mint and easy to edit, so give each app or agent its own.
+        A key shared between two apps cannot be narrowed or revoked for just one of them, and its audit trail
+        cannot tell them apart.
+        {' '}
+        {ownersMayWiden
+          ? <>You can <strong>widen or narrow</strong> a key here after minting it. The app holding it gets the change on its next call, without touching the key itself, and every change is recorded with before and after.</>
+          : <>Your organization allows a key to be <strong>narrowed only</strong> after minting. To give an app more access, mint a new key and retire the old one.</>}
+      </p>
 
       {!keysAllowed && (
         <p className="error-msg">Your administrator has turned agent keys off for this organization. Existing keys stop working while this is set.</p>
@@ -158,13 +197,13 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
       {minted && (
         <div className="confirm-dialog" role="dialog" aria-label="New agent key">
           <p><strong>Key “{minted.label}” created.</strong> Copy it now. It is not shown again.</p>
+          <pre style={{ userSelect: 'all', whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: '#f6f6f6', padding: 8, borderRadius: 4, fontSize: 12 }}>{minted.key}</pre>
           {minted.reminder && 'eventId' in minted.reminder && (
             <p className="section-hint">A reminder is on your calendar a few days before it expires.</p>
           )}
           {minted.reminder && 'error' in minted.reminder && (
             <p className="error-msg">{minted.reminder.error} Note the expiry date yourself.</p>
           )}
-          <pre style={{ userSelect: 'all', whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: '#f6f6f6', padding: 8, borderRadius: 4, fontSize: 12 }}>{minted.key}</pre>
           <p className="section-hint" style={{ marginTop: 6 }}>
             Send it as <code>Authorization: Bearer &lt;key&gt;</code> to <code>/api/mcp</code>, or hand it to the
             shim with <code>--store-token</code> like a session token. Keep it in a secret store, never in a repo.
@@ -188,24 +227,61 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
           <tbody>
             {live.map((k) => (
               <tr key={k.keyId}>
-                <td>{k.label}</td>
+                <td>{k.label}{k.policyUpdatedAt ? <span className="service-desc"><br />edited {when(k.policyUpdatedAt)}</span> : null}</td>
                 <td><code>{k.keyId}</code></td>
-                <td>{k.policy.services.map((s) => SERVICE_LABELS[s] ?? s).join(', ')}</td>
-                <td>{k.policy.readOnlyServices.length ? k.policy.readOnlyServices.map((s) => SERVICE_LABELS[s] ?? s).join(', ') : '—'}</td>
+                <td>{serviceNames(k.policy.services)}</td>
+                <td>{serviceNames(k.policy.readOnlyServices)}</td>
                 <td>{k.policy.allowedSites.length ? k.policy.allowedSites.map((s) => s.name).join(', ') : 'as tenant'}</td>
                 <td>{when(k.lastUsedAt)}</td>
                 <td>{when(k.expiresAt)}</td>
                 <td>{k.reminderSet ? 'on calendar' : '—'}</td>
-                <td><button type="button" className="remove-btn" onClick={() => setConfirmRevoke(k)}>Revoke</button></td>
+                <td style={{ whiteSpace: 'nowrap' }}>
+                  <button type="button" className="confirm-btn" style={{ marginRight: 6 }} onClick={() => startEdit(k)}>Edit</button>
+                  <button type="button" className="remove-btn" onClick={() => setConfirmRevoke(k)}>Revoke</button>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
 
+      {editing && (
+        <form onSubmit={handleEdit} className="card" style={{ marginTop: 12 }}>
+          <p><strong>Edit “{editing.label}”</strong> <code>{editing.keyId}</code></p>
+          <p className="section-hint">
+            {ownersMayWiden
+              ? <>You can add or remove services, change read-only, and change sites. <strong>Widening takes effect on the key's next call</strong>, wherever the key is deployed, so if this key is somewhere you no longer trust, revoke it and mint a new one instead of widening it. Every change is recorded with before and after.</>
+              : <>Your organization allows a key to be <strong>narrowed only</strong>: you can remove services, make a service read-only, or remove sites. Anything wider needs a new key. Every change is recorded with before and after.</>}
+            {' '}The key value and its expiry do not change.
+          </p>
+          <label style={{ display: 'block', marginBottom: 10 }}>
+            <span className="service-name">Label</span><br />
+            <input type="text" value={editLabel} onChange={(e) => setEditLabel(e.target.value)} maxLength={64} required style={{ width: '100%', maxWidth: 360 }} />
+          </label>
+          <KeyScopeFields
+            value={editScope}
+            onChange={setEditScope}
+            grantable={grantable}
+            tenantReadOnly={tenantReadOnly}
+            siteOptions={allowedSites}
+            narrowOnlyFrom={ownersMayWiden ? undefined : editing.policy}
+            disabled={saving}
+          />
+          {editWidens && ownersMayWiden && (
+            <p className="status-msg status-msg--error" style={{ marginTop: 8 }}>
+              This change <strong>widens</strong> the key. Whatever holds it gains the new access on its next call.
+            </p>
+          )}
+          <div className="confirm-actions">
+            <button type="submit" className="confirm-btn" disabled={saving || !editLabel.trim() || editScope.services.length === 0 || editBlocked}>{saving ? 'Saving…' : editWidens ? 'Save and widen' : 'Save'}</button>
+            <button type="button" className="confirm-btn" onClick={() => setEditing(null)} disabled={saving}>Cancel</button>
+          </div>
+        </form>
+      )}
+
       {confirmRevoke && (
         <div className="confirm-dialog" role="dialog" aria-label="Revoke agent key">
-          <p>Revoke “{confirmRevoke.label}”? Anything using it stops working within about half a minute.</p>
+          <p>Revoke “{confirmRevoke.label}”? Anything using it stops working within about half a minute. Its calendar reminder is removed.</p>
           <div className="confirm-actions">
             <button type="button" className="confirm-btn confirm-btn--danger" onClick={() => handleRevoke(confirmRevoke)}>Revoke</button>
             <button type="button" className="confirm-btn" onClick={() => setConfirmRevoke(null)}>Cancel</button>
@@ -227,7 +303,7 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
         </details>
       )}
 
-      {keysAllowed && !showForm && (
+      {keysAllowed && !showForm && !editing && (
         <p style={{ marginTop: 12 }}>
           <button type="button" className="confirm-btn" onClick={() => setShowForm(true)} disabled={grantable.length === 0}>New agent key</button>
           {grantable.length === 0 && <span className="section-hint" style={{ marginLeft: 8 }}>No service is available to grant.</span>}
@@ -239,51 +315,15 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
           <label style={{ display: 'block', marginBottom: 10 }}>
             <span className="service-name">Label</span><br />
             <input type="text" value={label} onChange={(e) => setLabel(e.target.value)} maxLength={64} required placeholder="e.g. nightly-report" style={{ width: '100%', maxWidth: 360 }} />
+            <span className="service-desc"> Name the app or agent that will hold it.</span>
           </label>
 
-          <div className="service-name" style={{ marginBottom: 4 }}>Services the key may use</div>
-          <div className="services-list">
-            {grantable.map((s) => (
-              <div key={s} className="service-row">
-                <label className="service-toggle">
-                  <input type="checkbox" checked={services.includes(s)} onChange={(e) => {
-                    setServices(toggleIn(services, s, e.target.checked));
-                    if (!e.target.checked) setReadOnly(readOnly.filter((x) => x !== s));
-                  }} />
-                  <span className="service-info"><span className="service-name">{SERVICE_LABELS[s] ?? s}</span></span>
-                </label>
-                {services.includes(s) && (
-                  <label className="service-toggle" style={{ marginLeft: 'auto' }}>
-                    <input type="checkbox" checked={readOnly.includes(s) || (tenantPolicy?.readOnlyServices ?? []).includes(s)}
-                      disabled={(tenantPolicy?.readOnlyServices ?? []).includes(s)}
-                      onChange={(e) => setReadOnly(toggleIn(readOnly, s, e.target.checked))} />
-                    <span className="service-desc">read-only{(tenantPolicy?.readOnlyServices ?? []).includes(s) ? ' (set by admin)' : ''}</span>
-                  </label>
-                )}
-              </div>
-            ))}
-          </div>
-
-          {services.includes('sharepoint') && allowedSites && allowedSites.length > 0 && (
-            <>
-              <div className="service-name" style={{ margin: '10px 0 4px' }}>SharePoint sites (leave empty for all the tenant allows)</div>
-              <div className="services-list">
-                {allowedSites.map((site) => (
-                  <div key={site.id} className="service-row">
-                    <label className="service-toggle">
-                      <input type="checkbox" checked={sitePicks.includes(site.id)} onChange={(e) => setSitePicks(toggleIn(sitePicks, site.id, e.target.checked))} />
-                      <span className="service-info"><span className="service-name">{site.name}</span></span>
-                    </label>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
+          <KeyScopeFields value={scope} onChange={setScope} grantable={grantable} tenantReadOnly={tenantReadOnly} siteOptions={allowedSites} disabled={saving} />
 
           <label style={{ display: 'block', margin: '10px 0' }}>
             <span className="service-name">Expires in days</span>{' '}
             <input type="number" min={1} max={maxDays} required value={expiresInDays} onChange={(e) => setExpiresInDays(e.target.value)} style={{ width: 80 }} />
-            <span className="service-desc" style={{ marginLeft: 8 }}>1 to {maxDays}. {maxDays < 365 ? 'The maximum is set by your admin.' : 'Up to a year.'}</span>
+            <span className="service-desc" style={{ marginLeft: 8 }}>1 to {maxDays}. {maxDays < 365 ? 'The maximum is set by your admin.' : 'Up to a year.'} The expiry cannot be changed later; mint a new key when it is near.</span>
           </label>
 
           <label className="service-toggle" style={{ display: 'flex', margin: '0 0 10px' }}>
@@ -295,7 +335,7 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
           </label>
 
           <div className="confirm-actions">
-            <button type="submit" className="confirm-btn" disabled={saving || !label.trim() || services.length === 0 || !daysValid}>{saving ? 'Creating…' : 'Create key'}</button>
+            <button type="submit" className="confirm-btn" disabled={saving || !label.trim() || scope.services.length === 0 || !daysValid}>{saving ? 'Creating…' : 'Create key'}</button>
             <button type="button" className="confirm-btn" onClick={resetForm} disabled={saving}>Cancel</button>
           </div>
         </form>

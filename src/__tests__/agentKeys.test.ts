@@ -14,6 +14,7 @@ import {
   effectiveAgentKeyPolicy,
   generateAgentKeyId,
   generateAgentKeyToken,
+  isNarrowingOf,
   keyAllowsService,
   keyIsReadOnly,
   looksLikeAgentKey,
@@ -91,13 +92,13 @@ describe('effectiveAgentKeyPolicy', () => {
   });
 
   it('drops services the tenant disables for keys and adds the tenant read-only set', () => {
-    const r = effectiveAgentKeyPolicy(key, { allowKeys: true, disabledServices: ['mail'], readOnlyServices: ['sharepoint', 'teams'], maxKeyLifetimeDays: 365 });
+    const r = effectiveAgentKeyPolicy(key, { allowKeys: true, disabledServices: ['mail'], readOnlyServices: ['sharepoint', 'teams'], maxKeyLifetimeDays: 365, ownersMayWiden: true });
     expect(r.services).toEqual(['sharepoint', 'calendar']);
     expect(r.readOnlyServices.sort()).toEqual(['calendar', 'sharepoint']);
   });
 
   it('never widens: a tenant policy cannot add a service the key lacks', () => {
-    const r = effectiveAgentKeyPolicy({ services: ['mail'], readOnlyServices: [], allowedSites: [] }, { allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365 });
+    const r = effectiveAgentKeyPolicy({ services: ['mail'], readOnlyServices: [], allowedSites: [] }, { allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365, ownersMayWiden: true });
     expect(r.services).toEqual(['mail']);
   });
 
@@ -135,13 +136,34 @@ describe('narrowAllowedSites', () => {
   });
 });
 
+describe('isNarrowingOf', () => {
+  const base = { services: ['mail', 'sharepoint'], readOnlyServices: ['mail'], allowedSites: [{ id: 's1', name: 'A' }, { id: 's2', name: 'B' }] };
+  it('accepts the same policy, fewer services, more read-only, fewer sites', () => {
+    expect(isNarrowingOf(base, base)).toBe(true);
+    expect(isNarrowingOf({ ...base, services: ['mail'], allowedSites: [] }, base)).toBe(true);
+    expect(isNarrowingOf({ ...base, readOnlyServices: ['mail', 'sharepoint'] }, base)).toBe(true);
+    expect(isNarrowingOf({ ...base, allowedSites: [{ id: 's1', name: 'A' }] }, base)).toBe(true);
+  });
+  it('refuses a new service, a cleared read-only flag, a new site, or dropping all sites while keeping sharepoint', () => {
+    expect(isNarrowingOf({ ...base, services: ['mail', 'sharepoint', 'calendar'] }, base)).toBe(false);
+    expect(isNarrowingOf({ ...base, readOnlyServices: [] }, base)).toBe(false);
+    expect(isNarrowingOf({ ...base, allowedSites: [{ id: 's9', name: 'Z' }] }, base)).toBe(false);
+    expect(isNarrowingOf({ ...base, allowedSites: [] }, base)).toBe(false);
+  });
+  it('treats picking sites on a key that had none as narrowing', () => {
+    const open = { ...base, allowedSites: [] as Array<{ id: string; name: string }> };
+    expect(isNarrowingOf({ ...open, allowedSites: [{ id: 's1', name: 'A' }] }, open)).toBe(true);
+  });
+});
+
 describe('normalizeTenantAgentKeyPolicy', () => {
   it('defaults to keys allowed with no restrictions and a one-year maximum lifetime', () => {
-    expect(normalizeTenantAgentKeyPolicy(undefined)).toEqual({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365 });
+    expect(normalizeTenantAgentKeyPolicy(undefined)).toEqual({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365, ownersMayWiden: true });
+    expect(normalizeTenantAgentKeyPolicy({ ownersMayWiden: false }).ownersMayWiden).toBe(false);
   });
   it('keeps only known service keys', () => {
-    expect(normalizeTenantAgentKeyPolicy({ allowKeys: false, disabledServices: ['mail', 'bogus'], readOnlyServices: ['teams', 'teams'], maxKeyLifetimeDays: 365 }))
-      .toEqual({ allowKeys: false, disabledServices: ['mail'], readOnlyServices: ['teams'], maxKeyLifetimeDays: 365 });
+    expect(normalizeTenantAgentKeyPolicy({ allowKeys: false, disabledServices: ['mail', 'bogus'], readOnlyServices: ['teams', 'teams'], maxKeyLifetimeDays: 365, ownersMayWiden: true }))
+      .toEqual({ allowKeys: false, disabledServices: ['mail'], readOnlyServices: ['teams'], maxKeyLifetimeDays: 365, ownersMayWiden: true });
   });
   it('keeps a valid maximum lifetime and falls back to a year otherwise', () => {
     expect(normalizeTenantAgentKeyPolicy({ maxKeyLifetimeDays: 30 }).maxKeyLifetimeDays).toBe(30);

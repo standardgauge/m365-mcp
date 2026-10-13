@@ -1,36 +1,44 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import KeyScopeFields, { SERVICE_LABELS, SERVICE_ORDER, serviceNames } from './KeyScopeFields';
+import type { KeyPolicy, SitePick } from './KeyScopeFields';
 
-const SERVICE_LABELS: Record<string, string> = {
-  mail: 'Mail', sharepoint: 'SharePoint', calendar: 'Calendar', onedrive: 'OneDrive',
-  onenote: 'OneNote', contacts: 'Contacts', teams: 'Teams',
-};
-const SERVICE_ORDER = ['mail', 'sharepoint', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams'];
-
-interface TenantPolicy { allowKeys: boolean; disabledServices: string[]; readOnlyServices: string[]; maxKeyLifetimeDays: number }
+interface TenantPolicy { allowKeys: boolean; disabledServices: string[]; readOnlyServices: string[]; maxKeyLifetimeDays: number; ownersMayWiden: boolean }
 interface AgentKey {
-  keyId: string; label: string; userId: string; userEmail: string;
-  policy: { services: string[]; readOnlyServices: string[]; allowedSites: Array<{ id: string; name: string }> };
-  createdAt: number; expiresAt: number | null; lastUsedAt: number | null; revokedAt: number | null;
+  keyId: string; label: string; userId: string; userEmail: string; policy: KeyPolicy;
+  createdAt: number; expiresAt: number; lastUsedAt: number | null; revokedAt: number | null; revokedBy: string | null;
+  reminderSet?: boolean; policyUpdatedAt?: number | null; policyUpdatedBy?: string | null;
 }
 
-interface Props { userId: string; enabledServices: string[] }
+interface Props { userId: string; enabledServices: string[]; allowedSites?: SitePick[] }
+
+function when(ms: number | null | undefined): string {
+  return ms ? new Date(ms).toLocaleString() : 'never';
+}
 
 /**
- * Tenant-wide agent key policy and the list of every key in the tenant.
- * Global Administrator only (the routes refuse anyone else).
+ * Tenant-wide agent key policy and every key in the tenant. Global
+ * Administrator only (the routes refuse anyone else). An administrator can
+ * revoke any key and narrow any key; widening is the owner's decision.
  */
-export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
+export default function AgentKeyPolicy({ userId, enabledServices, allowedSites }: Props) {
   const [policy, setPolicy] = useState<TenantPolicy | null>(null);
   const [keys, setKeys] = useState<AgentKey[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [confirmRevoke, setConfirmRevoke] = useState<AgentKey | null>(null);
   const [maxDaysDraft, setMaxDaysDraft] = useState<string>('');
+  const [showRevoked, setShowRevoked] = useState(false);
+  const [editing, setEditing] = useState<AgentKey | null>(null);
+  const [editScope, setEditScope] = useState<KeyPolicy>({ services: [], readOnlyServices: [], allowedSites: [] });
 
   const headers = { 'x-user-id': userId, 'Content-Type': 'application/json' };
   const flash = (kind: 'ok' | 'error', text: string) => {
     setStatusMsg({ kind, text });
-    setTimeout(() => setStatusMsg(null), kind === 'ok' ? 2500 : 5000);
+    setTimeout(() => setStatusMsg(null), kind === 'ok' ? 2500 : 6000);
+  };
+  const parseError = async (res: Response) => {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return data.error ?? `HTTP ${res.status}`;
   };
 
   const load = useCallback(async () => {
@@ -56,11 +64,11 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
     setSaving(true);
     try {
       const res = await fetch('/api/manage/agent-key-policy', { method: 'POST', credentials: 'same-origin', headers, body: JSON.stringify(patch) });
-      const data = (await res.json()) as TenantPolicy & { error?: string };
-      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-      setPolicy({ allowKeys: data.allowKeys, disabledServices: data.disabledServices, readOnlyServices: data.readOnlyServices, maxKeyLifetimeDays: data.maxKeyLifetimeDays });
+      if (!res.ok) throw new Error(await parseError(res));
+      const data = (await res.json()) as TenantPolicy;
+      setPolicy(data);
       setMaxDaysDraft(String(data.maxKeyLifetimeDays));
-      flash('ok', 'Saved.');
+      flash('ok', 'Saved. Applies to every key on its next call.');
     } catch (err: unknown) {
       flash('error', err instanceof Error ? err.message : String(err));
     } finally {
@@ -74,10 +82,7 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
     setConfirmRevoke(null);
     try {
       const res = await fetch(`/api/manage/agent-keys?keyId=${encodeURIComponent(k.keyId)}`, { method: 'DELETE', credentials: 'same-origin', headers });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(data.error ?? `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(await parseError(res));
       flash('ok', `Revoked “${k.label}” (${k.userEmail}).`);
       await load();
     } catch (err: unknown) {
@@ -85,7 +90,38 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
     }
   };
 
+  const startEdit = (k: AgentKey) => {
+    setEditing(k);
+    setEditScope({ services: [...k.policy.services], readOnlyServices: [...k.policy.readOnlyServices], allowedSites: k.policy.allowedSites.map((s) => ({ ...s })) });
+  };
+
+  const handleEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editing) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/manage/agent-keys?keyId=${encodeURIComponent(editing.keyId)}`, {
+        method: 'PATCH', credentials: 'same-origin', headers,
+        body: JSON.stringify({
+          services: editScope.services,
+          readOnlyServices: editScope.readOnlyServices.filter((s) => editScope.services.includes(s)),
+          allowedSites: editScope.services.includes('sharepoint') ? editScope.allowedSites : [],
+        }),
+      });
+      if (!res.ok) throw new Error(await parseError(res));
+      flash('ok', `Narrowed “${editing.label}” (${editing.userEmail}). The owner's app has the new limits from its next call.`);
+      setEditing(null);
+      await load();
+    } catch (err: unknown) {
+      flash('error', err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const live = (keys ?? []).filter((k) => !k.revokedAt);
+  const revoked = (keys ?? []).filter((k) => k.revokedAt);
+  const allReadOnly = policy ? SERVICE_ORDER.every((s) => policy.readOnlyServices.includes(s) || policy.disabledServices.includes(s)) : false;
 
   return (
     <>
@@ -97,6 +133,13 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
         where it is writable for the user, or cap how long a key may live. A key's lifetime is its
         own, chosen by the owner within that cap, and is not tied to the 30-day sign-in cap.
       </p>
+      <p className="section-hint">
+        <strong>Who may change a key after it is minted.</strong> Owners edit their own keys. You can
+        <strong> narrow</strong> any key here (remove a service, make it read-only, remove a site) and
+        <strong> revoke</strong> any key. You cannot widen another person's key: a key acts on its owner's
+        data, so widening is theirs to decide. Whether owners may widen their own keys at all is the
+        switch below. Every edit is recorded in the audit log with before and after.
+      </p>
       {policy === null ? (
         <p style={{ color: '#666', fontSize: 13 }}>Loading policy…</p>
       ) : (
@@ -107,10 +150,24 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
                 <input type="checkbox" checked={policy.allowKeys} disabled={saving} onChange={(e) => save({ allowKeys: e.target.checked })} />
                 <span className="service-info">
                   <span className="service-name">Allow agent keys</span>
-                  <span className="service-desc">{policy.allowKeys ? 'Users can mint keys and existing keys work.' : 'No key authenticates and none can be minted.'}</span>
+                  <span className="service-desc">{policy.allowKeys ? 'Users can mint keys and existing keys work.' : 'No key authenticates and none can be minted. Existing keys are kept and resume if this is turned back on.'}</span>
                 </span>
               </label>
               {!policy.allowKeys && <span className="override-badge">Off</span>}
+            </div>
+            <div className="service-row">
+              <label className="service-toggle">
+                <input type="checkbox" checked={policy.ownersMayWiden} disabled={saving} onChange={(e) => save({ ownersMayWiden: e.target.checked })} />
+                <span className="service-info">
+                  <span className="service-name">Owners may widen their own keys</span>
+                  <span className="service-desc">
+                    {policy.ownersMayWiden
+                      ? 'On: an owner can add a service, clear read-only, or add sites to a key they already minted. The app holding the key gains the access on its next call without the key changing hands. Each widening is audited.'
+                      : 'Off: an owner can only narrow a key after minting it. Wider access means a new key and retiring the old one, so every grant is a fresh, deliberate issue. Administrators are narrow-only either way.'}
+                  </span>
+                </span>
+              </label>
+              {!policy.ownersMayWiden && <span className="override-badge">Narrow-only</span>}
             </div>
           </div>
 
@@ -125,6 +182,11 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
           </p>
 
           <div className="service-name" style={{ margin: '12px 0 4px' }}>Per service, for every key</div>
+          <p className="section-hint" style={{ marginTop: 0 }}>
+            These override whatever an owner chose or chooses later. Untick "Keys may use" to keep a service out of
+            every key; tick "Read-only for keys" to refuse writes from every key even where the owner may write.
+            {allReadOnly ? ' Every service is currently read-only or unavailable for keys, so no key in this organization can write anything.' : ' To make all keys read-only, tick the read-only column on every service.'}
+          </p>
           <table className="deny-table">
             <thead><tr><th>Service</th><th>Keys may use</th><th>Read-only for keys</th></tr></thead>
             <tbody>
@@ -150,34 +212,74 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
         </>
       )}
 
-      <div className="service-name" style={{ margin: '14px 0 4px' }}>Keys in this organization</div>
+      <div className="service-name" style={{ margin: '14px 0 4px' }}>
+        Keys in this organization
+        {revoked.length > 0 && (
+          <button type="button" className="confirm-btn" style={{ marginLeft: 10, fontSize: 12, padding: '2px 8px' }} onClick={() => setShowRevoked((v) => !v)}>
+            {showRevoked ? 'Hide revoked' : `Show ${revoked.length} revoked`}
+          </button>
+        )}
+      </div>
       {keys === null ? (
         <p style={{ color: '#666', fontSize: 13 }}>Loading keys…</p>
-      ) : live.length === 0 ? (
+      ) : live.length === 0 && !showRevoked ? (
         <p className="empty-state">No live agent keys.</p>
       ) : (
         <table className="deny-table">
-          <thead><tr><th>Owner</th><th>Label</th><th>Id</th><th>May use</th><th>Read-only</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
+          <thead><tr><th>Owner</th><th>Label</th><th>Id</th><th>May use</th><th>Read-only</th><th>Sites</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
           <tbody>
-            {live.map((k) => (
-              <tr key={k.keyId}>
+            {(showRevoked ? [...live, ...revoked] : live).map((k) => (
+              <tr key={k.keyId} style={k.revokedAt ? { color: '#888' } : undefined}>
                 <td>{k.userEmail}</td>
-                <td>{k.label}</td>
+                <td>{k.label}{k.revokedAt ? <span className="service-desc"><br />revoked {when(k.revokedAt)}</span> : k.policyUpdatedAt ? <span className="service-desc"><br />edited {when(k.policyUpdatedAt)}</span> : null}</td>
                 <td><code>{k.keyId}</code></td>
-                <td>{k.policy.services.map((s) => SERVICE_LABELS[s] ?? s).join(', ')}</td>
-                <td>{k.policy.readOnlyServices.length ? k.policy.readOnlyServices.map((s) => SERVICE_LABELS[s] ?? s).join(', ') : '—'}</td>
-                <td>{k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : 'never'}</td>
-                <td>{k.expiresAt ? new Date(k.expiresAt).toLocaleString() : '—'}</td>
-                <td><button type="button" className="remove-btn" onClick={() => setConfirmRevoke(k)}>Revoke</button></td>
+                <td>{serviceNames(k.policy.services)}</td>
+                <td>{serviceNames(k.policy.readOnlyServices)}</td>
+                <td>{k.policy.allowedSites.length ? k.policy.allowedSites.map((s) => s.name).join(', ') : 'as tenant'}</td>
+                <td>{when(k.lastUsedAt)}</td>
+                <td>{when(k.expiresAt)}</td>
+                <td style={{ whiteSpace: 'nowrap' }}>
+                  {!k.revokedAt && (
+                    <>
+                      <button type="button" className="confirm-btn" style={{ marginRight: 6 }} onClick={() => startEdit(k)}>Narrow</button>
+                      <button type="button" className="remove-btn" onClick={() => setConfirmRevoke(k)}>Revoke</button>
+                    </>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
 
+      {editing && (
+        <form onSubmit={handleEdit} className="card" style={{ marginTop: 12 }}>
+          <p><strong>Narrow “{editing.label}”</strong> belonging to {editing.userEmail} <code>{editing.keyId}</code></p>
+          <p className="section-hint">
+            As an administrator you can <strong>only narrow</strong> this key: remove a service, make a service read-only,
+            or remove a site. Controls that would widen it are locked and say so. The change takes effect on the key's
+            next call and is recorded with before and after; the owner sees it as "edited" in their list. If the key
+            needs more access, the owner mints or widens it themselves.
+          </p>
+          <KeyScopeFields
+            value={editScope}
+            onChange={setEditScope}
+            grantable={editing.policy.services}
+            tenantReadOnly={policy?.readOnlyServices ?? []}
+            siteOptions={editing.policy.allowedSites.length ? editing.policy.allowedSites : allowedSites}
+            narrowOnlyFrom={editing.policy}
+            disabled={saving}
+          />
+          <div className="confirm-actions">
+            <button type="submit" className="confirm-btn" disabled={saving || editScope.services.length === 0}>{saving ? 'Saving…' : 'Save'}</button>
+            <button type="button" className="confirm-btn" onClick={() => setEditing(null)} disabled={saving}>Cancel</button>
+          </div>
+        </form>
+      )}
+
       {confirmRevoke && (
         <div className="confirm-dialog" role="dialog" aria-label="Revoke agent key">
-          <p>Revoke “{confirmRevoke.label}” belonging to {confirmRevoke.userEmail}? Anything using it stops working within about half a minute.</p>
+          <p>Revoke “{confirmRevoke.label}” belonging to {confirmRevoke.userEmail}? Anything using it stops working within about half a minute. Their calendar reminder for it is removed.</p>
           <div className="confirm-actions">
             <button type="button" className="confirm-btn confirm-btn--danger" onClick={() => handleRevoke(confirmRevoke)}>Revoke</button>
             <button type="button" className="confirm-btn" onClick={() => setConfirmRevoke(null)}>Cancel</button>

@@ -59,6 +59,14 @@ export interface TenantAgentKeyPolicy {
   readOnlyServices: string[];
   /** Longest lifetime a user may give a key, in days. At most AGENT_KEY_MAX_LIFETIME_DAYS. */
   maxKeyLifetimeDays: number;
+  /**
+   * Whether an owner may widen one of their own keys after minting it. On by
+   * default: a key names a policy row, not a baked-in grant, and editing in
+   * place keeps the secret where it is. Off makes every edit narrow-only, for
+   * tenants that want a wider key to mean a new key. Administrators can only
+   * narrow another user's key whatever this says.
+   */
+  ownersMayWiden: boolean;
 }
 
 export const DEFAULT_TENANT_AGENT_KEY_POLICY: TenantAgentKeyPolicy = {
@@ -66,6 +74,7 @@ export const DEFAULT_TENANT_AGENT_KEY_POLICY: TenantAgentKeyPolicy = {
   disabledServices: [],
   readOnlyServices: [],
   maxKeyLifetimeDays: AGENT_KEY_MAX_LIFETIME_DAYS,
+  ownersMayWiden: true,
 };
 
 /** What a request authenticated by a key carries on its session. */
@@ -98,6 +107,9 @@ export interface AgentKeyRecord {
   revokedBy?: string;
   /** Graph id of the expiry-reminder event on the owner's calendar, when one was created. */
   reminderEventId?: string;
+  /** When and by whom the policy or label was last edited after minting. */
+  policyUpdatedAt?: number;
+  policyUpdatedBy?: string;
   /** RowKey of the key's row. Set when loaded; not a column. */
   _storageKey?: string;
 }
@@ -183,6 +195,23 @@ export function validateRequestedPolicy(
 }
 
 /**
+ * Whether `next` grants no more than `prev`: fewer or equal services, every
+ * read-only service still read-only, and a site list that is a subset
+ * (an empty list means "the tenant's whole allow-list", the widest setting,
+ * so going from empty to picks narrows and from picks to empty widens).
+ */
+export function isNarrowingOf(next: AgentKeyPolicy, prev: AgentKeyPolicy): boolean {
+  if (next.services.some((s) => !prev.services.includes(s))) return false;
+  for (const s of next.services) {
+    if (prev.readOnlyServices.includes(s) && !next.readOnlyServices.includes(s)) return false;
+  }
+  if (prev.allowedSites.length === 0) return true;
+  if (next.allowedSites.length === 0) return next.services.includes('sharepoint') ? false : true;
+  const prevIds = new Set(prev.allowedSites.map((s) => s.id));
+  return next.allowedSites.every((s) => prevIds.has(s.id));
+}
+
+/**
  * The policy in force for a key once the tenant's key policy is applied. The
  * result is never wider than the key's own policy.
  */
@@ -262,6 +291,7 @@ export function normalizeTenantAgentKeyPolicy(raw: Partial<TenantAgentKeyPolicy>
   const days = Number(raw?.maxKeyLifetimeDays);
   return {
     allowKeys: raw?.allowKeys !== false,
+    ownersMayWiden: raw?.ownersMayWiden !== false,
     disabledServices: uniqueKnownServices(Array.isArray(raw?.disabledServices) ? raw.disabledServices : []),
     readOnlyServices: uniqueKnownServices(Array.isArray(raw?.readOnlyServices) ? raw.readOnlyServices : []),
     maxKeyLifetimeDays: Number.isInteger(days) && days >= 1 && days <= AGENT_KEY_MAX_LIFETIME_DAYS
@@ -333,6 +363,8 @@ function entityToRecord(entity: Record<string, unknown>): AgentKeyRecord {
     revokedAt: Number(entity.revokedAt ?? 0),
     revokedBy: entity.revokedBy ? String(entity.revokedBy) : undefined,
     reminderEventId: entity.reminderEventId ? String(entity.reminderEventId) : undefined,
+    policyUpdatedAt: entity.policyUpdatedAt ? Number(entity.policyUpdatedAt) : undefined,
+    policyUpdatedBy: entity.policyUpdatedBy ? String(entity.policyUpdatedBy) : undefined,
     _storageKey: String(entity.rowKey),
   };
 }
@@ -443,6 +475,26 @@ export async function markAgentKeyRevoked(record: AgentKeyRecord, byUserId: stri
   }, 'Merge');
 }
 
+/** Replace a key's label and policy in place. Takes effect on the key's next request. */
+export async function updateAgentKey(
+  record: AgentKeyRecord,
+  next: { label: string; policy: AgentKeyPolicy },
+  byUserId: string,
+  now = Date.now(),
+): Promise<AgentKeyRecord> {
+  if (!record._storageKey) throw new Error('agent key record has no storage key');
+  const client = keysClient();
+  await client.updateEntity({
+    partitionKey: PARTITION,
+    rowKey: record._storageKey,
+    label: next.label,
+    policy: JSON.stringify(next.policy),
+    policyUpdatedAt: now,
+    policyUpdatedBy: byUserId,
+  }, 'Merge');
+  return { ...record, label: next.label, policy: next.policy, policyUpdatedAt: now, policyUpdatedBy: byUserId };
+}
+
 /** Remember the calendar reminder created for a key, so revocation can remove it. */
 export async function setAgentKeyReminder(record: AgentKeyRecord, eventId: string): Promise<void> {
   if (!record._storageKey) throw new Error('agent key record has no storage key');
@@ -472,5 +524,7 @@ export function publicAgentKey(record: AgentKeyRecord) {
     revokedAt: record.revokedAt || null,
     revokedBy: record.revokedBy ?? null,
     reminderSet: Boolean(record.reminderEventId),
+    policyUpdatedAt: record.policyUpdatedAt ?? null,
+    policyUpdatedBy: record.policyUpdatedBy ?? null,
   };
 }

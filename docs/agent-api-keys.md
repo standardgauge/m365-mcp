@@ -37,11 +37,12 @@ On top of the user's and the tenant's policy, a key carries its own:
 
 A Global Administrator sets a tenant-wide **key policy** that no key can
 loosen: keys on or off, services no key may use, services every key is
-read-only on, and the longest lifetime a key may be given
-(`maxKeyLifetimeDays`, default 365). The policy is read on every request,
-so tightening it applies to existing keys at once; a lowered maximum applies
-to keys minted from then on, since existing keys keep the lifetime they were
-given.
+read-only on, the longest lifetime a key may be given
+(`maxKeyLifetimeDays`, default 365), and whether owners may widen a key
+after minting it (`ownersMayWiden`, default on; see **Editing a key**). The
+policy is read on every request, so tightening it applies to existing keys
+at once; a lowered maximum applies to keys minted from then on, since
+existing keys keep the lifetime they were given.
 
 The policy in force is the intersection, computed in
 `effectiveAgentKeyPolicy` ([`agentKeys.ts`](../src/services/agentKeys.ts)):
@@ -132,6 +133,45 @@ denied, and the owner is told to note the date themselves. Revoking the key
 removes the event, as the owner, through the key's own session, so it works
 whether the owner or an administrator revokes.
 
+## Editing a key
+
+A key's label and policy can be changed in place, through
+`PATCH /api/manage/agent-keys?keyId=`, the Edit button on the owner's table,
+or the Narrow button on the administrator's. The key value and its expiry
+never change; the app holding the key sees the new policy on its next call.
+
+Who may do what:
+
+| Actor | On | May |
+|---|---|---|
+| Owner | their own key | narrow or widen, within what they could grant today (their reach less the tenant key policy) |
+| Owner, tenant `ownersMayWiden` off | their own key | narrow only; anything wider is refused with a message to mint a new key |
+| Global Administrator | another user's key | narrow only: remove a service, make one read-only, remove a site |
+
+"Narrow" is `isNarrowingOf`: no new service, no read-only flag cleared, and
+a site list that is a subset, where an empty list means the tenant's whole
+allow-list and so counts as the widest. Every edit is audited as
+`policy.agent_key.update` with `reason` `narrowed` or `widened` and the full
+policy before and after; refusals are audited too. The key row records
+`policyUpdatedAt` and `policyUpdatedBy`, and both tables show "edited" with
+the time.
+
+Why editable in both directions by default, when a session token is not.
+The two families of credential differ: a token that carries its own grant
+(an OAuth access token, a SAS token) is immutable and widening means a new
+grant, while a credential that names a principal whose permissions live in a
+policy (an IAM access key, a GitHub fine-grained token) is edited in place
+and audited. Agent keys are the second kind: the policy sits on the row and
+is read on every request. Editing in place keeps the secret where it is, and
+making keys cheap to mint and change is what stops people sharing one key
+across several apps, which is the outcome that actually weakens the audit
+trail. What the restriction protects, a key already deployed somewhere less
+trusted quietly gaining power, is covered by the audit row, by the owner
+being the one who widens, and by the interface saying in so many words that
+a widening reaches wherever the key lives. A tenant that wants the stricter
+model sets `ownersMayWiden` off, and administrators are narrow-only in every
+case, since a key acts on its owner's data and widening is theirs to decide.
+
 ## What ends a key
 
 | Event | Effect |
@@ -176,13 +216,14 @@ Enforced in code and covered by `agentKeyEnforcement.test.ts` and
 |---|---|---|
 | `GET /api/manage/agent-keys` | any console user | the caller's keys; `?all=true` or `?userId=` needs Global Administrator |
 | `POST /api/manage/agent-keys` | any console user | mint: `{ label, services, expiresInDays, readOnlyServices?, allowedSites?, reminder? }` → `201 { key, keyId, reminder, … }`, the key once |
+| `PATCH /api/manage/agent-keys?keyId=` | owner (either way, or narrow-only per tenant policy); Global Administrator (narrow only) | edit: `{ label?, services?, readOnlyServices?, allowedSites? }` → `200 { widened, … }` |
 | `DELETE /api/manage/agent-keys?keyId=` | owner, or Global Administrator | revoke |
 | `GET /api/manage/agent-key-policy` | any console user | the tenant's key policy, so the form can show what is grantable |
-| `POST /api/manage/agent-key-policy` | Global Administrator | `{ allowKeys?, disabledServices?, readOnlyServices?, maxKeyLifetimeDays? }`, merged over the stored policy |
+| `POST /api/manage/agent-key-policy` | Global Administrator | `{ allowKeys?, disabledServices?, readOnlyServices?, maxKeyLifetimeDays?, ownersMayWiden? }`, merged over the stored policy |
 
 Every change is audited with before and after: `policy.agent_key.create`,
-`policy.agent_key.revoke`, `policy.agent_key_policy.set`, and the admin
-refusals under the same names.
+`policy.agent_key.update`, `policy.agent_key.revoke`,
+`policy.agent_key_policy.set`, and the admin refusals under the same names.
 
 The UI is **My Settings → Agent Keys** for owners and **Admin → Agent Keys**
 for the tenant policy and the list of every key.
@@ -225,6 +266,6 @@ the remedy is revocation.
 
 - `agentKeys.test.ts`: key shape, requested-policy validation, the intersection, site narrowing.
 - `authAgentKey.test.ts`: the authentication path, every refusal, the cap, touch rate, the refresh path.
-- `manageAgentKeys.test.ts`: both routes, console-only, minting binds a client session with the inherited anchor, admin boundaries, audit rows.
+- `manageAgentKeys.test.ts`: both routes, console-only, minting binds a client session anchored at the key, the tenant ceiling, reminder success and failure, editing by owner and by administrator under both tenant settings, admin boundaries, audit rows.
 - `agentKeyEnforcement.test.ts`: REST checks, the SharePoint REST write and admin routes end to end through the wrapper, `tools/list` and `tools/call` under a key, and the routes a key must never reach.
 - `agentKeyReminder.test.ts`: lead time by lifetime, the event's shape, failure handling, deletion.

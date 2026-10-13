@@ -204,7 +204,7 @@ function AppContent() {
               <OutboundPolicy userId={userId} enabledServices={enabledServices} />
             </CollapsibleSection>
             <CollapsibleSection storageKey="agent-key-policy" title="Agent Keys" defaultCollapsed>
-              <AgentKeyPolicy userId={userId} enabledServices={enabledServices} />
+              <AgentKeyPolicy userId={userId} enabledServices={enabledServices} allowedSites={allowedSites} />
             </CollapsibleSection>
             <CollapsibleSection storageKey="user-management" title="User Management">
               <UserManagement

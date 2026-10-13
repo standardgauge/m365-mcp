@@ -34,6 +34,7 @@ const mockCreateKey = jest.fn<(t: string, id: string, i: CreateAgentKeyInput) =>
 const mockFindKey = jest.fn<(t: string, id: string) => Promise<AgentKeyRecord | null>>();
 const mockListKeys = jest.fn<(t: string, u?: string) => Promise<AgentKeyRecord[]>>();
 const mockMarkRevoked = jest.fn<(r: AgentKeyRecord, by: string) => Promise<void>>();
+const mockUpdateKey = jest.fn<(r: AgentKeyRecord, next: { label: string; policy: AgentKeyRecord['policy'] }, by: string) => Promise<AgentKeyRecord>>();
 const mockGetPolicy = jest.fn<() => Promise<TenantAgentKeyPolicy>>();
 const mockSetPolicy = jest.fn<(t: string, p: TenantAgentKeyPolicy) => Promise<void>>();
 const mockCreateReminder = jest.fn<(s: UserSession, r: AgentKeyRecord) => Promise<string | null>>();
@@ -79,6 +80,7 @@ jest.mock('../services/agentKeys.js', () => ({
   findAgentKey: (t: unknown, id: unknown) => mockFindKey(t as string, id as string),
   listAgentKeys: (t: unknown, u?: unknown) => mockListKeys(t as string, u as string | undefined),
   markAgentKeyRevoked: (r: unknown, by: unknown) => mockMarkRevoked(r as AgentKeyRecord, by as string),
+  updateAgentKey: (r: unknown, next: unknown, by: unknown) => mockUpdateKey(r as AgentKeyRecord, next as { label: string; policy: AgentKeyRecord['policy'] }, by as string),
   getTenantAgentKeyPolicy: () => mockGetPolicy(),
   setTenantAgentKeyPolicy: (t: unknown, p: unknown) => mockSetPolicy(t as string, p as TenantAgentKeyPolicy),
   setAgentKeyReminder: (r: unknown, id: unknown) => mockSetReminder(r as AgentKeyRecord, id as string),
@@ -136,7 +138,8 @@ beforeEach(() => {
   mockFindKey.mockResolvedValue(rec());
   mockListKeys.mockResolvedValue([rec()]);
   mockMarkRevoked.mockResolvedValue();
-  mockGetPolicy.mockResolvedValue({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365 });
+  mockUpdateKey.mockImplementation(async (r, next, by) => ({ ...r, ...next, policyUpdatedAt: Date.now(), policyUpdatedBy: by }));
+  mockGetPolicy.mockResolvedValue({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365, ownersMayWiden: true });
   mockSetPolicy.mockResolvedValue();
   mockCreateReminder.mockResolvedValue('evt-1');
   mockDeleteReminder.mockResolvedValue();
@@ -191,7 +194,7 @@ describe('POST /api/manage/agent-keys', () => {
     expect(r.jsonBody!.error).toContain('sharepoint');
 
     mockUserDisabled.mockResolvedValue([]);
-    mockGetPolicy.mockResolvedValue({ allowKeys: true, disabledServices: ['calendar'], readOnlyServices: [], maxKeyLifetimeDays: 365 });
+    mockGetPolicy.mockResolvedValue({ allowKeys: true, disabledServices: ['calendar'], readOnlyServices: [], maxKeyLifetimeDays: 365, ownersMayWiden: true });
     r = await keys(req('POST', { label: 'x', services: ['calendar'], expiresInDays: 30 }), ctx);
     expect(r.status).toBe(400);
 
@@ -201,7 +204,7 @@ describe('POST /api/manage/agent-keys', () => {
   });
 
   it('refuses when the tenant has disabled keys, and audits it', async () => {
-    mockGetPolicy.mockResolvedValue({ allowKeys: false, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365 });
+    mockGetPolicy.mockResolvedValue({ allowKeys: false, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365, ownersMayWiden: true });
     const r = await keys(req('POST', { label: 'x', services: ['mail'], expiresInDays: 30 }), ctx);
     expect(r.status).toBe(403);
     expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ operation: 'policy.agent_key.create', result: 'denied' }));
@@ -218,7 +221,7 @@ describe('POST /api/manage/agent-keys', () => {
     expect((await keys(req('POST', { label: 'x', services: ['mail'], expiresInDays: 366 }), ctx)).status).toBe(400);
     expect((await keys(req('POST', { label: 'x', services: ['mail'], expiresInDays: 365 }), ctx)).status).toBe(201);
     // The tenant can lower the ceiling.
-    mockGetPolicy.mockResolvedValue({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 30 });
+    mockGetPolicy.mockResolvedValue({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 30, ownersMayWiden: true });
     r = await keys(req('POST', { label: 'x', services: ['mail'], expiresInDays: 31 }), ctx);
     expect(r.status).toBe(400);
     expect(r.jsonBody!.error).toContain('30');
@@ -264,6 +267,75 @@ describe('GET /api/manage/agent-keys', () => {
     r = await keys(req('GET', undefined, { all: 'true' }), ctx);
     expect(r.status).toBe(200);
     expect(mockListKeys).toHaveBeenCalledWith(TENANT, undefined);
+  });
+});
+
+describe('PATCH /api/manage/agent-keys', () => {
+  const current = { services: ['mail', 'sharepoint'], readOnlyServices: ['sharepoint'], allowedSites: [] };
+  beforeEach(() => {
+    mockFindKey.mockResolvedValue(rec({ policy: current }));
+    mockGetEnabled.mockResolvedValue(['mail', 'sharepoint', 'calendar']);
+  });
+
+  it('lets the owner narrow their key and audits before/after', async () => {
+    const r = await keys(req('PATCH', { services: ['mail'] }, { keyId: 'k1' }), ctx);
+    expect(r.status).toBe(200);
+    expect(r.jsonBody).toMatchObject({ ok: true, widened: false, policy: { services: ['mail'], readOnlyServices: [], allowedSites: [] } });
+    expect(mockUpdateKey).toHaveBeenCalledWith(expect.objectContaining({ keyId: 'k1' }), { label: 'nightly', policy: { services: ['mail'], readOnlyServices: [], allowedSites: [] } }, USER);
+    const entry = mockLogAccess.mock.calls.find((c) => c[0].operation === 'policy.agent_key.update')![0];
+    expect(entry).toMatchObject({ result: 'allowed', reason: 'narrowed', resource: 'key:k1' });
+    expect(entry.before).toContain('"sharepoint"');
+    expect(entry.after).not.toContain('"sharepoint"');
+  });
+
+  it('lets the owner widen by default, within what they could grant today, and marks it widened', async () => {
+    const r = await keys(req('PATCH', { services: ['mail', 'sharepoint', 'calendar'], readOnlyServices: [] }, { keyId: 'k1' }), ctx);
+    expect(r.status).toBe(200);
+    expect(r.jsonBody).toMatchObject({ widened: true });
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ operation: 'policy.agent_key.update', result: 'allowed', reason: 'widened' }));
+    // Still never beyond the owner's reach.
+    const r2 = await keys(req('PATCH', { services: ['mail', 'teams'] }, { keyId: 'k1' }), ctx);
+    expect(r2.status).toBe(400);
+  });
+
+  it('refuses an owner widening when the tenant policy is narrow-only, and audits it', async () => {
+    mockGetPolicy.mockResolvedValue({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365, ownersMayWiden: false });
+    const r = await keys(req('PATCH', { services: ['mail', 'sharepoint', 'calendar'] }, { keyId: 'k1' }), ctx);
+    expect(r.status).toBe(403);
+    expect(r.jsonBody!.error).toContain('narrowed');
+    expect(mockUpdateKey).not.toHaveBeenCalled();
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ operation: 'policy.agent_key.update', result: 'denied' }));
+    // Narrowing still works under the same policy.
+    const r2 = await keys(req('PATCH', { services: ['mail'] }, { keyId: 'k1' }), ctx);
+    expect(r2.status).toBe(200);
+  });
+
+  it('lets an administrator narrow another user’s key but never widen it', async () => {
+    mockFindKey.mockResolvedValue(rec({ userId: 'other', policy: current }));
+    let r = await keys(req('PATCH', { services: ['mail'] }, { keyId: 'k1' }), ctx);
+    expect(r.status).toBe(403); // not admin yet
+    expect(mockAuditAdminRefusal).toHaveBeenCalledWith('policy.agent_key.update', 'key:k1');
+    mockIsAdmin.mockResolvedValue(true);
+    r = await keys(req('PATCH', { readOnlyServices: ['mail', 'sharepoint'] }, { keyId: 'k1' }), ctx);
+    expect(r.status).toBe(200);
+    expect(mockUpdateKey).toHaveBeenCalledWith(expect.objectContaining({ userId: 'other' }), expect.objectContaining({ policy: { services: ['mail', 'sharepoint'], readOnlyServices: ['mail', 'sharepoint'], allowedSites: [] } }), USER);
+    mockUpdateKey.mockClear();
+    r = await keys(req('PATCH', { services: ['mail', 'sharepoint', 'calendar'] }, { keyId: 'k1' }), ctx);
+    expect(r.status).toBe(400); // calendar is outside the key, which is the admin's whole grantable set
+    r = await keys(req('PATCH', { readOnlyServices: [] }, { keyId: 'k1' }), ctx);
+    expect(r.status).toBe(403); // clearing read-only widens
+    expect(mockUpdateKey).not.toHaveBeenCalled();
+  });
+
+  it('edits the label alone, rejects a bad label, and refuses a revoked key', async () => {
+    let r = await keys(req('PATCH', { label: 'renamed' }, { keyId: 'k1' }), ctx);
+    expect(r.status).toBe(200);
+    expect(mockUpdateKey).toHaveBeenCalledWith(expect.anything(), { label: 'renamed', policy: current }, USER);
+    expect((await keys(req('PATCH', { label: 'a#b' }, { keyId: 'k1' }), ctx)).status).toBe(400);
+    expect((await keys(req('PATCH', {}, { keyId: 'k1' }), ctx)).status).toBe(400);
+    mockFindKey.mockResolvedValue(rec({ revokedAt: 5 }));
+    r = await keys(req('PATCH', { label: 'x' }, { keyId: 'k1' }), ctx);
+    expect(r.status).toBe(409);
   });
 });
 
@@ -314,7 +386,7 @@ describe('/api/manage/agent-key-policy', () => {
   it('GET returns the policy to any console user', async () => {
     const r = await policy(req('GET'), ctx);
     expect(r.status).toBe(200);
-    expect(r.jsonBody).toEqual({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365 });
+    expect(r.jsonBody).toEqual({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365, ownersMayWiden: true });
   });
   it('POST needs Global Administrator', async () => {
     const r = await policy(req('POST', { allowKeys: false }), ctx);
@@ -324,10 +396,10 @@ describe('/api/manage/agent-key-policy', () => {
   });
   it('POST merges the given fields over the stored policy and audits before/after', async () => {
     mockIsAdmin.mockResolvedValue(true);
-    mockGetPolicy.mockResolvedValue({ allowKeys: true, disabledServices: ['teams'], readOnlyServices: [], maxKeyLifetimeDays: 180 });
+    mockGetPolicy.mockResolvedValue({ allowKeys: true, disabledServices: ['teams'], readOnlyServices: [], maxKeyLifetimeDays: 180, ownersMayWiden: true });
     const r = await policy(req('POST', { readOnlyServices: ['sharepoint'] }), ctx);
     expect(r.status).toBe(200);
-    expect(mockSetPolicy).toHaveBeenCalledWith(TENANT, { allowKeys: true, disabledServices: ['teams'], readOnlyServices: ['sharepoint'], maxKeyLifetimeDays: 180 });
+    expect(mockSetPolicy).toHaveBeenCalledWith(TENANT, { allowKeys: true, disabledServices: ['teams'], readOnlyServices: ['sharepoint'], maxKeyLifetimeDays: 180, ownersMayWiden: true });
     const entry = mockLogAccess.mock.calls.find((c) => c[0].operation === 'policy.agent_key_policy.set')![0];
     expect(entry.before).toContain('"teams"');
     expect(entry.after).toContain('"sharepoint"');
@@ -341,5 +413,8 @@ describe('/api/manage/agent-key-policy', () => {
     expect((await policy(req('POST', { maxKeyLifetimeDays: 400 }), ctx)).status).toBe(400);
     expect((await policy(req('POST', { maxKeyLifetimeDays: 90 }), ctx)).status).toBe(200);
     expect(mockSetPolicy).toHaveBeenLastCalledWith(TENANT, expect.objectContaining({ maxKeyLifetimeDays: 90 }));
+    expect((await policy(req('POST', { ownersMayWiden: 'no' }), ctx)).status).toBe(400);
+    expect((await policy(req('POST', { ownersMayWiden: false }), ctx)).status).toBe(200);
+    expect(mockSetPolicy).toHaveBeenLastCalledWith(TENANT, expect.objectContaining({ ownersMayWiden: false }));
   });
 });

@@ -87,7 +87,7 @@ beforeEach(() => {
   mockGetSessionByStorageKey.mockResolvedValue(session());
   mockStoreSession.mockResolvedValue();
   mockLoadKey.mockResolvedValue(record());
-  mockTenantPolicy.mockResolvedValue({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365 });
+  mockTenantPolicy.mockResolvedValue({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365, ownersMayWiden: true });
   mockTouch.mockResolvedValue();
 });
 
@@ -115,7 +115,7 @@ describe('authenticateRequest with an agent key', () => {
   });
 
   it("applies the tenant's key policy on top of the key's own", async () => {
-    mockTenantPolicy.mockResolvedValue({ allowKeys: true, disabledServices: ['sharepoint'], readOnlyServices: ['mail', 'calendar'], maxKeyLifetimeDays: 365 });
+    mockTenantPolicy.mockResolvedValue({ allowKeys: true, disabledServices: ['sharepoint'], readOnlyServices: ['mail', 'calendar'], maxKeyLifetimeDays: 365, ownersMayWiden: true });
     const auth = await authenticateRequest(req(KEY));
     expect(auth!.session.agentKey!.policy).toEqual({ services: ['mail'], readOnlyServices: ['mail'], allowedSites: [] });
   });
@@ -139,7 +139,7 @@ describe('authenticateRequest with an agent key', () => {
   });
 
   it('refuses every key when the tenant has disabled them', async () => {
-    mockTenantPolicy.mockResolvedValue({ allowKeys: false, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365 });
+    mockTenantPolicy.mockResolvedValue({ allowKeys: false, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365, ownersMayWiden: true });
     expect(await authenticateRequest(req(KEY))).toBeNull();
     expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ result: 'denied', reason: expect.stringContaining('disabled') }));
   });

@@ -21,6 +21,8 @@ import {
   markAgentKeyRevoked,
   publicAgentKey,
   setAgentKeyReminder,
+  updateAgentKey,
+  isNarrowingOf,
   validateRequestedPolicy,
 } from '../../services/agentKeys.js';
 import type { AgentKeyPolicy } from '../../services/agentKeys.js';
@@ -35,6 +37,12 @@ import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from '../..
  * POST   /api/manage/agent-keys                 mint a key for the caller
  *        { label, services, expiresInDays, readOnlyServices?, allowedSites?, reminder? }
  *        → { key, ...publicAgentKey, reminder }   the key value appears in this response only
+ * PATCH  /api/manage/agent-keys?keyId=<id>      edit label and policy in place
+ *        { label?, services?, readOnlyServices?, allowedSites? }
+ *        An owner may edit either way within what they could grant today,
+ *        unless the tenant policy's ownersMayWiden is off, in which case
+ *        only a narrowing is accepted. A Global Administrator may only
+ *        narrow another user's key. The key value never changes.
  * DELETE /api/manage/agent-keys?keyId=<id>      revoke; own keys, or any key as Global Administrator
  *
  * Browser-only, like every /api/manage route: a console session is required,
@@ -64,6 +72,97 @@ async function manageAgentKeys(request: HttpRequest, context: InvocationContext)
       }
       const keys = await listAgentKeys(tenantId, all ? undefined : (targetUserId ?? auth.userId));
       return { status: 200, jsonBody: { keys: keys.map(publicAgentKey) } };
+    }
+
+    if (request.method === 'PATCH') {
+      const keyId = request.query.get('keyId');
+      if (!keyId) return { status: 400, jsonBody: { error: 'Missing keyId query parameter' } };
+      const record = await findAgentKey(tenantId, keyId);
+      if (!record) return { status: 404, jsonBody: { error: 'No such key' } };
+      if (record.revokedAt) return { status: 409, jsonBody: { error: 'The key is revoked; mint a new one' } };
+      const isOwner = record.userId === auth.userId;
+      let isAdmin = false;
+      if (!isOwner) {
+        isAdmin = await checkGlobalAdmin(auth.userId);
+        if (!isAdmin) {
+          auditAdminRefusal(auth, 'policy.agent_key.update', `key:${keyId}`);
+          return { status: 403, jsonBody: { error: 'You can only edit your own keys' } };
+        }
+      }
+
+      const body = (await request.json().catch(() => null)) as {
+        label?: unknown; services?: unknown; readOnlyServices?: unknown; allowedSites?: unknown;
+      } | null;
+      if (!body || typeof body !== 'object') return { status: 400, jsonBody: { error: 'JSON body required' } };
+      if (body.label === undefined && body.services === undefined && body.readOnlyServices === undefined && body.allowedSites === undefined) {
+        return { status: 400, jsonBody: { error: 'Provide label, services, readOnlyServices and/or allowedSites' } };
+      }
+
+      let label = record.label;
+      if (body.label !== undefined) {
+        label = typeof body.label === 'string' ? body.label.trim() : '';
+        if (!label) return { status: 400, jsonBody: { error: 'label must not be empty' } };
+        if (label.length > AGENT_KEY_LABEL_MAX) return { status: 400, jsonBody: { error: `label must be at most ${AGENT_KEY_LABEL_MAX} characters` } };
+        if (/[#\r\n]/.test(label)) return { status: 400, jsonBody: { error: 'label may not contain "#" or line breaks' } };
+      }
+
+      const tenantPolicy = await getTenantAgentKeyPolicy(tenantId);
+      // The owner's grantable set, as it stands today. An admin narrowing is
+      // validated against the key's own current policy instead, since an
+      // admin cannot speak for what the owner may reach.
+      // A field the caller leaves out keeps its current value, pruned to the
+      // new service set: dropping SharePoint drops its read-only flag and its
+      // site picks with it, rather than failing validation on a leftover.
+      const services = (body.services ?? record.policy.services) as string[];
+      const inheritedReadOnly = Array.isArray(services) ? record.policy.readOnlyServices.filter((s) => services.includes(s)) : record.policy.readOnlyServices;
+      const inheritedSites = Array.isArray(services) && !services.includes('sharepoint') ? [] : record.policy.allowedSites;
+      const requested: Partial<AgentKeyPolicy> = {
+        services,
+        readOnlyServices: (body.readOnlyServices ?? inheritedReadOnly) as string[],
+        allowedSites: (body.allowedSites ?? inheritedSites) as AgentKeyPolicy['allowedSites'],
+      };
+      let grantable: string[];
+      if (isOwner) {
+        const [enabled, userDisabled] = await Promise.all([
+          getEnabledServices(tenantId),
+          getUserServiceOverrides(tenantId, auth.userId),
+        ]);
+        grantable = enabled.filter((s) => !userDisabled.includes(s) && !tenantPolicy.disabledServices.includes(s));
+      } else {
+        grantable = record.policy.services;
+      }
+      const validated = validateRequestedPolicy(requested, grantable);
+      if (!validated.ok) return { status: 400, jsonBody: { error: validated.error } };
+
+      const narrowing = isNarrowingOf(validated.policy, record.policy);
+      if (!narrowing && !isOwner) {
+        auditAdminRefusal(auth, 'policy.agent_key.update', `key:${keyId}`);
+        return { status: 403, jsonBody: { error: "An administrator can only narrow another user's key" } };
+      }
+      if (!narrowing && isOwner && !tenantPolicy.ownersMayWiden) {
+        logAccess({
+          ...auditActor(auth.session),
+          operation: 'policy.agent_key.update',
+          resource: `key:${keyId}`,
+          result: 'denied',
+          reason: 'tenant policy allows owners to narrow keys only',
+          source: 'http',
+        });
+        return { status: 403, jsonBody: { error: 'Your organization only allows a key to be narrowed; mint a new key for wider access' } };
+      }
+
+      const updated = await updateAgentKey(record, { label, policy: validated.policy }, auth.userId);
+      logAccess({
+        ...auditActor(auth.session),
+        operation: 'policy.agent_key.update',
+        resource: `key:${keyId}`,
+        result: 'allowed',
+        reason: narrowing ? 'narrowed' : 'widened',
+        source: 'http',
+        before: auditSnapshot({ label: record.label, policy: record.policy }),
+        after: auditSnapshot({ label, policy: validated.policy }),
+      });
+      return { status: 200, jsonBody: { ok: true, widened: !narrowing, ...publicAgentKey(updated) } };
     }
 
     if (request.method === 'DELETE') {
@@ -235,7 +334,7 @@ async function manageAgentKeys(request: HttpRequest, context: InvocationContext)
 }
 
 app.http('manageAgentKeys', {
-  methods: ['GET', 'POST', 'DELETE'],
+  methods: ['GET', 'POST', 'PATCH', 'DELETE'],
   authLevel: 'anonymous',
   route: 'api/manage/agent-keys',
   handler: withSecurity(manageAgentKeys),

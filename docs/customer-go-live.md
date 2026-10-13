@@ -686,11 +686,13 @@ checks the whole item.
 - [ ] **8.10 Agent key policy.** Decide whether users may mint
       [agent keys](agent-api-keys.md) and what every key is held to:
       `POST /api/manage/agent-key-policy` with `allowKeys`,
-      `disabledServices`, `readOnlyServices` and `maxKeyLifetimeDays`, or
-      **Admin → Agent Keys**. The default allows keys with no further
-      restriction beyond the user's own reach and a lifetime of up to a year;
-      a tenant that wants keys no longer than a sign-in sets the maximum to
-      30. A tenant that relies on Conditional Access for
+      `disabledServices`, `readOnlyServices`, `maxKeyLifetimeDays` and
+      `ownersMayWiden`, or **Admin → Agent Keys**. The default allows keys
+      with no further restriction beyond the user's own reach, a lifetime of
+      up to a year, and owners editing their own keys in either direction; a
+      tenant that wants keys no longer than a sign-in sets the maximum to 30,
+      and one that wants a wider key to always mean a new key turns
+      `ownersMayWiden` off. A tenant that relies on Conditional Access for
       corporate-machine-only access should read the Conditional Access note
       on that page before allowing keys, since a key is evaluated by CA at its
       owner's sign-in and not at each use. Audited as
