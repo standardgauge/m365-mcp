@@ -8,6 +8,7 @@ import OneDriveBrowser from './OneDriveBrowser';
 import OneNoteBrowser from './OneNoteBrowser';
 import ContactsBrowser from './ContactsBrowser';
 import TeamsBrowser from './TeamsBrowser';
+import AgentKeys from './AgentKeys';
 
 const ALL_SERVICES: { key: string; label: string; description: string }[] = [
   { key: 'mail', label: 'Mail', description: 'Read and manage mailbox folders' },
@@ -265,6 +266,15 @@ export default function UserSettings({ userId, accountName, enabledServices = ['
         {statusMsg && (
           <p className={`status-msg status-msg--${statusMsg.kind}`}>{statusMsg.text}</p>
         )}
+      </CollapsibleSection>
+
+      {/* Agent API keys: narrower credentials for apps and agents the user runs */}
+      <CollapsibleSection storageKey="settings-agent-keys" title="Agent Keys" defaultCollapsed>
+        <AgentKeys
+          userId={userId}
+          grantableServices={enabledServices.filter((s) => !disabledServices.includes(s))}
+          allowedSites={allowedSites}
+        />
       </CollapsibleSection>
 
       {/* Email output mode — draft vs. send */}

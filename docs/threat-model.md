@@ -112,6 +112,7 @@ content; it stores credentials, policy and audit rows.
 | A10 | User profile data | `mcpSessions` (display name, email, object ID, tenant ID), audit rows | Personal data under the operator's privacy obligations. |
 | A11 | Client-side code | Installers, shim and desktop extension served by the instance | Runs on every user's machine with that user's privileges. |
 | A12 | Deployment credentials | Fork repository secrets, deploy principal | Push a new image to the instance. |
+| A13 | Agent API keys | Client-side wherever the owner put them (a secret store, a CI variable); HMAC only in `agentKeys`, bound to a `client` session row in `mcpSessions` | A bearer credential narrower than its owner's session, valid up to 30 days from the owner's sign-in or its own expiry. Whoever holds it acts as the owner within the key's policy ([agent API keys](agent-api-keys.md)). |
 
 ---
 
@@ -225,6 +226,7 @@ replica keeps an in-memory cache of sessions it has seen, keyed by token hash.
 | 3.5 | I | Session token leaks from the client. | The desktop extension and the script installers both keep it in the OS keychain, DPAPI, or libsecret, falling back to a 0600 file. The installers hand it to the shim on stdin (`--store-token`) and the MCP client config names only the store (`--token-store`), so no config file holds the token. The `.backup` copies the installers write are 0600 and have the earlier installer's bearer header removed. A release gate runs each installer's config writer with a token in scope and fails if one reaches the config or the backup ([installer-release-gates.md](installer-release-gates.md)). | A config written by an earlier installer keeps its token until the installer is re-run, and that token stays valid until the 30-day cap. The macOS `security` CLI takes the token on argv for the moment it runs, the same as the extension. Accepted. |
 | 3.6 | R | Several devices share one identity. | Each device gets its own session row and an optional device label that the audit log records. | None. |
 | 3.7 | E | `tools/list` shows tools the user cannot use. | Filtered by enabled services, overrides and read-only. Call-time checks are the backstop. | If policy cannot be read, `tools/list` shows everything. Display only; every call is still checked and those checks fail closed. Accepted. |
+| 3.8 | S, E | An agent API key is used to reach more than its owner meant, or by someone other than the app it was minted for. | A key is 32 random bytes behind a fixed prefix, looked up by HMAC with a constant-time compare, and resolves only to a `client` session of its owner that inherits the owner's absolute-lifetime anchor; it is never an identity of its own and holds no Graph permission the owner lacks. Its policy (services, read-only set, SharePoint sites) can only narrow, the tenant's key policy narrows every key further on each request, and `tools/list` and `tools/call`, the REST policy wrapper, the site allow-list and the search post-filters all read the same effective policy ([`agentKeys.ts`](../src/services/agentKeys.ts), `agentKeyEnforcement.test.ts`). Revocation deletes the bound session, so it propagates like logout; signing the owner out ends every key; an admin can switch keys off tenant-wide. Every call under a key carries `agent-key:<label>#<id>` in the audit `deviceLabel`. | Conditional Access is evaluated when the owner signs in, not when the key is used, so a copied key works from a non-compliant device until revoked or expired (gap register). A key inherits the owner's folder, mail-folder and calendar deny entries but cannot carry its own (gap register). |
 
 ---
 
@@ -331,6 +333,7 @@ Operator view: [Admin API sessions](operations-runbook.md#admin-api-sessions).
 | 7.4 | T | XSS in the admin SPA. | React rendering; CSP with `default-src 'none'`, `script-src 'self'` (no inline script), `frame-ancestors 'none'`, `form-action` and `connect-src` restricted. Runtime config travels as a non-executable `type="application/json"` data block, JSON-escaped for script context and read with `JSON.parse`. The session cookies are HttpOnly, so script that did run could act as the user in the page but not read the credentials. | `style-src` still allows `'unsafe-inline'`, which permits CSS injection but not script. Accepted. |
 | 7.5 | R | Admin changes are not attributable. | Every policy change through the API writes an audit row naming the admin, the target, and the value before and after: global and per-user deny lists (add, remove, clear), enabled services, read-only services, allowed sites, per-user service overrides, mail config, draft-mode policy, and outbound policy. A caller refused by the Global Administrator check is audited under the operation it attempted. | Before and after are capped at 8,000 characters each; a longer value is cut and marked. |
 | 7.6 | I | Admin reads tenant directory. | `tenant-users` requires Global Administrator and uses the admin's own token. | None. |
+| 7.7 | E | An agent API key is used as an admin credential, to mint further keys, or to loosen a control its owner set. | The key routes and the key-policy route live under `/api/manage/*` and take only a console session, so a key can neither read nor change key state; `POST /api/mail/settings` refuses a key and audits it, so a key cannot switch its owner to send mode; `POST /api/auth/logout` refuses a key; `/api/auth/refresh` does not know keys. A non-admin can list and revoke only their own keys; `?all=true` and another user's keys need Global Administrator, refusals audited under `admin.agent_keys.read` and `policy.agent_key.revoke`. | None. |
 
 ---
 
@@ -385,6 +388,7 @@ shim's local-file limits.
 | 9.6 | E | Confused deputy at the server: someone gets the server to act with another user's authority. | Sessions are looked up by token, never by a supplied user ID; the old `x-user-id` trust model is gone. | The install handoff needs the signed-in user to enter the installer's code (4.1). A tampered session row fails authentication once identity binding is required (2.3). |
 | 9.7 | E | Argument injection into Graph paths or OData. | `assertOpaqueIds` on every ID parameter; KQL and filter values escaped; unknown parameters refused. | None found; worth fuzzing (see test scope). |
 | 9.8 | I | Model sees content the user hid. | Deny lists filter listings and search hits, including ancestor-folder matches on search results. | Deny matching is by name and path. A renamed folder escapes a name-based entry until the entry is updated. Accepted and documented in the access-control docs. |
+| 9.9 | T, I | An injected prompt reaches an app running under an agent key. | The blast radius is the key's effective policy, not the owner's full reach: an owner who minted a read-only SharePoint key for a build has already bounded what a hijacked build can do, and a Global Administrator can hold every key to read-only on a service the owner may still write. Refusals are logged as denied under the key's label, which is the signal an alerting layer, tracked separately, will consume. | Within the key's policy the same residuals as 9.1 to 9.3 apply. Accepted; keys reduce the surface, they do not add a human step. |
 
 ---
 
@@ -420,7 +424,10 @@ Gaps found by this review. Each has a tracker item that links back to its row
 above. Items the project already tracked before this review are marked "tracked
 separately" in the tables and are not repeated here.
 
-No gaps are open.
+| Row | Gap | Tracker |
+|---|---|---|
+| 3.8 | Conditional Access is evaluated at the key owner's sign-in and not when an agent key is used, so a key copied to a non-compliant device keeps working until revoked or expired. | Tracked separately |
+| 3.8 | An agent key cannot carry folder, mail-folder or calendar deny entries of its own; it inherits the owner's. | Tracked separately |
 
 When a gap closes, change its row in the relevant table to describe the new
 mitigation and delete it from this register in the same pull request.

@@ -10,7 +10,8 @@
 import { HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { getTenantId, getTenantIdFromSession } from './tokenCache.js';
 import type { UserSession } from './tokenCache.js';
-import { getEnabledServices, getAllowedSites, getReadOnlyServices } from './serviceSettings.js';
+import { getEnabledServices, getReadOnlyServices } from './serviceSettings.js';
+import { effectiveAllowedSites, keyAllowsService, keyIsReadOnly } from './agentKeys.js';
 import { isServiceDisabledForUser } from './userServiceOverrides.js';
 import { isPathDenied, type DenySubject } from './denyList.js';
 import { isMailIndexingDisabled } from './userMailConfig.js';
@@ -49,6 +50,12 @@ export async function checkServiceEnabled(
     return { status: 403, error: `Service "${service}" is disabled for your account` };
   }
 
+  // 3. Agent key — a key reaches only the services it was minted for, less
+  //    whatever the tenant's key policy has since removed.
+  if (!keyAllowsService(session?.agentKey, service)) {
+    return { status: 403, error: `Service "${service}" is not permitted for this agent key` };
+  }
+
   return null;
 }
 
@@ -62,7 +69,7 @@ export async function checkAllowedSite(
   session?: UserSession,
 ): Promise<PolicyViolation | null> {
   const tenantId = session ? getTenantIdFromSession(session) : await getTenantId(userId);
-  const allowed = await getAllowedSites(tenantId);
+  const allowed = await effectiveAllowedSites(tenantId, session);
   if (allowed.length > 0) {
     const siteAllowed = allowed.some((s) => s.id === siteId);
     if (!siteAllowed) {
@@ -88,6 +95,9 @@ export async function checkReadOnly(
   const readOnly = await getReadOnlyServices(tenantId);
   if (readOnly.includes(service)) {
     return { status: 403, error: `Service "${service}" is in read-only mode; write operations are disabled` };
+  }
+  if (keyIsReadOnly(session?.agentKey, service)) {
+    return { status: 403, error: `Service "${service}" is read-only for this agent key; write operations are disabled` };
   }
   return null;
 }

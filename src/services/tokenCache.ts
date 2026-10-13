@@ -3,6 +3,7 @@ import {
   saveSession,
   loadSession,
   loadSessionByToken,
+  loadSessionByStorageKey,
   removeSession,
   removeSessionByKey,
   listAllSessions,
@@ -11,6 +12,7 @@ import {
 } from './tableStorage.js';
 import { hashSessionToken } from './credentialCrypto.js';
 import { SessionStoreUnavailableError } from './sessionStoreError.js';
+import type { AgentKeyContext } from './agentKeys.js';
 
 /** Session renewal window (in milliseconds). This is NOT an idle timeout:
  *  a session unused for longer than this is not ended. On its next request
@@ -92,6 +94,14 @@ export interface UserSession {
    * rows written before the field existed; those count as neither.
    */
   kind?: SessionKind;
+  /**
+   * Set on the copy of a session handed to a request that authenticated with
+   * an agent API key (services/agentKeys.ts): the key's id, label and the
+   * policy in force for it. Policy checks read it to narrow what the request
+   * may do. Never persisted: saveSession writes named columns only, and the
+   * key's session row is a plain client session.
+   */
+  agentKey?: AgentKeyContext;
   /**
    * Table Storage RowKey for this session. Used by the refresh path to
    * update the correct row without needing the original sessionToken.
@@ -322,6 +332,45 @@ export async function getSessionByToken(token: string): Promise<UserSession | un
   // Update userId index so subsequent getSession/getValidAccessToken
   // calls in this request context use THIS session
   userIndex.set(stored.userId, hash);
+  return stored;
+}
+
+/**
+ * Look up a session by its Table Storage RowKey. Used for the session an
+ * agent API key is bound to: the key row names the session's RowKey and the
+ * session's own token is never presented. Same contract as getSessionByToken:
+ * undefined when the row is gone, SessionStoreUnavailableError when storage
+ * cannot answer. The cached copy is revalidated on the same schedule.
+ */
+export async function getSessionByStorageKey(storageKey: string): Promise<UserSession | undefined> {
+  for (const [key, cached] of sessionCache) {
+    if (cached._storageKey !== storageKey) continue;
+    const state = await revalidateCached(key, cached);
+    if (state === 'gone') return undefined;
+    if (state !== 'ok') throw new SessionStoreUnavailableError(state.unavailable);
+    if (materializeLegacyAnchor(cached)) {
+      storeSession(cached).catch((err) =>
+        console.error('[tokenCache] Failed to persist legacy absolute anchor (getSessionByStorageKey):', err)
+      );
+    }
+    return cached;
+  }
+  let stored: UserSession | null;
+  try {
+    stored = await loadSessionByStorageKey(storageKey);
+  } catch (err) {
+    console.error('[tokenCache] Failed to load session by storage key from Table Storage:', err);
+    throw new SessionStoreUnavailableError(err);
+  }
+  if (!stored) return undefined;
+  if (materializeLegacyAnchor(stored)) {
+    storeSession(stored).catch((err) =>
+      console.error('[tokenCache] Failed to persist legacy absolute anchor (getSessionByStorageKey storage):', err)
+    );
+  }
+  const key = cacheKey(stored);
+  cachePut(key, stored);
+  userIndex.set(stored.userId, key);
   return stored;
 }
 

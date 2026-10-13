@@ -683,6 +683,16 @@ checks the whole item.
       that matches the decision. Export that filtered view as CSV
       (`/api/manage/audit-log?format=csv`) and attach it to the record. That
       export is the evidence this item was done, in the tenant's own words.
+- [ ] **8.10 Agent key policy.** Decide whether users may mint
+      [agent keys](agent-api-keys.md) and what every key is held to:
+      `POST /api/manage/agent-key-policy` with `allowKeys`,
+      `disabledServices` and `readOnlyServices`, or **Admin → Agent Keys**.
+      The default allows keys with no further restriction beyond the user's
+      own reach. A tenant that relies on Conditional Access for
+      corporate-machine-only access should read the Conditional Access note
+      on that page before allowing keys, since a key is evaluated by CA at its
+      owner's sign-in and not at each use. Audited as
+      `policy.agent_key_policy.set`, so 8.9 picks it up.
 
 ---
 

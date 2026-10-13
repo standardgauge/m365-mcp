@@ -15,6 +15,8 @@
   and writes are gated
 - [SharePoint search access controls](sharepoint-search-access-controls.md) —
   how deny lists and the site allow-list apply to both search surfaces
+- [Agent API keys](agent-api-keys.md) — a narrower credential a user mints for
+  an app or agent, bound to their own session; policy, lifecycle, routes
 - [SharePoint MCP server spec](sharepoint-mcp-server-spec.md) — the SharePoint
   tool surface
 - [Supply chain](supply-chain.md) — the SBOM and signed provenance on each

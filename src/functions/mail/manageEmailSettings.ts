@@ -28,7 +28,7 @@ import type { EmailOutputMode } from '../../services/userEmailSettings.js';
 import { getTenantId } from '../../services/tokenCache.js';
 import { authenticateRequest, auditAdminRefusal, checkGlobalAdmin } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
-import { auditSnapshot, logAccess } from '../../services/auditLog.js';
+import { auditActor, auditSnapshot, logAccess } from '../../services/auditLog.js';
 import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from '../../services/sessionStoreError.js';
 
 async function manageEmailSettingsHandler(
@@ -62,7 +62,20 @@ async function manageEmailSettingsHandler(
       };
     }
 
-    // POST — update email output mode
+    // POST — update email output mode. Never under an agent key: a key is
+    // narrower than its owner's session by construction, and loosening draft
+    // mode is the one thing an injected prompt would want it for.
+    if (auth.session.agentKey) {
+      logAccess({
+        ...auditActor(auth.session),
+        operation: 'policy.email_output_mode.set',
+        resource: `user:${auth.userId}`,
+        result: 'denied',
+        reason: `agent key ${auth.session.agentKey.keyId} may not change email settings`,
+        source: 'http',
+      });
+      return { status: 403, jsonBody: { error: 'Email settings cannot be changed with an agent key' } };
+    }
     const body = (await request.json()) as { emailOutputMode?: string; userId?: string };
     const targetUserId = body.userId ?? auth.userId;
 

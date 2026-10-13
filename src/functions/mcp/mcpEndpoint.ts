@@ -13,7 +13,8 @@ import { authenticateRequest } from '../../services/authMiddleware.js';
 import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from '../../services/sessionStoreError.js';
 import type { UserSession } from '../../services/tokenCache.js';
 import { filterAndDisambiguateSites } from '../../services/sharepointFilter.js';
-import { getEnabledServices, getAllowedSites, getReadOnlyServices } from '../../services/serviceSettings.js';
+import { getEnabledServices, getReadOnlyServices } from '../../services/serviceSettings.js';
+import { effectiveAllowedSites, keyAllowsService, keyIsReadOnly } from '../../services/agentKeys.js';
 import { getUserServiceOverrides } from '../../services/userServiceOverrides.js';
 import { getUserEmailSettings, setUserEmailSettings, type EmailOutputMode } from '../../services/userEmailSettings.js';
 import { isMailIndexingDisabled } from '../../services/userMailConfig.js';
@@ -481,7 +482,7 @@ const tools: ToolDef[] = [
       let sites = filterAndDisambiguateSites(result.value ?? []);
       // Enforce allowedSites — if configured, only return allowed sites
       const tenantId = getTenantIdFromSession(session);
-      const allowed = await getAllowedSites(tenantId);
+      const allowed = await effectiveAllowedSites(tenantId, session);
       if (allowed.length > 0) {
         const allowedIds = new Set(allowed.map((s) => s.id));
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -587,7 +588,7 @@ const tools: ToolDef[] = [
       // `contentSources` source constraint is invalid for a driveItem query and
       // made every search error. Over-fetch a wider window when a scope
       // is active so filtering can still surface maxResults.
-      const allowedSites = await getAllowedSites(tenantId);
+      const allowedSites = await effectiveAllowedSites(tenantId, session);
       // An explicit siteId (already validated in-allow-list by the dispatch gate)
       // narrows the post-filter to that single site; otherwise the full allow-list
       // applies (empty = allow all). This preserves the "restrict to site"
@@ -2676,6 +2677,7 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
         const readOnly = await getReadOnlyServices(tenantId);
         const userDisabled = await getUserServiceOverrides(tenantId, auth.userId);
         const mailIndexingOff = await isMailIndexingDisabled(tenantId, auth.userId);
+        const agentKey = auth.session.agentKey;
         visibleTools = tools.filter((t) => {
           const svc = toolServiceByName.get(t.name);
           if (!svc) return true;
@@ -2683,6 +2685,9 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
           if (userDisabled.includes(svc)) return false;
           if (svc === 'mail' && mailIndexingOff) return false;
           if (readOnly.includes(svc) && WRITE_TOOLS.has(t.name)) return false;
+          // An agent key advertises only what it may call (threat model 3.7).
+          if (!keyAllowsService(agentKey, svc)) return false;
+          if (keyIsReadOnly(agentKey, svc) && WRITE_TOOLS.has(t.name)) return false;
           return true;
         });
       } catch { /* fall through — show all if we can't load settings */ }
@@ -2761,6 +2766,20 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
           });
           return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'Mail access is disabled for your account. Contact your admin.' }], isError: true } };
         }
+        // Agent key — the key reaches only the services it was minted for.
+        if (!keyAllowsService(auth!.session.agentKey, toolService)) {
+          logAccess({
+            tenantId,
+            userId: auth!.userId,
+            userEmail: auth!.session.email,
+            deviceLabel: auth!.session.deviceLabel,
+            operation: toolName,
+            result: 'denied',
+            reason: `Service "${toolService}" is not permitted for this agent key`,
+            source: 'mcp',
+          });
+          return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Service "${toolService}" is not permitted for this agent key. The key's owner can mint a key with wider scope in the web UI.` }], isError: true } };
+        }
       }
 
       // Enforce read-only mode — refuse mutating tools when the
@@ -2781,12 +2800,25 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
           });
           return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Service "${toolService}" is in read-only mode; write operations are disabled. An admin can change this in the admin UI.` }], isError: true } };
         }
+        if (keyIsReadOnly(auth!.session.agentKey, toolService)) {
+          logAccess({
+            tenantId,
+            userId: auth!.userId,
+            userEmail: auth!.session.email,
+            deviceLabel: auth!.session.deviceLabel,
+            operation: toolName,
+            result: 'denied',
+            reason: `Service "${toolService}" is read-only for this agent key`,
+            source: 'mcp',
+          });
+          return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Service "${toolService}" is read-only for this agent key; write operations are disabled.` }], isError: true } };
+        }
       }
 
       // Enforce allowedSites — for SharePoint tools that accept siteId, validate
       // the target site is in the allow-list (empty list = allow all)
       if (SITE_SCOPED_TOOLS.has(toolName) && toolArgs.siteId) {
-        const allowed = await getAllowedSites(tenantId);
+        const allowed = await effectiveAllowedSites(tenantId, auth!.session);
         if (allowed.length > 0) {
           const siteAllowed = allowed.some((s) => s.id === toolArgs.siteId);
           if (!siteAllowed) {
@@ -2896,6 +2928,7 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
         message.includes('not in the allowed sites') ||
         message.includes('is not enabled') ||
         message.includes('disabled for your account') ||
+        message.includes('for this agent key') ||
         message.includes(ENFORCED_MODE_MARKER) ||
         message.includes(SEND_MODE_UI_ONLY_MARKER) ||
         message.includes(OUTBOUND_POLICY_MARKER);

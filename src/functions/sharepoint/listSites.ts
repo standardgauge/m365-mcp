@@ -3,7 +3,7 @@ import { getValidAccessTokenForSession, getTenantId } from '../../services/token
 import { createGraphClient } from '../../services/graphClient.js';
 import { filterAndDisambiguateSites } from '../../services/sharepointFilter.js';
 import { withPolicyEnforcement } from '../../services/policyEnforcement.js';
-import { getAllowedSites } from '../../services/serviceSettings.js';
+import { effectiveAllowedSites } from '../../services/agentKeys.js';
 import { checkGlobalAdmin } from '../../services/authMiddleware.js';
 import type { AuthResult } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
@@ -58,7 +58,7 @@ async function listSitesHandler(
   const isAdminRequest = request.query.get('admin') === 'true';
   const isAdmin = isAdminRequest ? await checkGlobalAdmin(userId, accessToken) : false;
   const tenantId = await getTenantId(userId);
-  const allowed = await getAllowedSites(tenantId);
+  const allowed = await effectiveAllowedSites(tenantId, auth.session);
 
   if (isAdmin) {
     // Union: include allowedSites entries that Graph search didn't return,
