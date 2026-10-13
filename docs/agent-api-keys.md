@@ -311,6 +311,44 @@ against `/api/mcp` or the REST routes, or hand it to the stdio shim with
 key in a repository or a config file is a credential leak like any other, and
 the remedy is revocation.
 
+## First-party use: the post-deploy smoke
+
+The first consumer of keys is this repository's own deploy workflow. After a
+deploy, its **Functional smoke** job reads a key from the fork's
+`SMOKE_AGENT_KEY` secret and drives the live instance with it
+(`scripts/post-deploy-smoke.js`; checks and failure meanings in the
+[operations runbook](operations-runbook.md#functional-smoke)). A key is the
+right credential for it because it is everything an unattended probe needs and
+nothing more: it acts as a real person, so every read is a real delegated Graph
+call that a missing consent or a broken client fails exactly as a user's would;
+it can be narrowed to read-only, so the probe can prove the write gates refuse
+without being able to write; and it reaches neither the admin API nor its
+owner's settings, which the probe also proves.
+
+How the smoke key is minted, and why each choice:
+
+- **By a Global Administrator, as themselves, under My Settings → Agent Keys.**
+  The key can only reach what its owner can, so the owner's reach is the
+  probe's reach. An administrator's mailbox, calendar and drive exist on every
+  tenant; a pilot user's may not.
+- **Every service the tenant enables, every one of them read-only.** The probe
+  reads each service it can see and expects every write refused. A service left
+  off the key goes untested; a service left writable fails the run at "no write
+  tool listed" and the write probes are skipped. A service the tenant has not
+  enabled is fine to leave off: the probe calls it to prove it is refused.
+- **No site restriction**, unless the tenant's own allow-list is the point:
+  `list_sites` is a read, and an empty key list means the tenant's.
+- **365 days, with the reminder on.** The reminder puts the replacement date on
+  the owner's calendar a week ahead. Rotating is: mint the new key, `gh secret
+  set SMOKE_AGENT_KEY`, dispatch a deploy to prove it, revoke the old one.
+- **Label it for what it is** (`deploy-smoke`), so its audit rows read as the
+  pipeline's and not as an app the administrator forgot about.
+
+The run leaves a short burst of audit rows under that label on every deploy:
+the reads `allowed`, and the write, service, settings and logout refusals
+`denied`. That burst is expected, and its absence after a deploy is worth
+noticing.
+
 ## Operating notes
 
 - A key costs one extra Table Storage point read per request over a session
