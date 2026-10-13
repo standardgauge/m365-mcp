@@ -15,10 +15,11 @@ import { jest } from '@jest/globals';
 const mockPost = jest.fn<(body: unknown) => Promise<unknown>>();
 const mockDelete = jest.fn<() => Promise<unknown>>();
 const mockApi = jest.fn((path: string) => ({ post: mockPost, delete: mockDelete, path }));
+const mockResolveTz = jest.fn<() => Promise<string>>();
 
 jest.mock('../services/graphClient.js', () => ({ createGraphClient: () => ({ api: (p: string) => mockApi(p) }) }));
 jest.mock('../services/tokenCache.js', () => ({ getValidAccessTokenForSession: async () => 'at' }));
-jest.mock('../services/mailboxTimeZone.js', () => ({ resolveMailboxTimeZone: async () => 'Pacific Standard Time' }));
+jest.mock('../services/mailboxTimeZone.js', () => ({ resolveMailboxTimeZone: () => mockResolveTz() }));
 jest.mock('../services/frontendUrl.js', () => ({ resolveFrontendUrl: () => 'https://mcp.example.test/' }));
 
 import {
@@ -46,6 +47,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockPost.mockResolvedValue({ id: 'evt-1' });
   mockDelete.mockResolvedValue(undefined);
+  mockResolveTz.mockResolvedValue('Pacific Standard Time');
 });
 
 describe('lead time', () => {
@@ -65,8 +67,8 @@ describe('lead time', () => {
 
 describe('createKeyExpiryReminder', () => {
   it('writes a free, attendee-less event with a reminder on the owner’s default calendar', async () => {
-    const id = await createKeyExpiryReminder(session, record(90));
-    expect(id).toBe('evt-1');
+    const created = await createKeyExpiryReminder(session, record(90));
+    expect(created).toEqual({ eventId: 'evt-1', timeZone: 'Pacific Standard Time', timeZoneFallback: false, fallbackReason: undefined });
     expect(mockApi).toHaveBeenCalledWith('/me/events');
     const event = mockPost.mock.calls[0][0] as Record<string, unknown>;
     expect(event).toMatchObject({
@@ -82,6 +84,19 @@ describe('createKeyExpiryReminder', () => {
     expect(body).toContain('read-only: mail');
     expect(body).toContain('https://mcp.example.test/');
     expect(body).toContain('My Settings');
+    expect(body).not.toContain('UTC');
+  });
+
+  it('falls back to 16:00 UTC, says so in the body, and reports it when the mailbox zone cannot be read', async () => {
+    mockResolveTz.mockRejectedValue(new Error('Access is denied. Check credentials and try again.'));
+    const created = await createKeyExpiryReminder(session, record(90));
+    expect(created).toMatchObject({ eventId: 'evt-1', timeZone: 'UTC', timeZoneFallback: true, fallbackReason: expect.stringContaining('Access is denied') });
+    const event = mockPost.mock.calls[0][0] as Record<string, unknown>;
+    expect(event).toMatchObject({
+      start: { dateTime: '2027-01-04T16:00:00', timeZone: 'UTC' },
+      end: { dateTime: '2027-01-04T16:30:00', timeZone: 'UTC' },
+    });
+    expect((event.body as { content: string }).content).toContain('MailboxSettings.Read');
   });
 
   it('returns null without calling Graph for a key too short to remind about', async () => {

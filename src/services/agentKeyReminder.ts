@@ -18,8 +18,17 @@ import type { AgentKeyRecord } from './agentKeys.js';
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-/** Local wall-clock hour the reminder event starts. */
+/** Local wall-clock hour the reminder event starts, in the mailbox's own zone. */
 const REMINDER_HOUR = 9;
+/**
+ * Hour used when the mailbox's zone cannot be read (MailboxSettings.Read not
+ * consented, or the setting empty): 16:00 UTC is a working hour from the US
+ * West Coast through the UK, so the reminder still fires while someone is at
+ * a desk. The user-facing calendar tools keep their loud failure on purpose;
+ * a best-effort reminder is better late in the day than missing.
+ */
+const FALLBACK_HOUR_UTC = 16;
+const FALLBACK_TIME_ZONE = 'UTC';
 const REMINDER_LENGTH_MIN = 30;
 
 /**
@@ -35,7 +44,7 @@ export function reminderLeadDays(lifetimeMs: number): number {
 }
 
 /** The reminder's start as a wall-clock string (no zone), or null when no reminder applies. */
-export function reminderStart(record: Pick<AgentKeyRecord, 'createdAt' | 'expiresAt'>): string | null {
+export function reminderStart(record: Pick<AgentKeyRecord, 'createdAt' | 'expiresAt'>, hour = REMINDER_HOUR): string | null {
   const lead = reminderLeadDays(record.expiresAt - record.createdAt);
   if (lead === 0) return null;
   // The calendar date is taken in UTC and sent with the mailbox's own zone,
@@ -43,7 +52,17 @@ export function reminderStart(record: Pick<AgentKeyRecord, 'createdAt' | 'expire
   // does not matter, and it avoids mapping Windows zone names to IANA here.
   const d = new Date(record.expiresAt - lead * DAY_MS);
   const ymd = d.toISOString().slice(0, 10);
-  return `${ymd}T${String(REMINDER_HOUR).padStart(2, '0')}:00:00`;
+  return `${ymd}T${String(hour).padStart(2, '0')}:00:00`;
+}
+
+export interface ReminderCreated {
+  eventId: string;
+  /** The zone the event was written in. */
+  timeZone: string;
+  /** True when the mailbox zone could not be read and the UTC fallback was used. */
+  timeZoneFallback: boolean;
+  /** Why the fallback was taken, for the audit row. */
+  fallbackReason?: string;
 }
 
 function addMinutes(wallClock: string, minutes: number): string {
@@ -53,7 +72,7 @@ function addMinutes(wallClock: string, minutes: number): string {
   return `${date}T${String(Math.floor(total / 60) % 24).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}:00`;
 }
 
-export function reminderEventBody(record: AgentKeyRecord, frontendUrl: string): { subject: string; content: string } {
+export function reminderEventBody(record: AgentKeyRecord, frontendUrl: string, timeZoneFallback = false): { subject: string; content: string } {
   const expires = new Date(record.expiresAt).toUTCString();
   const services = record.policy.services.join(', ') || 'none';
   const ro = record.policy.readOnlyServices.length ? ` (read-only: ${record.policy.readOnlyServices.join(', ')})` : '';
@@ -65,7 +84,10 @@ export function reminderEventBody(record: AgentKeyRecord, frontendUrl: string): 
       '',
       'To keep whatever uses it running: mint a replacement under My Settings, Agent Keys, switch the app to the new key, then revoke this one.',
       frontendUrl ? `Open: ${frontendUrl}` : '',
-    ].filter((l) => l !== undefined).join('\n'),
+      timeZoneFallback
+        ? `This reminder is set in UTC because your mailbox time zone could not be read (the MailboxSettings.Read permission is not granted for this app). Ask your administrator to grant it.`
+        : '',
+    ].filter((l) => l !== '').join('\n'),
   };
 }
 
@@ -74,13 +96,21 @@ export function reminderEventBody(record: AgentKeyRecord, frontendUrl: string): 
  * id, or null when the key is too short-lived for one. Throws on a Graph
  * failure; the caller decides that is not fatal.
  */
-export async function createKeyExpiryReminder(session: UserSession, record: AgentKeyRecord): Promise<string | null> {
-  const start = reminderStart(record);
-  if (!start) return null;
+export async function createKeyExpiryReminder(session: UserSession, record: AgentKeyRecord): Promise<ReminderCreated | null> {
+  if (!reminderStart(record)) return null;
   const token = await getValidAccessTokenForSession(session);
   const graph = createGraphClient(token);
-  const tz = await resolveMailboxTimeZone(graph);
-  const { subject, content } = reminderEventBody(record, resolveFrontendUrl());
+  let tz = FALLBACK_TIME_ZONE;
+  let timeZoneFallback = false;
+  let fallbackReason: string | undefined;
+  try {
+    tz = await resolveMailboxTimeZone(graph);
+  } catch (err: unknown) {
+    timeZoneFallback = true;
+    fallbackReason = err instanceof Error ? err.message : String(err);
+  }
+  const start = reminderStart(record, timeZoneFallback ? FALLBACK_HOUR_UTC : REMINDER_HOUR) as string;
+  const { subject, content } = reminderEventBody(record, resolveFrontendUrl(), timeZoneFallback);
   const event = {
     subject,
     body: { contentType: 'Text', content },
@@ -94,7 +124,7 @@ export async function createKeyExpiryReminder(session: UserSession, record: Agen
   };
   const created = (await graph.api('/me/events').post(event)) as { id?: string };
   if (!created?.id) throw new Error('Graph returned no event id');
-  return created.id;
+  return { eventId: created.id, timeZone: tz, timeZoneFallback, fallbackReason };
 }
 
 /** Remove a reminder, as the owner. 404 (already gone) is not an error. */
