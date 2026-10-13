@@ -42,13 +42,13 @@
  * that cannot be read all refuse the call rather than let it through.
  */
 
-import { TableClient, TableEntity } from '@azure/data-tables';
+import type { TableClient, TableEntity } from '@azure/data-tables';
+import { getTableClient as getStorageTableClient } from './storageClient.js';
 import type { Client } from '@microsoft/microsoft-graph-client';
 
 const TABLE = 'OutboundPolicy';
 /** RowKey of the tenant-wide row; same value and reasoning as the draft-mode policy. */
 const TENANT_POLICY_ROW_KEY = '__tenant__';
-const AZURITE_CONNECTION_STRING = 'UseDevelopmentStorage=true';
 
 export type OutboundChannel = 'calendarInvites' | 'eventResponses' | 'teamsMessages';
 export type OutboundMode = 'allow' | 'internal' | 'block';
@@ -114,11 +114,16 @@ function isMode(value: unknown): value is OutboundMode {
   return typeof value === 'string' && (OUTBOUND_MODES as readonly string[]).includes(value);
 }
 
+/**
+ * Always the shared client (services/storageClient.ts). Production hands the
+ * app a table endpoint and a managed identity, not a connection string; a
+ * module that built its own client from `AZURE_STORAGE_CONNECTION_STRING` fell
+ * back to Azurite there, could not read the policy, and refused every calendar
+ * invite and Teams send on every deployment. `fromConnectionString` is not
+ * called anywhere outside storageClient.ts, and a test holds that.
+ */
 function getTableClient(): TableClient {
-  const conn = process.env.AZURE_STORAGE_CONNECTION_STRING ?? AZURITE_CONNECTION_STRING;
-  const allowInsecureConnection =
-    conn === 'UseDevelopmentStorage=true' || conn.includes('DefaultEndpointsProtocol=http;');
-  return TableClient.fromConnectionString(conn, TABLE, { allowInsecureConnection });
+  return getStorageTableClient(TABLE);
 }
 
 async function ensureTable(): Promise<void> {
