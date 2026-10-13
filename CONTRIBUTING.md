@@ -37,6 +37,9 @@ Check a range before you push:
 bash scripts/dco-check.sh origin/main HEAD
 ```
 
+CI runs the same script on every pull request, as the `DCO Sign-off` job, over
+the commits between the pull request's base and head.
+
 **If your employer owns the code you write, the sign-off says you have their
 permission to send it.** Some employers restrict contributing to AGPL projects
 specifically. Find that out before you write the change rather than after.
