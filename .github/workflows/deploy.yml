@@ -21,6 +21,11 @@ name: Deploy
 #   AZURE_CREDENTIALS   service principal JSON with Contributor on the resource
 #                       group and AcrPush on the registry. Used by azure/login
 #                       and by az acr login, so no ACR admin user is needed.
+#
+# Optional, for the functional smoke job at the end:
+#   SMOKE_AGENT_KEY     (secret) a read-only agent key on every enabled service;
+#                       docs/customer-go-live.md item 10.5. Unset skips the job.
+#   SMOKE_EXPECT_SERVICES  (variable) the services that key should reach.
 
 # An automatic deploy starts when CI finishes on main, not when main moves. On
 # a push trigger this workflow raced CI on the same commit, so a red main
@@ -122,6 +127,8 @@ jobs:
     permissions:
       contents: read
       actions: write  # docker/build-push-action GHA cache backend
+    outputs:
+      fqdn: ${{ steps.smoke.outputs.fqdn }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -323,6 +330,7 @@ jobs:
       # catch-all masking a dead /health route, and a post-login redirect
       # pointing at a path the Functions host reserves.
       - name: Post-deploy smoke
+        id: smoke
         env:
           EXPECTED_SHA: ${{ env.DEPLOY_SHA }}
         run: |
@@ -332,6 +340,7 @@ jobs:
             --name "${CONTAINER_APP_NAME}" \
             --resource-group "${AZURE_RESOURCE_GROUP}" \
             --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "fqdn=${FQDN}" >> "$GITHUB_OUTPUT"
 
           # 1. /health must serve JSON carrying the commit we just shipped.
           deadline=$(( $(date +%s) + 300 ))
@@ -382,3 +391,79 @@ jobs:
             exit 1
           fi
           echo "frontend OK — ${FRONTEND_URL} serves the admin SPA"
+
+  # The steps above prove the right image is serving. This job proves it works:
+  # one real Graph read per service, under a read-only agent key, and the
+  # refusals such a key must get (scripts/post-deploy-smoke.js). The unit suite
+  # mocks Graph, so a missing consent, a storage client built the wrong way or a
+  # query option Graph rejects all pass CI and fail the first live call; this is
+  # where that first call happens.
+  #
+  # Optional. Set the repository SECRET SMOKE_AGENT_KEY to an agent key minted
+  # read-only on every service the tenant enables (docs/customer-go-live.md item
+  # 10.5); without it the job passes with a notice. Optionally set the
+  # repository VARIABLE SMOKE_EXPECT_SERVICES (e.g. mail,calendar,sharepoint) so
+  # a service that drops out of tools/list fails instead of going untested.
+  #
+  # A failure fails the run and opens an issue on this repository, or comments
+  # on the one already open. Issues are off by default on a fork; turn them on,
+  # or the failed run is the only signal.
+  functional-smoke:
+    name: Functional smoke (read-only agent key)
+    needs: build-push-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      - name: Probe the live instance
+        id: probe
+        env:
+          SMOKE_AGENT_KEY: ${{ secrets.SMOKE_AGENT_KEY }}
+          SMOKE_EXPECT_SERVICES: ${{ vars.SMOKE_EXPECT_SERVICES }}
+          SMOKE_REPORT_FILE: ${{ runner.temp }}/smoke-report.md
+          FQDN: ${{ needs.build-push-deploy.outputs.fqdn }}
+          EXPECTED_SHA: ${{ env.DEPLOY_SHA }}
+        run: |
+          set -euo pipefail
+          if [ -z "$FQDN" ]; then
+            echo "::error::the deploy job did not report the app's FQDN"
+            exit 1
+          fi
+          node scripts/post-deploy-smoke.js "https://${FQDN}" "$EXPECTED_SHA"
+
+      - name: Open an issue on a regression
+        if: failure() && steps.probe.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REPORT: ${{ runner.temp }}/smoke-report.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          TITLE="Post-deploy functional smoke failing"
+          {
+            echo "The functional smoke failed after deploying \`${DEPLOY_SHA}\`: ${RUN_URL}"
+            echo
+            if [ -s "$REPORT" ]; then cat "$REPORT"; else echo "The probe wrote no report; read the run log."; fi
+            echo
+            echo "What each check means and what to do: docs/operations-runbook.md, Functional smoke."
+          } > "${RUNNER_TEMP}/issue.md"
+          existing=$(gh issue list --state open --search "in:title \"${TITLE}\"" --json number,title \
+            --jq "map(select(.title == \"${TITLE}\")) | .[0].number // empty" 2>/dev/null)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "${RUNNER_TEMP}/issue.md" \
+              || echo "::warning::could not comment on issue #${existing}"
+          else
+            gh issue create --title "$TITLE" --body-file "${RUNNER_TEMP}/issue.md" \
+              || echo "::warning::could not open an issue; are Issues enabled on ${GH_REPO}?"
+          fi

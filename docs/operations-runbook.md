@@ -711,7 +711,9 @@ finishes, the run skips and leaves the newer commit to its own CI run, so a slow
 CI run cannot roll an instance backwards. GitHub Actions builds, tags (`sha-<short>` \+ `latest`),
 rolls the Container App, and then runs a post-deploy smoke that waits for
 `/health` to report the commit it just built and checks the frontend URL serves
-the admin SPA. A green deploy run means the new commit is live.
+the admin SPA. A green deploy run means the new commit is live; with a
+`SMOKE_AGENT_KEY` set on the fork it also means one real read per service
+worked ([Functional smoke](#functional-smoke)).
 
 Before it rolls the image, the workflow converges the Container App's ingress
 `targetPort` to the port the image binds (8080 since the non-root image). The deploy only swaps the image and never applies Bicep, so
@@ -731,6 +733,48 @@ gh workflow run "Sync from canonical" -R your-org/your-deploy-fork
 gh workflow run the deploy workflow -R your-org/your-deploy-fork            # builds the fork head
 gh workflow run the deploy workflow -R your-org/your-deploy-fork -f tag=sha-<short>   # or an existing image
 ```
+
+### Functional smoke
+
+The deploy steps prove the right image is serving. The workflow's last job,
+**Functional smoke (read-only agent key)**, proves it works: it runs
+`scripts/post-deploy-smoke.js` against the app as the owner of a read-only
+[agent key](agent-api-keys.md#first-party-use-the-post-deploy-smoke), so every
+Graph call it makes is real. The unit suite mocks Graph and the storage SDK,
+which is why a missing consent, a storage client built the wrong way, or a query
+option Graph rejects for one endpoint can pass CI and fail the first live call.
+This job is that first call, made by the pipeline rather than by a user.
+
+It is optional. Without the repository secret `SMOKE_AGENT_KEY` the job passes
+with a notice. Setting it up is [go-live item 10.5](customer-go-live.md#10-first-user-first-call-sign-off).
+
+What it checks, in order, and what a failure usually means:
+
+| Check | Fails when | Look at |
+|---|---|---|
+| `/health` | Not JSON, or not the deployed sha | The deploy job's own smoke; this should not fail alone |
+| `initialize`, `tools/list` | `/api/mcp` errors or lists nothing | Console log for the request |
+| key recognised | `tools/list` shows `set_email_output_mode`, which no key is ever shown | The key was revoked, expired, or its owner signed out: mint a new one. Also what a tenant-settings read failure looks like, so check the console log if the key is good |
+| no write tool listed | The key can write somewhere | The key was minted or edited without read-only on every service; replace it. The write probes are skipped |
+| services as expected | Only with `SMOKE_EXPECT_SERVICES` set: a service missing from or added to `tools/list` | Tenant enabled services, the owner's per-user overrides, the key's policy |
+| `read <tool>` | A real read on a held service failed | The detail is Graph's error: a missing consent (item 2.4), a storage or Graph defect in the release. "Must sign in again" means the owner's refresh token lapsed, not a code fault |
+| `write <tool> refused` | A write on a read-only service was not refused as read-only | The read-only gate in `tools/call`. The probe's ids are refused by argument validation, so nothing was written |
+| `<service> outside the key refused` | A tool of a service the key does not hold answered | The key's service gate in `tools/call` |
+| `POST /api/mail/settings refused` | A key changed the owner's email output mode | `manageEmailSettings.ts`. The body only ever asks for draft |
+| admin API refused | `/api/manage/agent-keys` answered a bearer key | The console-session check (threat model 7.3) |
+| logout refused | A key signed its owner out | `logout.ts`. A broken gate here ends every session the owner has, the key's included, so the next run fails at "key recognised" too |
+
+A failure fails the deploy run and opens an issue titled *Post-deploy
+functional smoke failing* on the fork with the table above filled in, or
+comments on the one already open. GitHub turns Issues off on a new fork; turn
+them on, or the red run is the only signal. A failed smoke does not roll back:
+the instance stays on the new revision, and the decision to roll back
+([Rollback](#rollback)) is the operator's, since most failures here are a
+credential or consent to fix rather than a bad image.
+
+Every probe call is audited under the key's device label
+(`agent-key:<label>#<keyId>`), so a run shows in the audit log as a short burst
+of `allowed` reads and `denied` refusals from that label.
 
 ### Manual deploy
 ```

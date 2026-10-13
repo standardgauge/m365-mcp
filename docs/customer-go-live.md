@@ -786,7 +786,31 @@ this item shows they hold on this deployment, with this configuration.
 - [ ] **10.4 Re-run the live checks that waited on a running image**: 2.5,
       3.3, 5.4, 7.3.
 
-- [ ] **10.5 Sign off.** The record is complete, every check has a result,
+- [ ] **10.5 Functional smoke key.** As the Global Administrator, mint an
+      [agent key](agent-api-keys.md#first-party-use-the-post-deploy-smoke)
+      under **My Settings → Agent Keys**: label `deploy-smoke`, every service
+      enabled in 8.2, every one of them read-only, no site restriction, 365
+      days, reminder on. Store it on the fork without displaying it, and turn
+      Issues on so a failing smoke has somewhere to report. This needs the
+      key policy from 8.10 to allow keys; a tenant that turns keys off runs
+      without the smoke, and the record says so.
+
+  ```bash
+  gh secret set SMOKE_AGENT_KEY -R <owner>/<fork>          # paste at the prompt
+  gh variable set SMOKE_EXPECT_SERVICES -R <owner>/<fork> --body "mail,sharepoint"   # the 8.2 list
+  gh repo edit <owner>/<fork> --enable-issues
+  gh workflow run Deploy -R <owner>/<fork> && gh run watch -R <owner>/<fork>
+  ```
+
+  Check: the run's **Functional smoke (read-only agent key)** job is green and
+  its summary shows a passed read for every enabled service and every refusal
+  (write, service outside the key, `POST /api/mail/settings`, the admin API,
+  logout). A job that passes with the notice *SMOKE_AGENT_KEY is not set* has
+  not run. From here every deploy repeats this item unattended
+  ([functional smoke](operations-runbook.md#functional-smoke)); the key's
+  replacement date is on the administrator's calendar.
+
+- [ ] **10.6 Sign off.** The record is complete, every check has a result,
       and the people in the roles table have each initialled their items.
       Only now:
 
@@ -846,4 +870,5 @@ it in as you go. A blank cell is an item not done.
 | 8 | Each policy value as set; the CSV export from 8.9 attached | | | |
 | 9 | Served origin check result; extension version; distribution channel | | | |
 | 10 | Pilot user; the allowed and denied rows from 10.2 and 10.3; `AUTO_UPDATE` state | | | |
+| 10.5 | Smoke key id, owner and expiry date; `SMOKE_EXPECT_SERVICES`; the first green smoke run | | | |
 | Sign-off | Names and initials for each role in the roles table | | | |
