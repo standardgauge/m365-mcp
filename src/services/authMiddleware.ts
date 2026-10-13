@@ -173,7 +173,11 @@ async function authenticateAgentKey(token: string): Promise<AuthResult | null | 
     return refuse('the key and its session disagree on identity');
   }
 
-  const result = await authenticateSession(session);
+  // The key's session was minted with the key and anchored at its creation,
+  // so its absolute cap is the key's own lifetime (owner-chosen, within the
+  // tenant maximum), not the 30 days a sign-in gets. expiresAt was already
+  // checked above; this keeps the cap honest if the two ever disagree.
+  const result = await authenticateSession(session, Math.max(0, record.expiresAt - record.createdAt));
   if (!result) return null;
 
   if (now - record.lastUsedAt > AGENT_KEY_TOUCH_INTERVAL_MS) {
@@ -197,10 +201,10 @@ async function authenticateAgentKey(token: string): Promise<AuthResult | null | 
  * silent refresh, sliding-window touch. Shared by the session-token and
  * agent-key paths.
  */
-async function authenticateSession(session: UserSession): Promise<AuthResult | null> {
+async function authenticateSession(session: UserSession, maxLifetimeMs?: number): Promise<AuthResult | null> {
   // Reject sessions past absolute lifetime before any refresh/touch —
   // prevents silent-renewal of a stolen token through normal request paths.
-  if (isAbsoluteLifetimeExceeded(session)) {
+  if (isAbsoluteLifetimeExceeded(session, Date.now(), maxLifetimeMs)) {
     console.warn(
       `[auth] Session for user ${session.userId} exceeded absolute lifetime — forcing re-OAuth`
     );

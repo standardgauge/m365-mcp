@@ -91,13 +91,13 @@ describe('effectiveAgentKeyPolicy', () => {
   });
 
   it('drops services the tenant disables for keys and adds the tenant read-only set', () => {
-    const r = effectiveAgentKeyPolicy(key, { allowKeys: true, disabledServices: ['mail'], readOnlyServices: ['sharepoint', 'teams'] });
+    const r = effectiveAgentKeyPolicy(key, { allowKeys: true, disabledServices: ['mail'], readOnlyServices: ['sharepoint', 'teams'], maxKeyLifetimeDays: 365 });
     expect(r.services).toEqual(['sharepoint', 'calendar']);
     expect(r.readOnlyServices.sort()).toEqual(['calendar', 'sharepoint']);
   });
 
   it('never widens: a tenant policy cannot add a service the key lacks', () => {
-    const r = effectiveAgentKeyPolicy({ services: ['mail'], readOnlyServices: [], allowedSites: [] }, { allowKeys: true, disabledServices: [], readOnlyServices: [] });
+    const r = effectiveAgentKeyPolicy({ services: ['mail'], readOnlyServices: [], allowedSites: [] }, { allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365 });
     expect(r.services).toEqual(['mail']);
   });
 
@@ -136,11 +136,17 @@ describe('narrowAllowedSites', () => {
 });
 
 describe('normalizeTenantAgentKeyPolicy', () => {
-  it('defaults to keys allowed with no restrictions', () => {
-    expect(normalizeTenantAgentKeyPolicy(undefined)).toEqual({ allowKeys: true, disabledServices: [], readOnlyServices: [] });
+  it('defaults to keys allowed with no restrictions and a one-year maximum lifetime', () => {
+    expect(normalizeTenantAgentKeyPolicy(undefined)).toEqual({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365 });
   });
   it('keeps only known service keys', () => {
-    expect(normalizeTenantAgentKeyPolicy({ allowKeys: false, disabledServices: ['mail', 'bogus'], readOnlyServices: ['teams', 'teams'] }))
-      .toEqual({ allowKeys: false, disabledServices: ['mail'], readOnlyServices: ['teams'] });
+    expect(normalizeTenantAgentKeyPolicy({ allowKeys: false, disabledServices: ['mail', 'bogus'], readOnlyServices: ['teams', 'teams'], maxKeyLifetimeDays: 365 }))
+      .toEqual({ allowKeys: false, disabledServices: ['mail'], readOnlyServices: ['teams'], maxKeyLifetimeDays: 365 });
+  });
+  it('keeps a valid maximum lifetime and falls back to a year otherwise', () => {
+    expect(normalizeTenantAgentKeyPolicy({ maxKeyLifetimeDays: 30 }).maxKeyLifetimeDays).toBe(30);
+    expect(normalizeTenantAgentKeyPolicy({ maxKeyLifetimeDays: 0 }).maxKeyLifetimeDays).toBe(365);
+    expect(normalizeTenantAgentKeyPolicy({ maxKeyLifetimeDays: 9999 }).maxKeyLifetimeDays).toBe(365);
+    expect(normalizeTenantAgentKeyPolicy({ maxKeyLifetimeDays: 2.5 }).maxKeyLifetimeDays).toBe(365);
   });
 });

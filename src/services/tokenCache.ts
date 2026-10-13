@@ -118,10 +118,14 @@ export interface UserSession {
  * is inside the cap, and such a row predates both fields, so it fails closed
  * and the user signs in again.
  */
-export function isAbsoluteLifetimeExceeded(session: UserSession, now = Date.now()): boolean {
+export function isAbsoluteLifetimeExceeded(
+  session: UserSession,
+  now = Date.now(),
+  maxLifetimeMs = SESSION_MAX_LIFETIME_MS,
+): boolean {
   const anchor = session.sessionAbsoluteCreatedAt || session.sessionCreatedAt;
   if (!anchor) return true;
-  return (now - anchor) > SESSION_MAX_LIFETIME_MS;
+  return (now - anchor) > maxLifetimeMs;
 }
 
 /**

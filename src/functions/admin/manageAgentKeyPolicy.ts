@@ -4,7 +4,7 @@ import { auditActor, auditSnapshot, logAccess } from '../../services/auditLog.js
 import { withSecurity } from '../../services/securityHeaders.js';
 import { getTenantIdFromSession } from '../../services/tokenCache.js';
 import { ALL_SERVICE_KEYS } from '../../services/serviceSettings.js';
-import { getTenantAgentKeyPolicy, normalizeTenantAgentKeyPolicy, setTenantAgentKeyPolicy } from '../../services/agentKeys.js';
+import { AGENT_KEY_MAX_LIFETIME_DAYS, getTenantAgentKeyPolicy, normalizeTenantAgentKeyPolicy, setTenantAgentKeyPolicy } from '../../services/agentKeys.js';
 import type { TenantAgentKeyPolicy } from '../../services/agentKeys.js';
 
 /**
@@ -13,7 +13,7 @@ import type { TenantAgentKeyPolicy } from '../../services/agentKeys.js';
  * GET  /api/manage/agent-key-policy   any signed-in console user, so the key
  *                                     form can show what a key may be granted
  * POST /api/manage/agent-key-policy   Global Administrator
- *      { allowKeys?, disabledServices?, readOnlyServices? }
+ *      { allowKeys?, disabledServices?, readOnlyServices?, maxKeyLifetimeDays? }
  *
  * The policy is read on every key-authenticated request, so a change here
  * applies to existing keys at once; nothing has to be re-minted.
@@ -33,8 +33,14 @@ async function manageAgentKeyPolicy(request: HttpRequest, context: InvocationCon
 
     const body = (await request.json().catch(() => null)) as Partial<Record<keyof TenantAgentKeyPolicy, unknown>> | null;
     if (!body || typeof body !== 'object') return { status: 400, jsonBody: { error: 'JSON body required' } };
-    if (body.allowKeys === undefined && body.disabledServices === undefined && body.readOnlyServices === undefined) {
-      return { status: 400, jsonBody: { error: 'Provide allowKeys, disabledServices and/or readOnlyServices' } };
+    if (body.allowKeys === undefined && body.disabledServices === undefined && body.readOnlyServices === undefined && body.maxKeyLifetimeDays === undefined) {
+      return { status: 400, jsonBody: { error: 'Provide allowKeys, disabledServices, readOnlyServices and/or maxKeyLifetimeDays' } };
+    }
+    if (body.maxKeyLifetimeDays !== undefined) {
+      const d = Number(body.maxKeyLifetimeDays);
+      if (!Number.isInteger(d) || d < 1 || d > AGENT_KEY_MAX_LIFETIME_DAYS) {
+        return { status: 400, jsonBody: { error: `maxKeyLifetimeDays must be an integer from 1 to ${AGENT_KEY_MAX_LIFETIME_DAYS}` } };
+      }
     }
     for (const field of ['disabledServices', 'readOnlyServices'] as const) {
       // eslint-disable-next-line security/detect-object-injection -- field iterates a literal tuple
@@ -55,6 +61,7 @@ async function manageAgentKeyPolicy(request: HttpRequest, context: InvocationCon
       allowKeys: body.allowKeys === undefined ? before.allowKeys : (body.allowKeys as boolean),
       disabledServices: body.disabledServices === undefined ? before.disabledServices : (body.disabledServices as string[]),
       readOnlyServices: body.readOnlyServices === undefined ? before.readOnlyServices : (body.readOnlyServices as string[]),
+      maxKeyLifetimeDays: body.maxKeyLifetimeDays === undefined ? before.maxKeyLifetimeDays : Number(body.maxKeyLifetimeDays),
     });
     await setTenantAgentKeyPolicy(tenantId, next);
     logAccess({

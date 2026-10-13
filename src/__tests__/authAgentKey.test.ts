@@ -32,9 +32,9 @@ jest.mock('../services/tokenCache.js', () => ({
   getSessionByStorageKey: (k: unknown) => mockGetSessionByStorageKey(k as string),
   storeSession: (s: unknown) => mockStoreSession(s as UserSession),
   getValidAccessToken: async () => 'at',
-  isAbsoluteLifetimeExceeded: (s: UserSession, now = Date.now()) => {
+  isAbsoluteLifetimeExceeded: (s: UserSession, now = Date.now(), maxLifetimeMs = 30 * 24 * 60 * 60 * 1000) => {
     const anchor = s.sessionAbsoluteCreatedAt || s.sessionCreatedAt;
-    return !anchor || now - anchor > 30 * 24 * 60 * 60 * 1000;
+    return !anchor || now - anchor > maxLifetimeMs;
   },
   SESSION_TTL_MS: 7 * 24 * 60 * 60 * 1000,
 }));
@@ -74,7 +74,7 @@ function record(over: Partial<AgentKeyRecord> = {}): AgentKeyRecord {
     keyId: 'abc123def456', tenantId: TENANT, userId: USER, userEmail: 'adele@fabrikam.com', label: 'nightly',
     sessionStorageKey: 'row-key-1',
     policy: { services: ['mail', 'sharepoint'], readOnlyServices: ['mail'], allowedSites: [] },
-    createdAt: Date.now() - 1000, expiresAt: 0, lastUsedAt: 0, revokedAt: 0, _storageKey: 'k-row', ...over,
+    createdAt: Date.now() - 1000, expiresAt: Date.now() + 90 * 24 * 60 * 60 * 1000, lastUsedAt: 0, revokedAt: 0, _storageKey: 'k-row', ...over,
   };
 }
 function req(token: string): HttpRequest {
@@ -87,7 +87,7 @@ beforeEach(() => {
   mockGetSessionByStorageKey.mockResolvedValue(session());
   mockStoreSession.mockResolvedValue();
   mockLoadKey.mockResolvedValue(record());
-  mockTenantPolicy.mockResolvedValue({ allowKeys: true, disabledServices: [], readOnlyServices: [] });
+  mockTenantPolicy.mockResolvedValue({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365 });
   mockTouch.mockResolvedValue();
 });
 
@@ -115,7 +115,7 @@ describe('authenticateRequest with an agent key', () => {
   });
 
   it("applies the tenant's key policy on top of the key's own", async () => {
-    mockTenantPolicy.mockResolvedValue({ allowKeys: true, disabledServices: ['sharepoint'], readOnlyServices: ['mail', 'calendar'] });
+    mockTenantPolicy.mockResolvedValue({ allowKeys: true, disabledServices: ['sharepoint'], readOnlyServices: ['mail', 'calendar'], maxKeyLifetimeDays: 365 });
     const auth = await authenticateRequest(req(KEY));
     expect(auth!.session.agentKey!.policy).toEqual({ services: ['mail'], readOnlyServices: ['mail'], allowedSites: [] });
   });
@@ -139,7 +139,7 @@ describe('authenticateRequest with an agent key', () => {
   });
 
   it('refuses every key when the tenant has disabled them', async () => {
-    mockTenantPolicy.mockResolvedValue({ allowKeys: false, disabledServices: [], readOnlyServices: [] });
+    mockTenantPolicy.mockResolvedValue({ allowKeys: false, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365 });
     expect(await authenticateRequest(req(KEY))).toBeNull();
     expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ result: 'denied', reason: expect.stringContaining('disabled') }));
   });
@@ -155,9 +155,16 @@ describe('authenticateRequest with an agent key', () => {
     expect(await authenticateRequest(req(KEY))).toBeNull();
   });
 
-  it('applies the absolute lifetime cap of the bound session', async () => {
-    const old = Date.now() - 31 * 24 * 60 * 60 * 1000;
-    mockGetSessionByStorageKey.mockResolvedValue(session({ sessionCreatedAt: old, sessionAbsoluteCreatedAt: old }));
+  it("caps the bound session by the key's own lifetime, not the 30-day sign-in cap", async () => {
+    const day = 24 * 60 * 60 * 1000;
+    // A 90-day key, 45 days in: past the 30-day cap a sign-in would get, still inside its own.
+    const created = Date.now() - 45 * day;
+    mockLoadKey.mockResolvedValue(record({ createdAt: created, expiresAt: created + 90 * day }));
+    mockGetSessionByStorageKey.mockResolvedValue(session({ sessionCreatedAt: Date.now() - day, sessionAbsoluteCreatedAt: created }));
+    expect(await authenticateRequest(req(KEY))).not.toBeNull();
+
+    // The same key with its session's anchor somehow older than the key's lifetime is refused.
+    mockGetSessionByStorageKey.mockResolvedValue(session({ sessionCreatedAt: Date.now() - day, sessionAbsoluteCreatedAt: Date.now() - 100 * day }));
     expect(await authenticateRequest(req(KEY))).toBeNull();
   });
 

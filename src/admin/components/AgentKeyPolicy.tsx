@@ -6,7 +6,7 @@ const SERVICE_LABELS: Record<string, string> = {
 };
 const SERVICE_ORDER = ['mail', 'sharepoint', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams'];
 
-interface TenantPolicy { allowKeys: boolean; disabledServices: string[]; readOnlyServices: string[] }
+interface TenantPolicy { allowKeys: boolean; disabledServices: string[]; readOnlyServices: string[]; maxKeyLifetimeDays: number }
 interface AgentKey {
   keyId: string; label: string; userId: string; userEmail: string;
   policy: { services: string[]; readOnlyServices: string[]; allowedSites: Array<{ id: string; name: string }> };
@@ -25,6 +25,7 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [confirmRevoke, setConfirmRevoke] = useState<AgentKey | null>(null);
+  const [maxDaysDraft, setMaxDaysDraft] = useState<string>('');
 
   const headers = { 'x-user-id': userId, 'Content-Type': 'application/json' };
   const flash = (kind: 'ok' | 'error', text: string) => {
@@ -38,7 +39,11 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
         fetch('/api/manage/agent-key-policy', { credentials: 'same-origin', headers: { 'x-user-id': userId } }),
         fetch('/api/manage/agent-keys?all=true', { credentials: 'same-origin', headers: { 'x-user-id': userId } }),
       ]);
-      if (p.ok) setPolicy((await p.json()) as TenantPolicy);
+      if (p.ok) {
+        const tp = (await p.json()) as TenantPolicy;
+        setPolicy(tp);
+        setMaxDaysDraft(String(tp.maxKeyLifetimeDays));
+      }
       if (k.ok) setKeys(((await k.json()) as { keys: AgentKey[] }).keys); else setKeys([]);
     } catch (err: unknown) {
       flash('error', err instanceof Error ? err.message : String(err));
@@ -53,7 +58,8 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
       const res = await fetch('/api/manage/agent-key-policy', { method: 'POST', credentials: 'same-origin', headers, body: JSON.stringify(patch) });
       const data = (await res.json()) as TenantPolicy & { error?: string };
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-      setPolicy({ allowKeys: data.allowKeys, disabledServices: data.disabledServices, readOnlyServices: data.readOnlyServices });
+      setPolicy({ allowKeys: data.allowKeys, disabledServices: data.disabledServices, readOnlyServices: data.readOnlyServices, maxKeyLifetimeDays: data.maxKeyLifetimeDays });
+      setMaxDaysDraft(String(data.maxKeyLifetimeDays));
       flash('ok', 'Saved.');
     } catch (err: unknown) {
       flash('error', err instanceof Error ? err.message : String(err));
@@ -87,8 +93,9 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
         Users mint agent keys under My Settings for apps and agents they run. A key is bound to the
         user's own delegated session and can only be narrower than it. The settings here apply to
         every key in the organization, existing ones included, on the next request: turn keys off
-        entirely, take services away from all keys, or make a service read-only for all keys even
-        where it is writable for the user.
+        entirely, take services away from all keys, make a service read-only for all keys even
+        where it is writable for the user, or cap how long a key may live. A key's lifetime is its
+        own, chosen by the owner within that cap, and is not tied to the 30-day sign-in cap.
       </p>
       {policy === null ? (
         <p style={{ color: '#666', fontSize: 13 }}>Loading policy…</p>
@@ -106,6 +113,16 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
               {!policy.allowKeys && <span className="override-badge">Off</span>}
             </div>
           </div>
+
+          <div className="service-name" style={{ margin: '12px 0 4px' }}>Longest key lifetime</div>
+          <p style={{ fontSize: 13, margin: '0 0 8px' }}>
+            <input type="number" min={1} max={365} value={maxDaysDraft} disabled={saving}
+              onChange={(e) => setMaxDaysDraft(e.target.value)} style={{ width: 80 }} />{' '}
+            days (1 to 365){' '}
+            <button type="button" className="confirm-btn" disabled={saving || Number(maxDaysDraft) === policy.maxKeyLifetimeDays || !Number.isInteger(Number(maxDaysDraft)) || Number(maxDaysDraft) < 1 || Number(maxDaysDraft) > 365}
+              onClick={() => save({ maxKeyLifetimeDays: Number(maxDaysDraft) })}>Save</button>
+            <span className="service-desc" style={{ marginLeft: 8 }}>Applies to keys minted from now on; existing keys keep the lifetime they were given.</span>
+          </p>
 
           <div className="service-name" style={{ margin: '12px 0 4px' }}>Per service, for every key</div>
           <table className="deny-table">
@@ -150,7 +167,7 @@ export default function AgentKeyPolicy({ userId, enabledServices }: Props) {
                 <td>{k.policy.services.map((s) => SERVICE_LABELS[s] ?? s).join(', ')}</td>
                 <td>{k.policy.readOnlyServices.length ? k.policy.readOnlyServices.map((s) => SERVICE_LABELS[s] ?? s).join(', ') : '—'}</td>
                 <td>{k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : 'never'}</td>
-                <td>{k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'with session'}</td>
+                <td>{k.expiresAt ? new Date(k.expiresAt).toLocaleString() : '—'}</td>
                 <td><button type="button" className="remove-btn" onClick={() => setConfirmRevoke(k)}>Revoke</button></td>
               </tr>
             ))}

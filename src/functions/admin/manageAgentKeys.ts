@@ -5,7 +5,8 @@ import { auditActor, auditSnapshot, logAccess } from '../../services/auditLog.js
 import { withSecurity } from '../../services/securityHeaders.js';
 import { getEnabledServices } from '../../services/serviceSettings.js';
 import { getUserServiceOverrides } from '../../services/userServiceOverrides.js';
-import { storeSession, deleteSessionByKey, getTenantIdFromSession } from '../../services/tokenCache.js';
+import { storeSession, deleteSessionByKey, getSessionByStorageKey, getTenantIdFromSession } from '../../services/tokenCache.js';
+import { createKeyExpiryReminder, deleteKeyExpiryReminder } from '../../services/agentKeyReminder.js';
 import type { UserSession } from '../../services/tokenCache.js';
 import {
   AGENT_KEY_LABEL_MAX,
@@ -19,6 +20,7 @@ import {
   listAgentKeys,
   markAgentKeyRevoked,
   publicAgentKey,
+  setAgentKeyReminder,
   validateRequestedPolicy,
 } from '../../services/agentKeys.js';
 import type { AgentKeyPolicy } from '../../services/agentKeys.js';
@@ -31,15 +33,18 @@ import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from '../..
  * GET    /api/manage/agent-keys?all=true        every key in the tenant (Global Administrator)
  * GET    /api/manage/agent-keys?userId=<id>     one user's keys (Global Administrator, or self)
  * POST   /api/manage/agent-keys                 mint a key for the caller
- *        { label, services, readOnlyServices?, allowedSites?, expiresInDays? }
- *        → { key, ...publicAgentKey }   the key value appears in this response only
+ *        { label, services, expiresInDays, readOnlyServices?, allowedSites?, reminder? }
+ *        → { key, ...publicAgentKey, reminder }   the key value appears in this response only
  * DELETE /api/manage/agent-keys?keyId=<id>      revoke; own keys, or any key as Global Administrator
  *
  * Browser-only, like every /api/manage route: a console session is required,
  * so neither an installed client's token nor an agent key can mint or list
  * keys (threat model 7.3). A key is bound to a fresh `client` session of the
- * caller that inherits their absolute-lifetime anchor, the same way the
- * install flow mints an installer's session.
+ * caller, minted the way the install flow mints an installer's session but
+ * anchored at the key's creation: its absolute cap is the key's own lifetime,
+ * chosen by the owner within the tenant's maximum, not the 30 days a sign-in
+ * gets. With `reminder` (the default) a short event goes on the owner's own
+ * calendar a few days before expiry (services/agentKeyReminder.ts).
  */
 async function manageAgentKeys(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   try {
@@ -75,6 +80,16 @@ async function manageAgentKeys(request: HttpRequest, context: InvocationContext)
       }
       if (!record.revokedAt) {
         await markAgentKeyRevoked(record, auth.userId);
+        if (record.reminderEventId) {
+          // The key's own session is the owner's delegated session, so it can
+          // remove the owner's reminder whoever is revoking. Best effort.
+          try {
+            const keySession = await getSessionByStorageKey(record.sessionStorageKey);
+            if (keySession) await deleteKeyExpiryReminder(keySession, record.reminderEventId);
+          } catch (err: unknown) {
+            context.warn(`[agent-keys] reminder for key ${keyId} not removed:`, err instanceof Error ? err.message : err);
+          }
+        }
         await deleteSessionByKey(record.sessionStorageKey, record.userId);
         logAccess({
           ...auditActor(auth.session),
@@ -103,7 +118,7 @@ async function manageAgentKeys(request: HttpRequest, context: InvocationContext)
     }
 
     const body = (await request.json().catch(() => null)) as {
-      label?: unknown; services?: unknown; readOnlyServices?: unknown; allowedSites?: unknown; expiresInDays?: unknown;
+      label?: unknown; services?: unknown; readOnlyServices?: unknown; allowedSites?: unknown; expiresInDays?: unknown; reminder?: unknown;
     } | null;
     if (!body || typeof body !== 'object') return { status: 400, jsonBody: { error: 'JSON body required' } };
 
@@ -112,14 +127,14 @@ async function manageAgentKeys(request: HttpRequest, context: InvocationContext)
     if (label.length > AGENT_KEY_LABEL_MAX) return { status: 400, jsonBody: { error: `label must be at most ${AGENT_KEY_LABEL_MAX} characters` } };
     if (/[#\r\n]/.test(label)) return { status: 400, jsonBody: { error: 'label may not contain "#" or line breaks' } };
 
-    let expiresAt = 0;
-    if (body.expiresInDays !== undefined && body.expiresInDays !== null) {
-      const days = Number(body.expiresInDays);
-      if (!Number.isInteger(days) || days < 1 || days > AGENT_KEY_MAX_LIFETIME_DAYS) {
-        return { status: 400, jsonBody: { error: `expiresInDays must be an integer from 1 to ${AGENT_KEY_MAX_LIFETIME_DAYS}` } };
-      }
-      expiresAt = Date.now() + days * 86_400_000;
+    // Lifetime is required: the key's session is capped by it, so there is no
+    // such thing as a key without one. The tenant policy bounds it.
+    const maxDays = Math.min(AGENT_KEY_MAX_LIFETIME_DAYS, policy.maxKeyLifetimeDays);
+    const days = Number(body.expiresInDays);
+    if (body.expiresInDays === undefined || body.expiresInDays === null || !Number.isInteger(days) || days < 1 || days > maxDays) {
+      return { status: 400, jsonBody: { error: `expiresInDays must be an integer from 1 to ${maxDays} (the organization's maximum)` } };
     }
+    const wantReminder = body.reminder !== false;
 
     // What this user may grant: what they can reach themselves, less what the
     // tenant's key policy takes from every key.
@@ -139,6 +154,7 @@ async function manageAgentKeys(request: HttpRequest, context: InvocationContext)
     const keyId = generateAgentKeyId();
     const token = generateAgentKeyToken();
     const now = Date.now();
+    const expiresAt = now + days * 86_400_000;
     const browser = auth.session;
     const keySession: UserSession = {
       userId: browser.userId,
@@ -150,7 +166,9 @@ async function manageAgentKeys(request: HttpRequest, context: InvocationContext)
       expiresAt: browser.expiresAt,
       sessionToken: randomBytes(32).toString('hex'),
       sessionCreatedAt: now,
-      sessionAbsoluteCreatedAt: browser.sessionAbsoluteCreatedAt || browser.sessionCreatedAt || now,
+      // Its own anchor: the key's lifetime is the cap, enforced in
+      // authenticateAgentKey from the key row's createdAt and expiresAt.
+      sessionAbsoluteCreatedAt: now,
       deviceLabel: agentKeyDeviceLabel(label, keyId),
       kind: 'client',
     };
@@ -173,12 +191,38 @@ async function manageAgentKeys(request: HttpRequest, context: InvocationContext)
       resource: `key:${keyId}`,
       result: 'allowed',
       source: 'http',
-      after: auditSnapshot({ label, policy: validated.policy, expiresAt: expiresAt || null }),
+      after: auditSnapshot({ label, policy: validated.policy, expiresAt }),
     });
+
+    // Calendar reminder, as the owner, on the owner's own calendar. Never fatal.
+    let reminder: { eventId: string } | { skipped: string } | { error: string } = { skipped: 'not requested' };
+    if (wantReminder) {
+      try {
+        const eventId = await createKeyExpiryReminder(browser, record);
+        if (eventId) {
+          await setAgentKeyReminder(record, eventId);
+          reminder = { eventId };
+        } else {
+          reminder = { skipped: 'key is too short-lived for a reminder' };
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        context.warn(`[agent-keys] reminder for key ${keyId} not created:`, message);
+        logAccess({
+          ...auditActor(auth.session),
+          operation: 'policy.agent_key.reminder',
+          resource: `key:${keyId}`,
+          result: 'denied',
+          reason: `calendar reminder not created: ${message}`,
+          source: 'http',
+        });
+        reminder = { error: 'The key was created, but the calendar reminder could not be.' };
+      }
+    }
     return {
       status: 201,
       headers: { 'Cache-Control': 'no-store' },
-      jsonBody: { key: token, ...publicAgentKey(record) },
+      jsonBody: { key: token, ...publicAgentKey(record), reminder },
     };
   } catch (err: unknown) {
     if (err instanceof SessionStoreUnavailableError) {

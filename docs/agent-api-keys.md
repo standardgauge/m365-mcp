@@ -33,11 +33,15 @@ On top of the user's and the tenant's policy, a key carries its own:
 | `services` | The services the key may use | narrow: a subset of what the user can use |
 | `readOnlyServices` | Services whose write tools the key may not call | narrow: adds to the tenant's read-only set |
 | `allowedSites` | SharePoint sites the key may see | narrow: intersects the tenant's allow-list |
+| `expiresInDays` | How long the key lives, 1 to 365 | bound by the tenant's maximum |
 
 A Global Administrator sets a tenant-wide **key policy** that no key can
 loosen: keys on or off, services no key may use, services every key is
-read-only on. Both the key's policy and the tenant's are read on every
-request, so tightening either applies to existing keys at once.
+read-only on, and the longest lifetime a key may be given
+(`maxKeyLifetimeDays`, default 365). The policy is read on every request,
+so tightening it applies to existing keys at once; a lowered maximum applies
+to keys minted from then on, since existing keys keep the lifetime they were
+given.
 
 The policy in force is the intersection, computed in
 `effectiveAgentKeyPolicy` ([`agentKeys.ts`](../src/services/agentKeys.ts)):
@@ -59,12 +63,13 @@ list tiers, draft mode and its enforcement, outbound policy.
 
 Minting a key creates two rows.
 
-1. A **client session** in `mcpSessions`, exactly as the install flow mints
-   one for an installed client: same user, same `homeAccountId`, a fresh
-   random session token nobody is given, `kind: client`, and the browser
-   session's immutable absolute-lifetime anchor, so the key can never outlive
-   the sign-in that created it (30 days). Its device label is
-   `agent-key:<label>#<keyId>`.
+1. A **client session** in `mcpSessions`, the way the install flow mints one
+   for an installed client: same user, same `homeAccountId`, a fresh random
+   session token nobody is given, `kind: client`, device label
+   `agent-key:<label>#<keyId>`. Unlike an installer's session it is anchored
+   at the key's creation, not at the owner's sign-in: its absolute cap is the
+   key's own lifetime, so a one-year key lives a year. See **Lifetime** below
+   for why that is safe and what it costs.
 2. A **key row** in `agentKeys`, PartitionKey `key`, RowKey = HMAC(key)[:32],
    holding the full HMAC, the key's public id, owner, label, policy, expiry,
    and the RowKey of that session. The key value itself is stored nowhere and
@@ -83,15 +88,58 @@ every audit row written under the key already names it in `deviceLabel`, on
 the Table Storage row and in the Log Analytics stream, with no change to the
 audit schema. The admin sessions list shows it the same way.
 
+## Lifetime
+
+Every key has an expiry, chosen by the owner at creation, from one day to
+the tenant's maximum (365 by default). The key's session carries that as its
+absolute cap in place of the 30 days a sign-in gets
+(`authenticateSession(session, expiresAt − createdAt)`), so the two never
+disagree and nothing else about session handling changes.
+
+This is a deliberate loosening of the 30-day rule, for a credential that is
+meant to run unattended. What makes it acceptable:
+
+- The owner picks the lifetime and the tenant caps it. An administrator who
+  wants keys no longer than a sign-in sets `maxKeyLifetimeDays` to 30.
+- Revocation is immediate (30 s across replicas) and available to both the
+  owner and the administrator, and the owner is told when expiry is near
+  (below).
+- The underlying Graph access still comes from the owner's refresh token.
+  Entra ends that on sign-in revocation, password reset or its own inactivity
+  rule (90 days unused by default), and the key's session ends with it at
+  its next renewal. A key used at least every few days keeps the refresh
+  token warm; a key unused for three months may find the owner has to sign
+  in again, which is the right outcome.
+- A session token still gets 30 days. Only a key, minted on purpose through
+  the browser with a chosen expiry, can live longer.
+
+### The reminder
+
+With `reminder` set (the form's default) the server puts a 30-minute event
+on the owner's own calendar before the key expires: seven days before for
+keys of two weeks or more, two days before for keys of four days or more,
+none for shorter keys. The event is at 09:00 in the mailbox's own time zone,
+shown as free, with an Outlook reminder at its start, and its body names the
+key, its id, what it may use, the exact expiry, and where to mint a
+replacement. Nobody is invited, so nothing is sent and the outbound policy is
+not involved. It is written with the owner's own delegated token
+(`Calendars.ReadWrite`, already consented for the calendar tools) by
+[`agentKeyReminder.ts`](../src/services/agentKeyReminder.ts).
+
+The reminder is best effort. If Graph refuses it the key is still created,
+the response says so, the attempt is audited as `policy.agent_key.reminder`
+denied, and the owner is told to note the date themselves. Revoking the key
+removes the event, as the owner, through the key's own session, so it works
+whether the owner or an administrator revokes.
+
 ## What ends a key
 
 | Event | Effect |
 |---|---|
-| Owner or admin revokes it | Row marked, session row deleted. Other replicas drop their cached session within `SESSION_REVALIDATE_MS` (30 s), the same bound as logout. |
-| Its own expiry (`expiresInDays`, at most 365) | Refused at the next request. |
+| Owner or admin revokes it | Row marked, calendar reminder removed, session row deleted. Other replicas drop their cached session within `SESSION_REVALIDATE_MS` (30 s), the same bound as logout. |
+| Its own expiry (`expiresInDays`, 1 to the tenant maximum, at most 365) | Refused at the next request. The key's session is capped by the same instant. |
 | The owner signs out, or their sessions are purged | `deleteAllUserSessions` removes the key's session too. Refused with "the session the key is bound to no longer exists". |
-| 30 days from the owner's sign-in | The inherited absolute cap. The owner signs in again and mints a new key. |
-| Entra revokes the owner's refresh token | The silent renewal fails at the next renewal window and the key's session ends. |
+| Entra revokes the owner's refresh token, or it lapses from inactivity | The silent renewal fails at the next renewal window and the key's session ends. |
 | Admin turns keys off for the tenant | Every key refused; existing rows kept so turning them back on restores them. |
 
 Revocation and refusals are audited as `auth.agent_key` denied, with the key
@@ -119,10 +167,10 @@ Enforced in code and covered by `agentKeyEnforcement.test.ts` and
 | Route | Who | Does |
 |---|---|---|
 | `GET /api/manage/agent-keys` | any console user | the caller's keys; `?all=true` or `?userId=` needs Global Administrator |
-| `POST /api/manage/agent-keys` | any console user | mint: `{ label, services, readOnlyServices?, allowedSites?, expiresInDays? }` → `201 { key, keyId, … }`, the key once |
+| `POST /api/manage/agent-keys` | any console user | mint: `{ label, services, expiresInDays, readOnlyServices?, allowedSites?, reminder? }` → `201 { key, keyId, reminder, … }`, the key once |
 | `DELETE /api/manage/agent-keys?keyId=` | owner, or Global Administrator | revoke |
 | `GET /api/manage/agent-key-policy` | any console user | the tenant's key policy, so the form can show what is grantable |
-| `POST /api/manage/agent-key-policy` | Global Administrator | `{ allowKeys?, disabledServices?, readOnlyServices? }`, merged over the stored policy |
+| `POST /api/manage/agent-key-policy` | Global Administrator | `{ allowKeys?, disabledServices?, readOnlyServices?, maxKeyLifetimeDays? }`, merged over the stored policy |
 
 Every change is audited with before and after: `policy.agent_key.create`,
 `policy.agent_key.revoke`, `policy.agent_key_policy.set`, and the admin
@@ -171,3 +219,4 @@ the remedy is revocation.
 - `authAgentKey.test.ts`: the authentication path, every refusal, the cap, touch rate, the refresh path.
 - `manageAgentKeys.test.ts`: both routes, console-only, minting binds a client session with the inherited anchor, admin boundaries, audit rows.
 - `agentKeyEnforcement.test.ts`: REST checks, `tools/list` and `tools/call` under a key, and the routes a key must never reach.
+- `agentKeyReminder.test.ts`: lead time by lifetime, the event's shape, failure handling, deletion.

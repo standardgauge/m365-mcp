@@ -10,9 +10,11 @@ interface SitePick { id: string; name: string }
 interface KeyPolicy { services: string[]; readOnlyServices: string[]; allowedSites: SitePick[] }
 interface AgentKey {
   keyId: string; label: string; userId: string; userEmail: string; policy: KeyPolicy;
-  createdAt: number; expiresAt: number | null; lastUsedAt: number | null; revokedAt: number | null; revokedBy: string | null;
+  createdAt: number; expiresAt: number; lastUsedAt: number | null; revokedAt: number | null; revokedBy: string | null;
+  reminderSet?: boolean;
 }
-interface TenantPolicy { allowKeys: boolean; disabledServices: string[]; readOnlyServices: string[] }
+interface TenantPolicy { allowKeys: boolean; disabledServices: string[]; readOnlyServices: string[]; maxKeyLifetimeDays: number }
+type ReminderResult = { eventId: string } | { skipped: string } | { error: string };
 
 interface Props {
   userId: string;
@@ -40,8 +42,9 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
   const [readOnly, setReadOnly] = useState<string[]>([]);
   const [sitePicks, setSitePicks] = useState<string[]>([]);
   const [expiresInDays, setExpiresInDays] = useState<string>('90');
+  const [wantReminder, setWantReminder] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [minted, setMinted] = useState<{ key: string; label: string; keyId: string } | null>(null);
+  const [minted, setMinted] = useState<{ key: string; label: string; keyId: string; reminder?: ReminderResult } | null>(null);
   const [copied, setCopied] = useState(false);
   const [confirmRevoke, setConfirmRevoke] = useState<AgentKey | null>(null);
 
@@ -71,11 +74,14 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
   const grantable = SERVICE_ORDER.filter((s) =>
     grantableServices.includes(s) && !(tenantPolicy?.disabledServices ?? []).includes(s));
   const keysAllowed = tenantPolicy?.allowKeys !== false;
+  const maxDays = Math.min(365, tenantPolicy?.maxKeyLifetimeDays ?? 365);
+  const daysValue = Number(expiresInDays);
+  const daysValid = Number.isInteger(daysValue) && daysValue >= 1 && daysValue <= maxDays;
 
   const toggleIn = (list: string[], v: string, on: boolean) => (on ? [...new Set([...list, v])] : list.filter((x) => x !== v));
 
   const resetForm = () => {
-    setLabel(''); setServices([]); setReadOnly([]); setSitePicks([]); setExpiresInDays('90'); setShowForm(false);
+    setLabel(''); setServices([]); setReadOnly([]); setSitePicks([]); setExpiresInDays(String(Math.min(90, maxDays))); setWantReminder(true); setShowForm(false);
   };
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -90,11 +96,12 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
       if (services.includes('sharepoint') && sitePicks.length > 0 && allowedSites) {
         body.allowedSites = allowedSites.filter((s) => sitePicks.includes(s.id));
       }
-      if (expiresInDays.trim()) body.expiresInDays = Number(expiresInDays);
+      body.expiresInDays = daysValue;
+      body.reminder = wantReminder;
       const res = await fetch('/api/manage/agent-keys', { method: 'POST', credentials: 'same-origin', headers, body: JSON.stringify(body) });
-      const data = (await res.json()) as { key?: string; keyId?: string; label?: string; error?: string };
+      const data = (await res.json()) as { key?: string; keyId?: string; label?: string; error?: string; reminder?: ReminderResult };
       if (!res.ok || !data.key) throw new Error(data.error ?? `HTTP ${res.status}`);
-      setMinted({ key: data.key, label: data.label ?? label, keyId: data.keyId ?? '' });
+      setMinted({ key: data.key, label: data.label ?? label, keyId: data.keyId ?? '', reminder: data.reminder });
       setCopied(false);
       resetForm();
       await load();
@@ -139,8 +146,9 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
         An agent key lets an app or agent you run call this server as you, with less than you have.
         Pick the services it may use, which of those it may only read, and for SharePoint which sites it
         may see. The key can never reach anything you cannot, and your admin can tighten every key at once.
-        Keys count against your session: signing out everywhere ends them, and each one stops working when it
-        expires or you revoke it here. The key value is shown once.
+        Every key has an expiry you choose, up to {maxDays} days, and by default a reminder lands on your
+        calendar a few days before it. Signing out everywhere ends your keys too, and each one stops working
+        the moment you revoke it here. The key value is shown once.
       </p>
 
       {!keysAllowed && (
@@ -150,6 +158,12 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
       {minted && (
         <div className="confirm-dialog" role="dialog" aria-label="New agent key">
           <p><strong>Key “{minted.label}” created.</strong> Copy it now. It is not shown again.</p>
+          {minted.reminder && 'eventId' in minted.reminder && (
+            <p className="section-hint">A reminder is on your calendar a few days before it expires.</p>
+          )}
+          {minted.reminder && 'error' in minted.reminder && (
+            <p className="error-msg">{minted.reminder.error} Note the expiry date yourself.</p>
+          )}
           <pre style={{ userSelect: 'all', whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: '#f6f6f6', padding: 8, borderRadius: 4, fontSize: 12 }}>{minted.key}</pre>
           <p className="section-hint" style={{ marginTop: 6 }}>
             Send it as <code>Authorization: Bearer &lt;key&gt;</code> to <code>/api/mcp</code>, or hand it to the
@@ -169,7 +183,7 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
       ) : (
         <table className="deny-table">
           <thead>
-            <tr><th>Label</th><th>Id</th><th>May use</th><th>Read-only</th><th>Sites</th><th>Last used</th><th>Expires</th><th></th></tr>
+            <tr><th>Label</th><th>Id</th><th>May use</th><th>Read-only</th><th>Sites</th><th>Last used</th><th>Expires</th><th>Reminder</th><th></th></tr>
           </thead>
           <tbody>
             {live.map((k) => (
@@ -180,7 +194,8 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
                 <td>{k.policy.readOnlyServices.length ? k.policy.readOnlyServices.map((s) => SERVICE_LABELS[s] ?? s).join(', ') : '—'}</td>
                 <td>{k.policy.allowedSites.length ? k.policy.allowedSites.map((s) => s.name).join(', ') : 'as tenant'}</td>
                 <td>{when(k.lastUsedAt)}</td>
-                <td>{k.expiresAt ? when(k.expiresAt) : 'with session'}</td>
+                <td>{when(k.expiresAt)}</td>
+                <td>{k.reminderSet ? 'on calendar' : '—'}</td>
                 <td><button type="button" className="remove-btn" onClick={() => setConfirmRevoke(k)}>Revoke</button></td>
               </tr>
             ))}
@@ -267,12 +282,20 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
 
           <label style={{ display: 'block', margin: '10px 0' }}>
             <span className="service-name">Expires in days</span>{' '}
-            <input type="number" min={1} max={365} value={expiresInDays} onChange={(e) => setExpiresInDays(e.target.value)} style={{ width: 80 }} />
-            <span className="service-desc" style={{ marginLeft: 8 }}>Blank: lives as long as your session, at most 30 days from sign-in.</span>
+            <input type="number" min={1} max={maxDays} required value={expiresInDays} onChange={(e) => setExpiresInDays(e.target.value)} style={{ width: 80 }} />
+            <span className="service-desc" style={{ marginLeft: 8 }}>1 to {maxDays}. {maxDays < 365 ? 'The maximum is set by your admin.' : 'Up to a year.'}</span>
+          </label>
+
+          <label className="service-toggle" style={{ display: 'flex', margin: '0 0 10px' }}>
+            <input type="checkbox" checked={wantReminder} onChange={(e) => setWantReminder(e.target.checked)} />
+            <span className="service-info">
+              <span className="service-name">Calendar reminder</span>
+              <span className="service-desc">Put a short event on my calendar before the key expires (a week before for keys of two weeks or more, two days before for shorter ones).</span>
+            </span>
           </label>
 
           <div className="confirm-actions">
-            <button type="submit" className="confirm-btn" disabled={saving || !label.trim() || services.length === 0}>{saving ? 'Creating…' : 'Create key'}</button>
+            <button type="submit" className="confirm-btn" disabled={saving || !label.trim() || services.length === 0 || !daysValid}>{saving ? 'Creating…' : 'Create key'}</button>
             <button type="button" className="confirm-btn" onClick={resetForm} disabled={saving}>Cancel</button>
           </div>
         </form>

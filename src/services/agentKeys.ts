@@ -57,12 +57,15 @@ export interface TenantAgentKeyPolicy {
   disabledServices: string[];
   /** Services every key is read-only on, whatever the key says. */
   readOnlyServices: string[];
+  /** Longest lifetime a user may give a key, in days. At most AGENT_KEY_MAX_LIFETIME_DAYS. */
+  maxKeyLifetimeDays: number;
 }
 
 export const DEFAULT_TENANT_AGENT_KEY_POLICY: TenantAgentKeyPolicy = {
   allowKeys: true,
   disabledServices: [],
   readOnlyServices: [],
+  maxKeyLifetimeDays: AGENT_KEY_MAX_LIFETIME_DAYS,
 };
 
 /** What a request authenticated by a key carries on its session. */
@@ -83,12 +86,18 @@ export interface AgentKeyRecord {
   sessionStorageKey: string;
   policy: AgentKeyPolicy;
   createdAt: number;
-  /** 0 when the key does not expire on its own (its session's 30-day cap still applies). */
+  /**
+   * When the key stops working. Always set: the key's session carries this as
+   * its own absolute cap in place of the 30-day one a sign-in gets, so a key
+   * lives exactly as long as its owner chose, within the tenant's maximum.
+   */
   expiresAt: number;
   lastUsedAt: number;
   /** 0 while the key is live. */
   revokedAt: number;
   revokedBy?: string;
+  /** Graph id of the expiry-reminder event on the owner's calendar, when one was created. */
+  reminderEventId?: string;
   /** RowKey of the key's row. Set when loaded; not a column. */
   _storageKey?: string;
 }
@@ -250,10 +259,14 @@ async function ensureTable(client: TableClient): Promise<void> {
 }
 
 export function normalizeTenantAgentKeyPolicy(raw: Partial<TenantAgentKeyPolicy> | null | undefined): TenantAgentKeyPolicy {
+  const days = Number(raw?.maxKeyLifetimeDays);
   return {
     allowKeys: raw?.allowKeys !== false,
     disabledServices: uniqueKnownServices(Array.isArray(raw?.disabledServices) ? raw.disabledServices : []),
     readOnlyServices: uniqueKnownServices(Array.isArray(raw?.readOnlyServices) ? raw.readOnlyServices : []),
+    maxKeyLifetimeDays: Number.isInteger(days) && days >= 1 && days <= AGENT_KEY_MAX_LIFETIME_DAYS
+      ? days
+      : AGENT_KEY_MAX_LIFETIME_DAYS,
   };
 }
 
@@ -265,7 +278,7 @@ export async function getTenantAgentKeyPolicy(tenantId: string): Promise<TenantA
     return normalizeTenantAgentKeyPolicy(JSON.parse(entity.policy) as Partial<TenantAgentKeyPolicy>);
   } catch (err: unknown) {
     const status = (err as { statusCode?: number }).statusCode;
-    if (status === 404) return { ...DEFAULT_TENANT_AGENT_KEY_POLICY, disabledServices: [], readOnlyServices: [] };
+    if (status === 404) return normalizeTenantAgentKeyPolicy(DEFAULT_TENANT_AGENT_KEY_POLICY);
     throw err;
   }
 }
@@ -319,6 +332,7 @@ function entityToRecord(entity: Record<string, unknown>): AgentKeyRecord {
     lastUsedAt: Number(entity.lastUsedAt ?? 0),
     revokedAt: Number(entity.revokedAt ?? 0),
     revokedBy: entity.revokedBy ? String(entity.revokedBy) : undefined,
+    reminderEventId: entity.reminderEventId ? String(entity.reminderEventId) : undefined,
     _storageKey: String(entity.rowKey),
   };
 }
@@ -429,6 +443,14 @@ export async function markAgentKeyRevoked(record: AgentKeyRecord, byUserId: stri
   }, 'Merge');
 }
 
+/** Remember the calendar reminder created for a key, so revocation can remove it. */
+export async function setAgentKeyReminder(record: AgentKeyRecord, eventId: string): Promise<void> {
+  if (!record._storageKey) throw new Error('agent key record has no storage key');
+  const client = keysClient();
+  await client.updateEntity({ partitionKey: PARTITION, rowKey: record._storageKey, reminderEventId: eventId }, 'Merge');
+  record.reminderEventId = eventId;
+}
+
 /** Record use. Best effort, fire and forget, rate-limited by the caller. */
 export async function touchAgentKey(record: AgentKeyRecord, now = Date.now()): Promise<void> {
   if (!record._storageKey) return;
@@ -445,9 +467,10 @@ export function publicAgentKey(record: AgentKeyRecord) {
     userEmail: record.userEmail,
     policy: record.policy,
     createdAt: record.createdAt,
-    expiresAt: record.expiresAt || null,
+    expiresAt: record.expiresAt,
     lastUsedAt: record.lastUsedAt || null,
     revokedAt: record.revokedAt || null,
     revokedBy: record.revokedBy ?? null,
+    reminderSet: Boolean(record.reminderEventId),
   };
 }
