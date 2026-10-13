@@ -2515,7 +2515,11 @@ const tools: ToolDef[] = [
     handler: async (_args, session) => {
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
-      const result = await graph.api('/me/joinedTeams').select('id,displayName,description').top(100).get();
+      // Graph GET /me/joinedTeams does not support $top: appending it fails the
+      // whole request with "Query option 'Top' is not allowed", which the
+      // mocked Graph client in the unit tests never surfaced. Same as /channels
+      // below; the REST twin (functions/teams/listTeams.ts) never sent it.
+      const result = await graph.api('/me/joinedTeams').select('id,displayName,description').get();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const teams = (result.value ?? []).map((t: any) => ({ id: t.id, name: t.displayName, description: t.description ?? null }));
       const tenantId = getTenantIdFromSession(session);

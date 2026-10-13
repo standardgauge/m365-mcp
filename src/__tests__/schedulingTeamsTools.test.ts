@@ -37,7 +37,16 @@ const mockGraphGet = jest.fn<() => Promise<unknown>>();
 const mockGraphPost = jest.fn<(body?: unknown) => Promise<unknown>>();
 function makeChain() {
   const chain: Record<string, unknown> = {};
-  for (const m of ['select', 'top', 'orderby', 'filter', 'expand']) chain[m] = () => chain;
+  for (const m of ['select', 'orderby', 'filter', 'expand']) chain[m] = () => chain;
+  // Graph refuses $top on /me/joinedTeams and /teams/{id}/channels with
+  // "Query option 'Top' is not allowed". The mock used to swallow it, which is
+  // how list_teams shipped with .top(100) and failed on every live tenant.
+  chain.top = () => {
+    if (/\/joinedTeams$|\/channels$/.test(lastGraphCall.path ?? '')) {
+      throw new Error("The query specified in the URI is not valid. Query option 'Top' is not allowed.");
+    }
+    return chain;
+  };
   chain.header = (k: string, v: string) => { lastGraphCall.headers[k] = v; return chain; };
   chain.get = (...a: unknown[]) => mockGraphGet(...(a as []));
   chain.post = (body?: unknown) => { lastGraphCall.postBody = body; return mockGraphPost(body); };
