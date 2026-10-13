@@ -188,6 +188,15 @@ const WRITE_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Tools an agent key never reaches, whatever services it holds. These change the
+ * owner's own server-side settings rather than Graph data, so the key read-only gate
+ * (which keys off WRITE_TOOLS) does not cover them. They mirror the REST routes that
+ * refuse a key outright: set_email_output_mode is the MCP twin of POST /api/mail/settings.
+ * Hidden from tools/list and refused at tools/call for any agentKey session.
+ */
+const KEY_REFUSED_TOOLS: ReadonlySet<string> = new Set(['set_email_output_mode']);
+
+/**
  * Tool argument names that are opaque Graph resource IDs and must be validated
  * before interpolation into a Graph API path.  Arguments NOT in this
  * set (e.g. `q`, `path`, `displayName`, `content`) may contain arbitrary text.
@@ -2688,6 +2697,7 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
           // An agent key advertises only what it may call (threat model 3.7).
           if (!keyAllowsService(agentKey, svc)) return false;
           if (keyIsReadOnly(agentKey, svc) && WRITE_TOOLS.has(t.name)) return false;
+          if (agentKey && KEY_REFUSED_TOOLS.has(t.name)) return false;
           return true;
         });
       } catch { /* fall through — show all if we can't load settings */ }
@@ -2780,6 +2790,23 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
           });
           return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Service "${toolService}" is not permitted for this agent key. The key's owner can mint a key with wider scope in the web UI.` }], isError: true } };
         }
+      }
+
+      // Agent key — owner settings tools are never reachable with a key, even when the
+      // key holds their service. Checked outside the service block so it cannot depend on
+      // the tool having a service mapping.
+      if (auth!.session.agentKey && KEY_REFUSED_TOOLS.has(toolName)) {
+        logAccess({
+          tenantId,
+          userId: auth!.userId,
+          userEmail: auth!.session.email,
+          deviceLabel: auth!.session.deviceLabel,
+          operation: toolName,
+          result: 'denied',
+          reason: `agent key ${auth!.session.agentKey.keyId} may not call ${toolName}`,
+          source: 'mcp',
+        });
+        return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `${toolName} cannot be called with an agent key. The key's owner changes this setting in the web UI.` }], isError: true } };
       }
 
       // Enforce read-only mode — refuse mutating tools when the

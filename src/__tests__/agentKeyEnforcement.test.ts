@@ -9,6 +9,7 @@
  * MCP (functions/mcp/mcpEndpoint.ts):
  *   - tools/list hides tools outside the key and the write tools of a key-read-only service
  *   - tools/call refuses both, and logs the refusal as denied
+ *   - set_email_output_mode is hidden and refused for a key that holds mail
  *
  * REST routes (route-level, through the real wrapper):
  *   - SharePoint write/createFolder/delete refuse a key-read-only or tenant-read-only
@@ -313,6 +314,39 @@ describe('MCP dispatch under a key', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('read-only for this agent key');
     expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ operation: 'write_sharepoint_file', result: 'denied', reason: expect.stringContaining('read-only for this agent key') }));
+  });
+});
+
+describe('MCP owner-settings tools under a key', () => {
+  const MAIL_KEY = { ...KEY, policy: { services: ['mail'], readOnlyServices: [] as string[], allowedSites: [] as Array<{ id: string; name: string }> } };
+
+  it('tools/list hides set_email_output_mode from a mail-scoped key but keeps the read tool', async () => {
+    const full = await toolNames({ userId: USER, session: session() });
+    const scoped = await toolNames({ userId: USER, session: session(MAIL_KEY) });
+    expect(full).toContain('set_email_output_mode');
+    expect(scoped).toContain('send_mail');
+    expect(scoped).toContain('get_email_output_mode');
+    expect(scoped).not.toContain('set_email_output_mode');
+  });
+
+  it('tools/call refuses set_email_output_mode for a mail-scoped key, writes nothing, and logs it as denied', async () => {
+    mockAuthenticateRequest.mockResolvedValue({ userId: USER, session: session(MAIL_KEY) });
+    const r = await mcp(rpc({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'set_email_output_mode', arguments: { emailOutputMode: 'draft' } } }), ctx);
+    const result = (r.jsonBody as { result: { isError?: boolean; content: Array<{ text: string }> } }).result;
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('cannot be called with an agent key');
+    expect(mockSetUserEmailSettings).not.toHaveBeenCalled();
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({
+      operation: 'set_email_output_mode', result: 'denied', source: 'mcp', reason: expect.stringContaining('agent key'),
+    }));
+  });
+
+  it('tools/call still lets a browser session tighten to draft', async () => {
+    mockAuthenticateRequest.mockResolvedValue({ userId: USER, session: session() });
+    const r = await mcp(rpc({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'set_email_output_mode', arguments: { emailOutputMode: 'draft' } } }), ctx);
+    const result = (r.jsonBody as { result: { isError?: boolean } }).result;
+    expect(result.isError).toBeFalsy();
+    expect(mockSetUserEmailSettings).toHaveBeenCalledTimes(1);
   });
 });
 

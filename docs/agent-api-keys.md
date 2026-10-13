@@ -193,9 +193,12 @@ Enforced in code and covered by `agentKeyEnforcement.test.ts` and
 - Reach `/api/manage/*`, including the key routes. Those take only a browser
   console session (threat model 7.3), so a key cannot mint keys, list them,
   or read policy.
-- Change email output mode (`POST /api/mail/settings` refuses a key and audits
-  it). Loosening draft mode is the one thing an injected prompt would want a
-  key for.
+- Change email output mode, on either surface. `POST /api/mail/settings`
+  refuses a key and audits it, and the MCP tool `set_email_output_mode` is
+  hidden from a key's `tools/list` and refused at `tools/call` even when the
+  key holds mail (`KEY_REFUSED_TOOLS` in `mcpEndpoint.ts`). Loosening draft
+  mode is the one thing an injected prompt would want a key for, and a key
+  has no business tightening its owner's setting either.
 - Sign the owner out (`POST /api/auth/logout` refuses a key).
 - Refresh (`/api/auth/refresh` takes session tokens only; a key is unknown to
   it).
