@@ -127,9 +127,20 @@ not involved. It is written with the owner's own delegated token
 (`Calendars.ReadWrite`, already consented for the calendar tools) by
 [`agentKeyReminder.ts`](../src/services/agentKeyReminder.ts).
 
-The reminder is best effort. If Graph refuses it the key is still created,
-the response says so, the attempt is audited as `policy.agent_key.reminder`
-denied, and the owner is told to note the date themselves. Revoking the key
+The time of day comes from the mailbox's own zone (`/me/mailboxSettings`,
+which needs `MailboxSettings.Read`). When that cannot be read, because the
+scope is not consented or the setting is empty, the reminder is still
+written, at 16:00 UTC, a working hour from the US West Coast through the
+UK, with a line in the body saying why and asking for the permission, and
+the creation is audited as `policy.agent_key.reminder` allowed with the
+reason. The user-facing calendar tools keep their loud failure on a missing
+zone on purpose; a best-effort reminder is better late in the day than
+missing.
+
+The reminder is otherwise best effort. If Graph refuses the write itself the
+key is still created, the response says so, the attempt is audited as
+`policy.agent_key.reminder` denied, and the owner is told to note the date
+themselves. Revoking the key
 removes the event, as the owner, through the key's own session, so it works
 whether the owner or an administrator revokes.
 

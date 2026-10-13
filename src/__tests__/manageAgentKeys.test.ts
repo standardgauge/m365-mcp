@@ -37,7 +37,7 @@ const mockMarkRevoked = jest.fn<(r: AgentKeyRecord, by: string) => Promise<void>
 const mockUpdateKey = jest.fn<(r: AgentKeyRecord, next: { label: string; policy: AgentKeyRecord['policy'] }, by: string) => Promise<AgentKeyRecord>>();
 const mockGetPolicy = jest.fn<() => Promise<TenantAgentKeyPolicy>>();
 const mockSetPolicy = jest.fn<(t: string, p: TenantAgentKeyPolicy) => Promise<void>>();
-const mockCreateReminder = jest.fn<(s: UserSession, r: AgentKeyRecord) => Promise<string | null>>();
+const mockCreateReminder = jest.fn<(s: UserSession, r: AgentKeyRecord) => Promise<{ eventId: string; timeZone: string; timeZoneFallback: boolean; fallbackReason?: string } | null>>();
 const mockDeleteReminder = jest.fn<(s: UserSession, id: string) => Promise<void>>();
 const mockSetReminder = jest.fn<(r: AgentKeyRecord, id: string) => Promise<void>>();
 const mockGetSessionByStorageKey = jest.fn<(k: string) => Promise<UserSession | undefined>>();
@@ -141,7 +141,7 @@ beforeEach(() => {
   mockUpdateKey.mockImplementation(async (r, next, by) => ({ ...r, ...next, policyUpdatedAt: Date.now(), policyUpdatedBy: by }));
   mockGetPolicy.mockResolvedValue({ allowKeys: true, disabledServices: [], readOnlyServices: [], maxKeyLifetimeDays: 365, ownersMayWiden: true });
   mockSetPolicy.mockResolvedValue();
-  mockCreateReminder.mockResolvedValue('evt-1');
+  mockCreateReminder.mockResolvedValue({ eventId: 'evt-1', timeZone: 'Pacific Standard Time', timeZoneFallback: false });
   mockDeleteReminder.mockResolvedValue();
   mockSetReminder.mockResolvedValue();
   mockGetSessionByStorageKey.mockResolvedValue({ ...SESSION, kind: 'client', sessionToken: '', _storageKey: 'minted-row' } as UserSession);
@@ -236,6 +236,17 @@ describe('POST /api/manage/agent-keys', () => {
     expect(r.jsonBody!.reminder).toMatchObject({ error: expect.stringContaining('calendar reminder') });
     expect(mockSetReminder).not.toHaveBeenCalled();
     expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({ operation: 'policy.agent_key.reminder', result: 'denied' }));
+  });
+
+  it('records a reminder written in the UTC fallback as an allowed audit row with the reason', async () => {
+    mockCreateReminder.mockResolvedValue({ eventId: 'evt-2', timeZone: 'UTC', timeZoneFallback: true, fallbackReason: 'Access is denied' });
+    const r = await keys(req('POST', { label: 'x', services: ['mail'], expiresInDays: 60 }), ctx);
+    expect(r.status).toBe(201);
+    expect(r.jsonBody!.reminder).toEqual({ eventId: 'evt-2' });
+    expect(mockSetReminder).toHaveBeenCalledWith(expect.anything(), 'evt-2');
+    expect(mockLogAccess).toHaveBeenCalledWith(expect.objectContaining({
+      operation: 'policy.agent_key.reminder', result: 'allowed', reason: expect.stringContaining('UTC'),
+    }));
   });
 
   it('skips the reminder when asked, or when the key is too short-lived', async () => {

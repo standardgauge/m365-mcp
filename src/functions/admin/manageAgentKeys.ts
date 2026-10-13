@@ -297,10 +297,21 @@ async function manageAgentKeys(request: HttpRequest, context: InvocationContext)
     let reminder: { eventId: string } | { skipped: string } | { error: string } = { skipped: 'not requested' };
     if (wantReminder) {
       try {
-        const eventId = await createKeyExpiryReminder(browser, record);
-        if (eventId) {
-          await setAgentKeyReminder(record, eventId);
-          reminder = { eventId };
+        const created = await createKeyExpiryReminder(browser, record);
+        if (created) {
+          await setAgentKeyReminder(record, created.eventId);
+          reminder = { eventId: created.eventId };
+          if (created.timeZoneFallback) {
+            // The event exists, in UTC. Say so where an operator will see it.
+            logAccess({
+              ...auditActor(auth.session),
+              operation: 'policy.agent_key.reminder',
+              resource: `key:${keyId}`,
+              result: 'allowed',
+              reason: `calendar reminder created in UTC; mailbox time zone unavailable: ${created.fallbackReason ?? 'unknown'}`,
+              source: 'http',
+            });
+          }
         } else {
           reminder = { skipped: 'key is too short-lived for a reminder' };
         }
