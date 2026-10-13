@@ -108,6 +108,10 @@ jest.mock('../services/denyList.js', () => ({
   addUserDenyEntry: async () => undefined,
   removeUserDenyEntry: async () => undefined,
   clearUserDenyList: () => mockClearUser(),
+  clearAgentKeyDenyEntries: async () => undefined,
+  agentKeyDenySubject: (keyId: string) => `key:${keyId}`,
+  isAgentKeyDenySubject: (s: string) => s.startsWith('key:'),
+  DENY_LIST_TYPES: ['sharepoint', 'mail', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams'],
 }));
 
 jest.mock('../services/serviceSettings.js', () => ({

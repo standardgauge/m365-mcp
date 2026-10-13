@@ -28,8 +28,12 @@ interface Props {
   userId: string;
   /** When scope='user', this is the target user ID (may differ from admin's userId) */
   targetUserId?: string;
+  /** When scope='user', manage this agent key's own entries instead of a user's */
+  keyId?: string;
   /** When true, hides add/remove controls and shows a "Global Admin Setting" badge instead */
   readOnly?: boolean;
+  /** Overrides the badge text shown in place of Remove when readOnly */
+  readOnlyBadge?: string;
   /** Overrides the default card heading */
   label?: string;
   /** Pre-fills the SharePoint path input (e.g. from FolderBrowser selection) */
@@ -58,7 +62,7 @@ async function apiFetch(path: string, userId: string, options?: RequestInit) {
   return res.json();
 }
 
-export default function DenyListManager({ scope, userId, targetUserId, readOnly = false, label, externalSpPath, externalMailPath, addedByName, hideAddInput = false, visibleTypes, bare = false }: Props) {
+export default function DenyListManager({ scope, userId, targetUserId, keyId, readOnly = false, readOnlyBadge = 'Global Admin Setting', label, externalSpPath, externalMailPath, addedByName, hideAddInput = false, visibleTypes, bare = false }: Props) {
   const [entries, setEntries] = useState<Record<DenyListType, DenyEntry[]>>({
     sharepoint: [], mail: [], calendar: [], onedrive: [], onenote: [], contacts: [], teams: [],
   });
@@ -75,7 +79,15 @@ export default function DenyListManager({ scope, userId, targetUserId, readOnly 
   useEffect(() => { if (externalMailPath) setNewPath((p) => ({ ...p, mail: externalMailPath })); }, [externalMailPath]);
 
   const listEndpoint = scope === 'global' ? 'manage/deny-list/global' : 'manage/deny-list/user';
-  const resolvedTarget = scope === 'user' ? (targetUserId ?? userId) : undefined;
+  const resolvedKey = scope === 'user' ? keyId : undefined;
+  const resolvedTarget = scope === 'user' && !resolvedKey ? (targetUserId ?? userId) : undefined;
+  // Who the entries belong to, as the API takes it: a key, a user, or neither (global).
+  const subjectQuery = resolvedKey
+    ? `&keyId=${encodeURIComponent(resolvedKey)}`
+    : resolvedTarget ? `&targetUserId=${resolvedTarget}` : '';
+  const subjectBody = resolvedKey
+    ? { keyId: resolvedKey }
+    : resolvedTarget ? { targetUserId: resolvedTarget } : {};
   const activeTypes = visibleTypes ?? ALL_TYPES;
 
   const load = useCallback(async () => {
@@ -85,7 +97,7 @@ export default function DenyListManager({ scope, userId, targetUserId, readOnly 
       const results = await Promise.all(
         activeTypes.map((type) =>
           apiFetch(
-            `${listEndpoint}?type=${type}${resolvedTarget ? `&targetUserId=${resolvedTarget}` : ''}`,
+            `${listEndpoint}?type=${type}${subjectQuery}`,
             userId
           ).then((data) => ({ type, entries: (data.entries ?? []) as DenyEntry[] }))
         )
@@ -100,7 +112,7 @@ export default function DenyListManager({ scope, userId, targetUserId, readOnly 
     } finally {
       setLoading(false);
     }
-  }, [listEndpoint, userId, resolvedTarget, activeTypes.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [listEndpoint, userId, subjectQuery, activeTypes.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { load(); }, [load]);
 
@@ -117,7 +129,7 @@ export default function DenyListManager({ scope, userId, targetUserId, readOnly 
             type,
             path: path.trim(),
             description: description.trim(),
-            ...(resolvedTarget ? { targetUserId: resolvedTarget } : {}),
+            ...subjectBody,
             ...(addedByName ? { addedByName } : {}),
           }),
         }
@@ -141,7 +153,7 @@ export default function DenyListManager({ scope, userId, targetUserId, readOnly 
           body: JSON.stringify({
             type,
             path,
-            ...(resolvedTarget ? { targetUserId: resolvedTarget } : {}),
+            ...subjectBody,
           }),
         }
       );
@@ -184,7 +196,7 @@ export default function DenyListManager({ scope, userId, targetUserId, readOnly 
                   <td>{new Date(e.addedAt).toLocaleDateString()}</td>
                   <td>
                     {readOnly ? (
-                      <span className="admin-setting-badge">Global Admin Setting</span>
+                      <span className="admin-setting-badge">{readOnlyBadge}</span>
                     ) : (
                       <button className="remove-btn" onClick={() => removeEntry(type, e.path)}>
                         Remove

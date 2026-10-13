@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import KeyScopeFields, { isNarrowingOf, serviceNames } from './KeyScopeFields';
+import AgentKeyDenyList from './AgentKeyDenyList';
 import type { KeyPolicy, SitePick } from './KeyScopeFields';
 
 interface AgentKey {
@@ -43,6 +44,7 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
   const [editing, setEditing] = useState<AgentKey | null>(null);
   const [editLabel, setEditLabel] = useState('');
   const [editScope, setEditScope] = useState<KeyPolicy>(EMPTY);
+  const [blocking, setBlocking] = useState<AgentKey | null>(null);
 
   const headers = { 'x-user-id': userId, 'Content-Type': 'application/json' };
 
@@ -111,6 +113,7 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
   };
 
   const startEdit = (k: AgentKey) => {
+    setBlocking(null);
     setEditing(k);
     setEditLabel(k.label);
     setEditScope({ services: [...k.policy.services], readOnlyServices: [...k.policy.readOnlyServices], allowedSites: k.policy.allowedSites.map((s) => ({ ...s })) });
@@ -175,7 +178,8 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
       <p className="section-hint">
         An agent key lets an app or agent you run call this server as you, with less than you have.
         Pick the services it may use, which of those it may only read, and for SharePoint which sites it
-        may see. The key can never reach anything you cannot, and your admin can tighten every key at once.
+        may see. Under <strong>Folders</strong> you can also keep a key out of a folder, mail folder or calendar
+        you can still reach yourself. The key can never reach anything you cannot, and your admin can tighten every key at once.
         Every key has an expiry you choose, up to {maxDays} days, and by default a reminder lands on your
         calendar a few days before it. Signing out everywhere ends your keys too, and each one stops working
         the moment you revoke it here. The key value is shown once.
@@ -237,12 +241,26 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
                 <td>{k.reminderSet ? 'on calendar' : '—'}</td>
                 <td style={{ whiteSpace: 'nowrap' }}>
                   <button type="button" className="confirm-btn" style={{ marginRight: 6 }} onClick={() => startEdit(k)}>Edit</button>
+                  <button type="button" className="confirm-btn" style={{ marginRight: 6 }} onClick={() => { setEditing(null); setBlocking(k); }}>Folders</button>
                   <button type="button" className="remove-btn" onClick={() => setConfirmRevoke(k)}>Revoke</button>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
+      )}
+
+      {blocking && !editing && (
+        <AgentKeyDenyList
+          key={blocking.keyId}
+          userId={userId}
+          keyId={blocking.keyId}
+          label={blocking.label}
+          services={blocking.policy.services}
+          sites={blocking.policy.allowedSites.length ? blocking.policy.allowedSites : allowedSites}
+          mayRemove={ownersMayWiden}
+          onClose={() => setBlocking(null)}
+        />
       )}
 
       {editing && (

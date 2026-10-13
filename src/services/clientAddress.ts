@@ -68,8 +68,18 @@ export function auditClientAddress(request: HttpRequest): string | undefined {
 // without each call site having to pass it down. That includes MCP tool calls
 // several frames below the HTTP handler and the device-code sign-in, which
 // completes in a promise the request started.
+//
+// The same scope carries the agent key a request authenticated with, when it
+// did, so the deny list can add that key's own entries (denyList.ts) at every
+// check without each call site being handed the session.
 
-const scope = new AsyncLocalStorage<{ clientAddress?: string }>();
+interface RequestScope {
+  clientAddress?: string;
+  /** Id of the agent key that authenticated this request, once one has. */
+  agentKeyId?: string;
+}
+
+const scope = new AsyncLocalStorage<RequestScope>();
 
 export function runWithClientAddress<T>(request: HttpRequest, fn: () => T): T {
   return scope.run({ clientAddress: auditClientAddress(request) }, fn);
@@ -78,4 +88,21 @@ export function runWithClientAddress<T>(request: HttpRequest, fn: () => T): T {
 /** The audit address of the request being handled, if any. */
 export function currentClientAddress(): string | undefined {
   return scope.getStore()?.clientAddress;
+}
+
+/**
+ * Record that the request being handled authenticated with an agent key.
+ * Returns false when there is no request scope to record it in: the caller
+ * must then refuse the key, since its per-key deny entries could not apply.
+ */
+export function markRequestAgentKey(keyId: string): boolean {
+  const store = scope.getStore();
+  if (!store) return false;
+  store.agentKeyId = keyId;
+  return true;
+}
+
+/** The agent key the request being handled authenticated with, if any. */
+export function currentAgentKeyId(): string | undefined {
+  return scope.getStore()?.agentKeyId;
 }
