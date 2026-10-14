@@ -195,6 +195,7 @@ function httpRequest(query: Record<string, string>): HttpRequest {
     params: {},
     headers: new Map<string, string>([['x-forwarded-for', '203.0.113.9']]),
     json: () => Promise.resolve({}),
+    text: () => Promise.resolve(JSON.stringify({})),
   } as unknown as HttpRequest;
 }
 
@@ -208,6 +209,7 @@ async function callMcpSearch(args: Record<string, unknown>) {
     method: 'POST',
     headers: new Map<string, string>(),
     json: () => Promise.resolve({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'search_sharepoint', arguments: args } }),
+    text: () => Promise.resolve(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'search_sharepoint', arguments: args } })),
   } as unknown as HttpRequest;
   const res = await mcpHandler(req, ctx);
   const body = res.jsonBody as { result?: { content?: Array<{ text: string }>; isError?: boolean } };

@@ -653,6 +653,15 @@ down rather than failing.
 
 Things to know:
 
+  * **Body size.** `/api/mcp` refuses a request body over `MCP_MAX_BODY_BYTES`
+    (default 8 MiB) with `413` before it parses the body and before it looks
+    up a session, first on the declared `Content-Length` and then on the
+    bytes actually received, so a client that lies about its length gains
+    nothing. The cap sits above the largest legitimate tool call, an inline
+    `write_*_file` payload or a full batch of twenty. Put a limit of the same
+    size or smaller at the ingress as well, so the bytes never reach a
+    replica: Container Apps ingress has no body limit of its own, Front Door
+    and Application Gateway both do.
   * **Per replica.** With three replicas an address can reach up to three times the
     limit. That is deliberate: the limiter makes the routes cost something to
     hammer, it does not meter them.

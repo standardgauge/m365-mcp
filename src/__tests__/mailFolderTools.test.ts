@@ -146,6 +146,7 @@ function rpc(method: string, params: Record<string, unknown>): Promise<{ status:
     method: 'POST',
     headers: new Map<string, string>(),
     json: () => Promise.resolve({ jsonrpc: '2.0', id: 1, method, params }),
+    text: () => Promise.resolve(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })),
   } as unknown as HttpRequest;
   const ctx = { error: jest.fn(), warn: jest.fn(), log: jest.fn() } as unknown as InvocationContext;
   return handler(req, ctx);

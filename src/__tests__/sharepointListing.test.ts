@@ -159,6 +159,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
     method: 'POST',
     headers: new Map<string, string>(),
     json: () => Promise.resolve({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
+    text: () => Promise.resolve(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } })),
   } as unknown as HttpRequest;
   const res = await mcpHandler(req, ctx);
   const body = res.jsonBody as { result?: { content?: Array<{ text: string }>; isError?: boolean } };

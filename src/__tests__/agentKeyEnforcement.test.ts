@@ -156,6 +156,7 @@ function restReq(method: string, opts: { body?: unknown; query?: Record<string, 
   return {
     method,
     json: async () => opts.body,
+    text: () => Promise.resolve(JSON.stringify(opts.body)),
     query: { get: (k: string) => q.get(k) ?? null },
     params: opts.params ?? {},
     headers: new Map<string, string>(),
@@ -272,7 +273,7 @@ describe('SharePoint admin-only REST under a key', () => {
 });
 
 function rpc(body: unknown): HttpRequest {
-  return { method: 'POST', json: async () => body, headers: new Map<string, string>() } as unknown as HttpRequest;
+  return { method: 'POST', json: async () => body, text: async () => JSON.stringify(body), headers: new Map<string, string>() } as unknown as HttpRequest;
 }
 async function toolNames(auth: AuthResult): Promise<string[]> {
   mockAuthenticateRequest.mockResolvedValue(auth);

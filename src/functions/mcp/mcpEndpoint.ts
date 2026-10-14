@@ -2997,12 +2997,61 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
  */
 export const MAX_JSONRPC_BATCH = 20;
 
+/**
+ * Largest request body the endpoint will read, in bytes. Default 8 MiB, which
+ * sits above the largest legitimate tool call (an inline `write_*_file`
+ * payload or a batch of twenty) and below anything that could make a single
+ * unauthenticated request buffer and parse a serious amount of memory. The
+ * check runs before the body is parsed and before authentication, so an
+ * oversize request costs the server a header read and nothing else.
+ * `MCP_MAX_BODY_BYTES` overrides it; the ingress in front of the app should
+ * carry a limit of its own (operations runbook, "Rate limiting and ingress
+ * restriction").
+ */
+export const DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024;
+
+export function maxBodyBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.MCP_MAX_BODY_BYTES?.trim();
+  if (!raw) return DEFAULT_MAX_BODY_BYTES;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_MAX_BODY_BYTES;
+}
+
+function tooLarge(limit: number): HttpResponseInit {
+  return {
+    status: 413,
+    jsonBody: {
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32600, message: `Invalid Request: body exceeds ${limit} bytes` },
+    },
+  };
+}
+
 async function mcpEndpoint(
   request: HttpRequest,
   context: InvocationContext
 ): Promise<HttpResponseInit> {
   try {
-    const body = await request.json();
+    // Size before anything else: the declared length first, so an honest
+    // oversize request is refused on a header read, then the actual length
+    // once the body is in hand, so an undeclared or lying one is refused
+    // before it is parsed. Both come before authentication.
+    const limit = maxBodyBytes();
+    const declared = Number(request.headers.get('content-length') ?? '');
+    if (Number.isFinite(declared) && declared > limit) return tooLarge(limit);
+    const text = await request.text();
+    if (Buffer.byteLength(text, 'utf8') > limit) return tooLarge(limit);
+
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return {
+        status: 400,
+        jsonBody: { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error: body is not valid JSON' } },
+      };
+    }
 
     // Refuse an empty or oversized batch before authenticating, so it costs
     // no session lookup.
