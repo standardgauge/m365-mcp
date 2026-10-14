@@ -38,6 +38,7 @@
  *     the end of the mailbox.
  */
 import { graphSearchParam, sanitizeKqlPhrase } from './kqlSearch.js';
+import { ToolCallError } from './toolCallError.js';
 
 /** Minimal Graph client surface this module needs (the real client satisfies it). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -155,7 +156,7 @@ export function isBareDomain(v: string): boolean {
 export function parseSince(since: string): Date {
   const d = new Date(since);
   if (!/^\d{4}-\d{2}-\d{2}/.test(since.trim()) || Number.isNaN(d.getTime())) {
-    throw new Error(`since must be an ISO-8601 date or date-time (e.g. "2026-09-15"), got "${since}"`);
+    throw new ToolCallError(`since must be an ISO-8601 date or date-time (e.g. "2026-09-15"), got "${since}"`);
   }
   return d;
 }
@@ -190,7 +191,7 @@ export function assertNoKqlProperties(q: string): void {
       : ['from', 'to', 'cc', 'bcc', 'recipients', 'participants'].includes(prop)
         ? 'pass `participant`, `from` or `to` for address criteria'
         : 'put only the words to match in `q`';
-  throw new Error(
+  throw new ToolCallError(
     `q contains KQL property syntax ("${m[0].replace(/^[\s(]+/, '')}"), which search_mail does not interpret: ` +
     `q is matched as a literal phrase. ${hint[0].toUpperCase()}${hint.slice(1)}.`,
   );
@@ -208,7 +209,7 @@ function plan(c: MailSearchCriteria): Plan {
   };
   if (clean(c.since)) p.since = parseSince(c.since!.trim());
   if (!p.text && !p.participant && !p.from && !p.to) {
-    throw new Error(
+    throw new ToolCallError(
       'search_mail needs at least one of q, participant, from, or to. ' +
       'To list the newest messages in a folder, use list_messages.',
     );

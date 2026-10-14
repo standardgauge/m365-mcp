@@ -18,6 +18,7 @@
 import { Client } from '@microsoft/microsoft-graph-client';
 import { encodeGraphId } from './opaqueId.js';
 import type { DenySubject } from './denyList.js';
+import { ToolCallError } from './toolCallError.js';
 
 // mailboxId (lower-cased) → owner object ID. Object IDs and UPNs are unique
 // across tenants, and the mapping does not change for the life of a mailbox.
@@ -50,7 +51,7 @@ export async function resolveDenySubject(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const user: any = await graph.api(`/users/${encodeGraphId(mailboxId, 'mailboxId')}`).select('id').get();
     if (typeof user?.id !== 'string' || user.id === '') {
-      throw new Error('Could not identify the owner of that mailbox');
+      throw new ToolCallError('Could not identify the owner of that mailbox');
     }
     ownerId = user.id as string;
     ownerIdCache.set(key, ownerId);

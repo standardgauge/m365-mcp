@@ -26,6 +26,7 @@ import {
   teamsMemberRecipients,
   OUTBOUND_POLICY_MARKER,
 } from '../../services/outboundPolicy.js';
+import { ToolCallError, clientFacingMessage, errorLogDetail, genericToolErrorMessage, newErrorReference } from '../../services/toolErrors.js';
 import { logAccess } from '../../services/auditLog.js';
 import { assertOpaqueIds, encodeGraphId } from '../../services/opaqueId.js';
 import { findUnsupportedArgs, unsupportedArgsMessage } from '../../services/toolArgs.js';
@@ -157,6 +158,24 @@ const ENFORCED_MODE_MARKER = 'Email output mode is enforced to draft by your adm
  * Matched in the tools/call catch block so the refusal is audited as denied.
  */
 const SEND_MODE_UI_ONLY_MARKER = 'set_email_output_mode cannot switch to send mode';
+
+/**
+ * Substrings of a tool-handler error that mark it a policy refusal. The
+ * tools/call catch audits a match as denied, and always shows it to the client
+ * however it was thrown, since the agent has to see why it was refused.
+ */
+const DENIED_ERROR_PATTERNS: readonly string[] = [
+  'restricted by the deny list',
+  'Access restricted by deny list',
+  'read-only mode',
+  'not in the allowed sites',
+  'is not enabled',
+  'disabled for your account',
+  'for this agent key',
+  ENFORCED_MODE_MARKER,
+  SEND_MODE_UI_ONLY_MARKER,
+  OUTBOUND_POLICY_MARKER,
+];
 
 /**
  * Tools that mutate data (create / update / delete / send). When a tool's
@@ -408,12 +427,12 @@ async function createReplyDraft(
   if (msgMeta.parentFolderId) {
     const folderName = await resolveMailFolderName(graph, msgMeta.parentFolderId, base);
     if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) {
-      throw new Error('Access restricted by deny list');
+      throw new ToolCallError('Access restricted by deny list');
     }
   }
   // The reply draft is written to Drafts — same check create_draft makes.
   if (await isPathDenied(tenantId, denySubject, 'mail', 'Drafts')) {
-    throw new Error('Access restricted by deny list — Drafts folder is blocked');
+    throw new ToolCallError('Access restricted by deny list — Drafts folder is blocked');
   }
 
   // Resolve From before anything is written, so a rejected `from` never leaves a draft behind.
@@ -447,7 +466,10 @@ async function createReplyDraft(
       draft = { ...draft, ...(await graph.api(`${base}/messages/${draft.id}`).patch({ from: toGraphFrom(from) })) };
     } catch (err) {
       await graph.api(`${base}/messages/${draft.id}`).delete().catch(() => undefined);
-      throw new Error(`Could not set the reply's From to ${from}: ${(err as Error).message}`);
+      throw new ToolCallError(
+        `Could not set the reply's From to ${from}: ${clientFacingMessage(err) ?? 'the change was rejected'}`,
+        { cause: err },
+      );
     }
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -571,8 +593,8 @@ const tools: ToolDef[] = [
       const metadata: any = await graph.api(`${dp}/items/${args.itemId}`).select('id,name,webUrl,size,file,parentReference,createdDateTime,lastModifiedDateTime').get();
       const filePath = `${metadata.parentReference?.path ?? ''}/${metadata.name}`;
       const tenantId = getTenantIdFromSession(session);
-      if (await isPathDenied(tenantId, session.userId, 'sharepoint', filePath)) throw new Error('Access restricted by deny list');
-      if (!metadata.file) throw new Error('Item is not a file');
+      if (await isPathDenied(tenantId, session.userId, 'sharepoint', filePath)) throw new ToolCallError('Access restricted by deny list');
+      if (!metadata.file) throw new ToolCallError('Item is not a file');
       const buf = await readDriveFileContent(graph, `${dp}/items/${args.itemId}/content`, metadata);
       const mime = metadata.file.mimeType ?? 'application/octet-stream';
       const isText = isTextMime(mime);
@@ -639,7 +661,7 @@ const tools: ToolDef[] = [
     },
     handler: async (args, session) => {
       const tenantId = getTenantIdFromSession(session);
-      if (await isPathDenied(tenantId, session.userId, 'sharepoint', args.path)) throw new Error('Access restricted by deny list');
+      if (await isPathDenied(tenantId, session.userId, 'sharepoint', args.path)) throw new ToolCallError('Access restricted by deny list');
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const dp = args.driveId ? `/sites/${args.siteId}/drives/${args.driveId}` : `/sites/${args.siteId}/drive`;
@@ -664,7 +686,7 @@ const tools: ToolDef[] = [
       const meta: any = await graph.api(`${dp}/items/${args.itemId}`).select('name,parentReference').get();
       const filePath = `${meta.parentReference?.path ?? ''}/${meta.name}`;
       const tenantId = getTenantIdFromSession(session);
-      if (await isPathDenied(tenantId, session.userId, 'sharepoint', filePath)) throw new Error('Access restricted by deny list');
+      if (await isPathDenied(tenantId, session.userId, 'sharepoint', filePath)) throw new ToolCallError('Access restricted by deny list');
       await graph.api(`${dp}/items/${args.itemId}`).delete();
       return { status: 'deleted', itemId: args.itemId };
     },
@@ -687,7 +709,7 @@ const tools: ToolDef[] = [
         const parentMeta: any = await graph.api(`${dp}/items/${args.parentId}`).select('name,parentReference').get();
         const parentPath = `${parentMeta.parentReference?.path ?? ''}/${parentMeta.name}`;
         const tenantId = getTenantIdFromSession(session);
-        if (await isPathDenied(tenantId, session.userId, 'sharepoint', `${parentPath}/${args.name}`)) throw new Error('Access restricted by deny list');
+        if (await isPathDenied(tenantId, session.userId, 'sharepoint', `${parentPath}/${args.name}`)) throw new ToolCallError('Access restricted by deny list');
       }
       const apiPath = args.parentId ? `${dp}/items/${args.parentId}/children` : `${dp}/root/children`;
       const result = await graph.api(apiPath).post({ name: args.name, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' });
@@ -832,7 +854,7 @@ const tools: ToolDef[] = [
       required: ['displayName'],
     },
     handler: async (args, session) => {
-      if (!args.displayName) throw new Error('displayName is required');
+      if (!args.displayName) throw new ToolCallError('displayName is required');
       // Block creating a folder whose display name is on the deny list — the deny
       // list keys on displayName for mail, so a denied name must not become creatable.
       const tenantId = getTenantIdFromSession(session);
@@ -841,7 +863,7 @@ const tools: ToolDef[] = [
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
       const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       if (await isPathDenied(tenantId, denySubject, 'mail', args.displayName)) {
-        throw new Error('Access restricted by deny list');
+        throw new ToolCallError('Access restricted by deny list');
       }
       const apiPath = args.parentFolderId ? `${base}/mailFolders/${args.parentFolderId}/childFolders` : `${base}/mailFolders`;
       const result = await graph.api(apiPath).post({ displayName: args.displayName });
@@ -869,11 +891,11 @@ const tools: ToolDef[] = [
       // Block renaming a folder that is itself deny-listed (resolve its current name).
       const currentName = await resolveMailFolderName(graph, args.folderId, base);
       if (currentName && await isPathDenied(tenantId, denySubject, 'mail', currentName)) {
-        throw new Error('Access restricted by deny list');
+        throw new ToolCallError('Access restricted by deny list');
       }
       // Block renaming TO a deny-listed name (parity with create_mail_folder).
       if (await isPathDenied(tenantId, denySubject, 'mail', args.displayName)) {
-        throw new Error('Access restricted by deny list');
+        throw new ToolCallError('Access restricted by deny list');
       }
       const result = await graph.api(`${base}/mailFolders/${args.folderId}`).patch({ displayName: args.displayName });
       return { id: result.id, displayName: result.displayName, parentFolderId: result.parentFolderId, status: 'renamed' };
@@ -900,11 +922,11 @@ const tools: ToolDef[] = [
       // Deny-list check on the folder being moved and on the destination parent.
       const movedName = await resolveMailFolderName(graph, args.folderId, base);
       if (movedName && await isPathDenied(tenantId, denySubject, 'mail', movedName)) {
-        throw new Error('Access restricted by deny list');
+        throw new ToolCallError('Access restricted by deny list');
       }
       const destName = await resolveMailFolderName(graph, args.destinationParentFolderId, base);
       if (destName && await isPathDenied(tenantId, denySubject, 'mail', destName)) {
-        throw new Error('Destination folder restricted by deny list');
+        throw new ToolCallError('Destination folder restricted by deny list');
       }
       const result = await graph.api(`${base}/mailFolders/${args.folderId}/move`).post({ destinationId: args.destinationParentFolderId });
       return { id: result.id, displayName: result.displayName, parentFolderId: result.parentFolderId, status: 'moved' };
@@ -946,7 +968,7 @@ const tools: ToolDef[] = [
       if (args.folderId) {
         const folderName = await resolveMailFolderName(graph, args.folderId, base);
         if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) {
-          throw new Error('Access restricted by deny list');
+          throw new ToolCallError('Access restricted by deny list');
         }
       }
       const maxResults = resolveMaxResults(args.maxResults, 25, 100);
@@ -1001,7 +1023,7 @@ const tools: ToolDef[] = [
       if (args.folderId) {
         const folderName = await resolveMailFolderName(graph, args.folderId, base);
         if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) {
-          throw new Error('Access restricted by deny list');
+          throw new ToolCallError('Access restricted by deny list');
         }
       }
       const maxResults = resolveMaxResults(args.maxResults, 25, 100);
@@ -1029,7 +1051,7 @@ const tools: ToolDef[] = [
       if (msg.parentFolderId) {
         const tenantId = getTenantIdFromSession(session);
         const folderName = await resolveMailFolderName(graph, msg.parentFolderId, base);
-        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) throw new Error('Access restricted by deny list');
+        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) throw new ToolCallError('Access restricted by deny list');
       }
       return msg;
     },
@@ -1053,7 +1075,7 @@ const tools: ToolDef[] = [
       if (msgMeta.parentFolderId) {
         const tenantId = getTenantIdFromSession(session);
         const folderName = await resolveMailFolderName(graph, msgMeta.parentFolderId, base);
-        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) throw new Error('Access restricted by deny list');
+        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) throw new ToolCallError('Access restricted by deny list');
       }
       if (args.attachmentId) {
         return readMailAttachment(graph, `${base}/messages/${args.messageId}/attachments/${args.attachmentId}`);
@@ -1082,7 +1104,7 @@ const tools: ToolDef[] = [
     handler: async (args, session) => {
       // Drafts are written to the Drafts folder — check deny list by display name
       const tenantId = getTenantIdFromSession(session);
-      if (await isPathDenied(tenantId, session.userId, 'mail', 'Drafts')) throw new Error('Access restricted by deny list — Drafts folder is blocked');
+      if (await isPathDenied(tenantId, session.userId, 'mail', 'Drafts')) throw new ToolCallError('Access restricted by deny list — Drafts folder is blocked');
       const attachmentRequests = parseAttachments(args.attachments);
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
@@ -1137,7 +1159,7 @@ const tools: ToolDef[] = [
     },
     handler: (args, session) => {
       const to = args.to;
-      if (!Array.isArray(to) || to.length === 0) throw new Error('forward_message requires at least one recipient in `to`');
+      if (!Array.isArray(to) || to.length === 0) throw new ToolCallError('forward_message requires at least one recipient in `to`');
       return createReplyDraft(args, session, 'createForward', {
         toRecipients: to.map((a: string) => ({ emailAddress: { address: a } })),
       });
@@ -1158,17 +1180,17 @@ const tools: ToolDef[] = [
       const base = args.mailboxId && args.mailboxId !== 'me' ? `/users/${args.mailboxId}` : '/me';
       const denySubject = await resolveDenySubject(graph, session.userId, args.mailboxId);
       if (args.subject === undefined && args.body === undefined && args.to === undefined && args.cc === undefined && args.bcc === undefined && args.from === undefined) {
-        throw new Error('At least one of subject, body, to, cc, bcc, from must be provided');
+        throw new ToolCallError('At least one of subject, body, to, cc, bcc, from must be provided');
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const msgMeta: any = await graph.api(`${base}/messages/${args.messageId}`).select('isDraft,parentFolderId').get();
       if (msgMeta.parentFolderId) {
         const tenantId = getTenantIdFromSession(session);
         const folderName = await resolveMailFolderName(graph, msgMeta.parentFolderId, base);
-        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) throw new Error('Access restricted by deny list');
+        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) throw new ToolCallError('Access restricted by deny list');
       }
       if (msgMeta.isDraft === false) {
-        throw new Error('This message is not a draft. Graph only allows updates to categories/flag/isRead on sent messages — to rewrite the body or recipients, delete the original (delete_message) and create a new draft (create_draft).');
+        throw new ToolCallError('This message is not a draft. Graph only allows updates to categories/flag/isRead on sent messages — to rewrite the body or recipients, delete the original (delete_message) and create a new draft (create_draft).');
       }
       const patch: Record<string, unknown> = {};
       if (args.subject !== undefined) patch.subject = args.subject;
@@ -1221,14 +1243,14 @@ const tools: ToolDef[] = [
 
       if (emailOutputMode === 'draft') {
         // Saving to Drafts — check the Drafts folder deny list by display name
-        if (await isPathDenied(tenantId, session.userId, 'mail', 'Drafts')) throw new Error('Access restricted by deny list — Drafts folder is blocked');
+        if (await isPathDenied(tenantId, session.userId, 'mail', 'Drafts')) throw new ToolCallError('Access restricted by deny list — Drafts folder is blocked');
         const attachments = await resolveAttachments(graph, attachmentRequests, attachmentCtx);
         const result = await createDraftWithAttachments(graph, message, attachments);
         return { status: 'queued_as_draft', subject: args.subject, to: args.to, ...(from ? { from } : {}), draftId: result.id, draftLink: result.webLink };
       }
 
       // send mode — delivers immediately, saves to Sent Items; check that folder's deny list
-      if (await isPathDenied(tenantId, session.userId, 'mail', 'Sent Items')) throw new Error('Access restricted by deny list — Sent Items folder is blocked');
+      if (await isPathDenied(tenantId, session.userId, 'mail', 'Sent Items')) throw new ToolCallError('Access restricted by deny list — Sent Items folder is blocked');
       const attachments = await resolveAttachments(graph, attachmentRequests, attachmentCtx);
       await sendMailWithAttachments(graph, message, attachments, true);
       return { status: 'sent', subject: args.subject, to: args.to, ...(from ? { from } : {}) };
@@ -1264,15 +1286,15 @@ const tools: ToolDef[] = [
       if (draft.parentFolderId) {
         const folderName = await resolveMailFolderName(graph, draft.parentFolderId, base);
         if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) {
-          throw new Error('Access restricted by deny list');
+          throw new ToolCallError('Access restricted by deny list');
         }
       }
       if (await isPathDenied(tenantId, denySubject, 'mail', 'Sent Items')) {
-        throw new Error('Access restricted by deny list — Sent Items folder is blocked');
+        throw new ToolCallError('Access restricted by deny list — Sent Items folder is blocked');
       }
 
       if (draft.isDraft === false) {
-        throw new Error('This message is not a draft — it has already been sent. send_draft only dispatches unsent drafts.');
+        throw new ToolCallError('This message is not a draft — it has already been sent. send_draft only dispatches unsent drafts.');
       }
 
       // Email output mode gates this exactly as it gates send_mail. A draft that an
@@ -1286,7 +1308,7 @@ const tools: ToolDef[] = [
         const howToChange = enforced
           ? 'Draft mode is enforced by your administrator and cannot be changed by this tool.'
           : 'Only the user can switch to send mode, in the web UI under My Email Settings.';
-        throw new Error(
+        throw new ToolCallError(
           "Your email output mode is 'draft', so drafts are sent by a person, not by this tool. " +
           `Open the draft and send it from Outlook: ${draft.webLink ?? '(no link available)'}. ` +
           howToChange
@@ -1339,7 +1361,7 @@ const tools: ToolDef[] = [
     },
     handler: async (args, session) => {
       const mode = args.emailOutputMode;
-      if (mode !== 'draft' && mode !== 'send') throw new Error("emailOutputMode must be 'draft' or 'send'");
+      if (mode !== 'draft' && mode !== 'send') throw new ToolCallError("emailOutputMode must be 'draft' or 'send'");
       const tenantId = getTenantIdFromSession(session);
       // Enforced draft mode: an agent-facing tool must not be able to lift the one control
       // that puts a person between composition and delivery. Refuse before any write, for either
@@ -1348,7 +1370,7 @@ const tools: ToolDef[] = [
       const { enforced, enforcedBy } = await getUserEmailSettings(tenantId, session.userId);
       if (enforced) {
         const scope = enforcedBy === 'tenant' ? 'for this tenant' : 'for your account';
-        throw new Error(
+        throw new ToolCallError(
           `${ENFORCED_MODE_MARKER} ${scope}, so set_email_output_mode cannot change it. ` +
           'Emails will be saved to Drafts for a person to review and send. Only an administrator can lift this in the admin UI.'
         );
@@ -1357,7 +1379,7 @@ const tools: ToolDef[] = [
       // only needs two calls, set_email_output_mode('send') then send_mail, and draft mode
       // protects only tenants that knew to enforce it. The REST route and web UI keep full control.
       if (mode === 'send') {
-        throw new Error(
+        throw new ToolCallError(
           `${SEND_MODE_UI_ONLY_MARKER}; it can only tighten the mode to draft. ` +
           'Ask the user to switch to send mode themselves in the web UI under My Email Settings.'
         );
@@ -1385,10 +1407,10 @@ const tools: ToolDef[] = [
       const msgMeta: any = await graph.api(`${base}/messages/${args.messageId}`).select('parentFolderId').get();
       if (msgMeta.parentFolderId) {
         const srcName = await resolveMailFolderName(graph, msgMeta.parentFolderId, base);
-        if (srcName && await isPathDenied(tenantId, denySubject, 'mail', srcName)) throw new Error('Access restricted by deny list');
+        if (srcName && await isPathDenied(tenantId, denySubject, 'mail', srcName)) throw new ToolCallError('Access restricted by deny list');
       }
       const destName = await resolveMailFolderName(graph, args.destinationFolderId, base);
-      if (destName && await isPathDenied(tenantId, denySubject, 'mail', destName)) throw new Error('Destination folder restricted by deny list');
+      if (destName && await isPathDenied(tenantId, denySubject, 'mail', destName)) throw new ToolCallError('Destination folder restricted by deny list');
       const result = await graph.api(`${base}/messages/${args.messageId}/move`).post({ destinationId: args.destinationFolderId });
       return { id: result.id, subject: result.subject, status: 'moved' };
     },
@@ -1411,7 +1433,7 @@ const tools: ToolDef[] = [
       if (msgMeta.parentFolderId) {
         const tenantId = getTenantIdFromSession(session);
         const folderName = await resolveMailFolderName(graph, msgMeta.parentFolderId, base);
-        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) throw new Error('Access restricted by deny list');
+        if (folderName && await isPathDenied(tenantId, denySubject, 'mail', folderName)) throw new ToolCallError('Access restricted by deny list');
       }
       await graph.api(`${base}/messages/${args.messageId}`).delete();
       return { status: 'deleted', messageId: args.messageId };
@@ -1455,8 +1477,8 @@ const tools: ToolDef[] = [
       const metadata: any = await graph.api(`/me/drive/items/${args.itemId}`).select('id,name,webUrl,size,file,parentReference,createdDateTime,lastModifiedDateTime').get();
       const filePath = `${metadata.parentReference?.path ?? ''}/${metadata.name}`;
       const tenantId = getTenantIdFromSession(session);
-      if (await isPathDenied(tenantId, session.userId, 'onedrive', filePath)) throw new Error('Access restricted by deny list');
-      if (!metadata.file) throw new Error('Item is not a file');
+      if (await isPathDenied(tenantId, session.userId, 'onedrive', filePath)) throw new ToolCallError('Access restricted by deny list');
+      if (!metadata.file) throw new ToolCallError('Item is not a file');
       const buf = await readDriveFileContent(graph, `/me/drive/items/${args.itemId}/content`, metadata);
       const mime = metadata.file.mimeType ?? 'application/octet-stream';
       const isText = isTextMime(mime);
@@ -1473,7 +1495,7 @@ const tools: ToolDef[] = [
     },
     handler: async (args, session) => {
       const tenantId = getTenantIdFromSession(session);
-      if (await isPathDenied(tenantId, session.userId, 'onedrive', args.path)) throw new Error('Access restricted by deny list');
+      if (await isPathDenied(tenantId, session.userId, 'onedrive', args.path)) throw new ToolCallError('Access restricted by deny list');
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const buf = args.encoding === 'base64' ? Buffer.from(args.content, 'base64') : Buffer.from(args.content, 'utf-8');
@@ -1497,12 +1519,12 @@ const tools: ToolDef[] = [
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const meta: any = await graph.api(`/me/drive/items/${args.itemId}`).select('name,parentReference').get();
       const itemPath = `${meta.parentReference?.path ?? ''}/${meta.name}`;
-      if (await isPathDenied(tenantId, session.userId, 'onedrive', itemPath)) throw new Error('Access restricted by deny list');
+      if (await isPathDenied(tenantId, session.userId, 'onedrive', itemPath)) throw new ToolCallError('Access restricted by deny list');
       // Check deny list for destination folder
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const destMeta: any = await graph.api(`/me/drive/items/${args.destinationFolderId}`).select('name,parentReference').get();
       const destPath = `${destMeta.parentReference?.path ?? ''}/${destMeta.name}`;
-      if (await isPathDenied(tenantId, session.userId, 'onedrive', destPath)) throw new Error('Destination folder restricted by deny list');
+      if (await isPathDenied(tenantId, session.userId, 'onedrive', destPath)) throw new ToolCallError('Destination folder restricted by deny list');
       const patch: Record<string, unknown> = { parentReference: { id: args.destinationFolderId } };
       if (args.newName) patch.name = args.newName;
       const result = await graph.api(`/me/drive/items/${args.itemId}`).patch(patch);
@@ -1526,7 +1548,7 @@ const tools: ToolDef[] = [
         const parentMeta: any = await graph.api(`/me/drive/items/${args.parentId}`).select('name,parentReference').get();
         const parentPath = `${parentMeta.parentReference?.path ?? ''}/${parentMeta.name}`;
         const tenantId = getTenantIdFromSession(session);
-        if (await isPathDenied(tenantId, session.userId, 'onedrive', `${parentPath}/${args.name}`)) throw new Error('Access restricted by deny list');
+        if (await isPathDenied(tenantId, session.userId, 'onedrive', `${parentPath}/${args.name}`)) throw new ToolCallError('Access restricted by deny list');
       }
       const apiPath = args.parentId ? `/me/drive/items/${args.parentId}/children` : '/me/drive/root/children';
       const result = await graph.api(apiPath).post({ name: args.name, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' });
@@ -1544,7 +1566,7 @@ const tools: ToolDef[] = [
       const meta: any = await graph.api(`/me/drive/items/${args.itemId}`).select('name,parentReference').get();
       const itemPath = `${meta.parentReference?.path ?? ''}/${meta.name}`;
       const tenantId = getTenantIdFromSession(session);
-      if (await isPathDenied(tenantId, session.userId, 'onedrive', itemPath)) throw new Error('Access restricted by deny list');
+      if (await isPathDenied(tenantId, session.userId, 'onedrive', itemPath)) throw new ToolCallError('Access restricted by deny list');
       await graph.api(`/me/drive/items/${args.itemId}`).delete();
       return { status: 'deleted', itemId: args.itemId };
     },
@@ -1585,7 +1607,7 @@ const tools: ToolDef[] = [
     },
     handler: async (args, session) => {
       if (!args.name || typeof args.name !== 'string' || !args.name.trim()) {
-        throw new Error('name is required and must be a non-empty string');
+        throw new ToolCallError('name is required and must be a non-empty string');
       }
       // Normalize once and use the trimmed name for BOTH the deny-list check and
       // the Graph create body. isPathDenied canonicalizes slash/case but not
@@ -1599,7 +1621,7 @@ const tools: ToolDef[] = [
       // who blocks a calendar by name should not be able to have one recreated
       // under the same name through this tool.
       if (await isPathDenied(tenantId, session.userId, 'calendar', name)) {
-        throw new Error('Access restricted by deny list');
+        throw new ToolCallError('Access restricted by deny list');
       }
       const body: Record<string, unknown> = { name };
       if (args.color) body.color = args.color;
@@ -1633,7 +1655,7 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       // Deny-list enforcement (by ID and name) for the explicit or default calendar.
       const listViolation = await checkCalendarAccess(graph, getTenantIdFromSession(session), session.userId, args.calendarId);
-      if (listViolation) throw new Error(listViolation.error);
+      if (listViolation) throw new ToolCallError(listViolation.error);
       const tz = args.timeZone ?? 'America/Los_Angeles';
       const top = resolveMaxResults(args.maxResults, 25, 100);
       const select = 'id,subject,start,end,location,organizer,attendees,isAllDay,webLink';
@@ -1678,7 +1700,7 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       // Deny-list enforcement (by ID and name) for the explicit or default calendar.
       const getViolation = await checkCalendarAccess(graph, getTenantIdFromSession(session), session.userId, args.calendarId);
-      if (getViolation) throw new Error(getViolation.error);
+      if (getViolation) throw new ToolCallError(getViolation.error);
       const encEventId = encodeGraphId(args.eventId, 'eventId');
       const apiPath = args.calendarId
         ? `/me/calendars/${encodeGraphId(args.calendarId, 'calendarId')}/events/${encEventId}`
@@ -1712,7 +1734,7 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       // Deny-list enforcement (by ID and name) for the explicit or default calendar.
       const createViolation = await checkCalendarAccess(graph, getTenantIdFromSession(session), session.userId, args.calendarId);
-      if (createViolation) throw new Error(createViolation.error);
+      if (createViolation) throw new ToolCallError(createViolation.error);
       // Honor an explicit timeZone; otherwise default to the mailbox's own
       // configured zone rather than a hardcoded one. Fails loud if the
       // zone can't be resolved — never guesses.
@@ -1758,7 +1780,7 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       // Deny-list enforcement (by ID and name) for the explicit or default calendar.
       const updateViolation = await checkCalendarAccess(graph, getTenantIdFromSession(session), session.userId, args.calendarId);
-      if (updateViolation) throw new Error(updateViolation.error);
+      if (updateViolation) throw new ToolCallError(updateViolation.error);
       // Resolve a time zone only when the caller is actually changing start/end.
       // Honor an explicit timeZone, else default to the mailbox's own zone
       //; never guess a hardcoded one, and never make an extra Graph
@@ -1799,7 +1821,7 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       // Deny-list enforcement (by ID and name) for the explicit or default calendar.
       const deleteViolation = await checkCalendarAccess(graph, getTenantIdFromSession(session), session.userId, args.calendarId);
-      if (deleteViolation) throw new Error(deleteViolation.error);
+      if (deleteViolation) throw new ToolCallError(deleteViolation.error);
       const encDelEventId = encodeGraphId(args.eventId, 'eventId');
       const apiPath = args.calendarId
         ? `/me/calendars/${encodeGraphId(args.calendarId, 'calendarId')}/events/${encDelEventId}`
@@ -1848,15 +1870,15 @@ const tools: ToolDef[] = [
       // resolveDefaultCalendarId that checkCalendarAccess also consults.
       const effectiveSourceId = args.calendarId || (await resolveDefaultCalendarId(graph, userId));
       if (effectiveSourceId && effectiveSourceId === args.targetCalendarId) {
-        throw new Error('Source and target calendars are the same — nothing to move');
+        throw new ToolCallError('Source and target calendars are the same — nothing to move');
       }
       // Deny-list enforcement on BOTH ends: the source calendar (explicit or
       // default) and the target calendar. A blocked calendar on either side
       // refuses the move before any data is touched.
       const sourceViolation = await checkCalendarAccess(graph, tenantId, userId, args.calendarId);
-      if (sourceViolation) throw new Error(sourceViolation.error);
+      if (sourceViolation) throw new ToolCallError(sourceViolation.error);
       const targetViolation = await checkCalendarAccess(graph, tenantId, userId, args.targetCalendarId);
-      if (targetViolation) throw new Error(targetViolation.error);
+      if (targetViolation) throw new ToolCallError(targetViolation.error);
 
       const encMoveEventId = encodeGraphId(args.eventId, 'eventId');
       const encTargetCalId = encodeGraphId(args.targetCalendarId, 'targetCalendarId');
@@ -1873,7 +1895,7 @@ const tools: ToolDef[] = [
           .select('id,subject,body,start,end,location,locations,categories,sensitivity,showAs,importance,isAllDay,isReminderOn,reminderMinutesBeforeStart,recurrence,attendees,isOrganizer,type,seriesMasterId,hasAttachments')
           .get();
       } catch (err: unknown) {
-        if (isGraphNotFound(err)) throw new Error(`No calendar event found with ID "${args.eventId}"`);
+        if (isGraphNotFound(err)) throw new ToolCallError(`No calendar event found with ID "${args.eventId}"`);
         throw err;
       }
 
@@ -1881,7 +1903,7 @@ const tools: ToolDef[] = [
       // event, silently severing it from the series. Refuse and point the caller
       // at the series master.
       if (src.type === 'occurrence' || src.type === 'exception' || src.seriesMasterId) {
-        throw new Error(
+        throw new ToolCallError(
           'This event is a single occurrence of a recurring series. Move the series master instead ' +
           '(get_event on the series master, then move_event with its id) so the whole series moves as a unit.',
         );
@@ -1889,14 +1911,14 @@ const tools: ToolDef[] = [
       // Moving an event you do not organize has the same blast radius as moving
       // someone else\'s meeting — refuse outright (no force override).
       if (src.isOrganizer === false) {
-        throw new Error(
+        throw new ToolCallError(
           'You are not the organizer of this event. Moving an invite you received would recreate the meeting ' +
           'and notify everyone — refused.',
         );
       }
       const attendees = Array.isArray(src.attendees) ? src.attendees : [];
       if (attendees.length > 0 && !args.force) {
-        throw new Error(
+        throw new ToolCallError(
           `This event has ${attendees.length} attendee(s). Moving it will send fresh invitations to all of them ` +
           'and a cancellation for the original — real outbound mail. Re-run with force=true to proceed.',
         );
@@ -1937,7 +1959,7 @@ const tools: ToolDef[] = [
       // source before we hold a new event id.
       const created = await graph.api(`/me/calendars/${encTargetCalId}/events`).post(copy);
       if (!created?.id) {
-        throw new Error('Move aborted: the target calendar did not return a created event. The original is untouched.');
+        throw new ToolCallError('Move aborted: the target calendar did not return a created event. The original is untouched.');
       }
 
       // Copy file attachments. Best-effort: item/reference attachments can\'t be
@@ -2001,7 +2023,7 @@ const tools: ToolDef[] = [
     },
     handler: async (args, session) => {
       const responseChoice = EVENT_RESPONSE_ACTIONS[args.response];
-      if (!responseChoice) throw new Error(`Invalid response "${args.response}" — use accept, tentative, or decline`);
+      if (!responseChoice) throw new ToolCallError(`Invalid response "${args.response}" — use accept, tentative, or decline`);
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
@@ -2012,7 +2034,7 @@ const tools: ToolDef[] = [
       // explicit mailbox is checked against ITS default calendar directly.
       if (base === '/me') {
         const respondViolation = await checkCalendarAccess(graph, tenantId, session.userId, undefined);
-        if (respondViolation) throw new Error(respondViolation.error);
+        if (respondViolation) throw new ToolCallError(respondViolation.error);
       } else {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const cal: any = await graph.api(`${base}/calendar`).select('id,name').get();
@@ -2020,7 +2042,7 @@ const tools: ToolDef[] = [
           (cal?.id && (await isPathDenied(tenantId, denySubject, 'calendar', cal.id))) ||
           (cal?.name && (await isPathDenied(tenantId, denySubject, 'calendar', cal.name)))
         ) {
-          throw new Error('Access restricted by deny list');
+          throw new ToolCallError('Access restricted by deny list');
         }
       }
       // Resolve the target event: try the ID as an event first; when Graph says
@@ -2043,12 +2065,12 @@ const tools: ToolDef[] = [
             .get();
         } catch (msgErr: unknown) {
           if (isGraphNotFound(msgErr)) {
-            throw new Error(`No calendar event or message found with ID "${args.messageOrEventId}"`);
+            throw new ToolCallError(`No calendar event or message found with ID "${args.messageOrEventId}"`);
           }
           throw msgErr;
         }
         if (!msg?.event?.id) {
-          throw new Error('The message is not a meeting invitation — there is no linked calendar event to respond to');
+          throw new ToolCallError('The message is not a meeting invitation — there is no linked calendar event to respond to');
         }
         eventId = msg.event.id;
       }
@@ -2091,12 +2113,12 @@ const tools: ToolDef[] = [
     },
     handler: async (args, session) => {
       if (!Array.isArray(args.schedules) || args.schedules.length === 0) {
-        throw new Error('schedules must be a non-empty array of email addresses');
+        throw new ToolCallError('schedules must be a non-empty array of email addresses');
       }
       if (!args.startDateTime || !args.endDateTime) {
         // A missing bound leaves dateTime undefined, which Graph reports as the
         // opaque "FreeBusyViewOptions.TimeWindow is invalid" — fail loud instead.
-        throw new Error('get_schedule requires both startDateTime and endDateTime');
+        throw new ToolCallError('get_schedule requires both startDateTime and endDateTime');
       }
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
@@ -2150,7 +2172,7 @@ const tools: ToolDef[] = [
     },
     handler: async (args, session) => {
       if (!Array.isArray(args.attendees) || args.attendees.length === 0) {
-        throw new Error('attendees must be a non-empty array of email addresses');
+        throw new ToolCallError('attendees must be a non-empty array of email addresses');
       }
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
@@ -2230,7 +2252,7 @@ const tools: ToolDef[] = [
       const tenantId = getTenantIdFromSession(session);
       // Deny-list check on explicit folderId
       if (args.folderId && await isPathDenied(tenantId, session.userId, 'contacts', args.folderId)) {
-        throw new Error('Access restricted by deny list');
+        throw new ToolCallError('Access restricted by deny list');
       }
       // Route through the shared helper so the synthetic 'contacts-root' id
       // (returned by list_contact_folders for the default folder) maps back to
@@ -2279,10 +2301,10 @@ const tools: ToolDef[] = [
       const tenantId = getTenantIdFromSession(session);
       // Deny-list check: explicit folderId or resolved default contacts folder
       if (args.folderId && args.folderId !== 'contacts-root') {
-        if (await isPathDenied(tenantId, session.userId, 'contacts', args.folderId)) throw new Error('Access restricted by deny list');
+        if (await isPathDenied(tenantId, session.userId, 'contacts', args.folderId)) throw new ToolCallError('Access restricted by deny list');
       } else {
         const defaultFolder = await resolveDefaultContactFolder(graph, session.userId);
-        if (defaultFolder && await isPathDenied(tenantId, session.userId, 'contacts', defaultFolder)) throw new Error('Access to the default contacts folder is restricted by the deny list');
+        if (defaultFolder && await isPathDenied(tenantId, session.userId, 'contacts', defaultFolder)) throw new ToolCallError('Access to the default contacts folder is restricted by the deny list');
       }
       const contact = buildContactBody(args);
       const result = await graph.api(contactsApiPath(args.folderId)).post(contact);
@@ -2304,7 +2326,7 @@ const tools: ToolDef[] = [
       const parentFolderId = await resolveContactParentFolder(graph, session.userId, args.contactId);
       if (parentFolderId) {
         const tenantId = getTenantIdFromSession(session);
-        if (await isPathDenied(tenantId, session.userId, 'contacts', parentFolderId)) throw new Error('Access restricted by deny list');
+        if (await isPathDenied(tenantId, session.userId, 'contacts', parentFolderId)) throw new ToolCallError('Access restricted by deny list');
       }
       const patch = buildContactBody(args);
       const result = await graph.api(`/me/contacts/${args.contactId}`).patch(patch);
@@ -2322,7 +2344,7 @@ const tools: ToolDef[] = [
       const parentFolderId = await resolveContactParentFolder(graph, session.userId, args.contactId);
       if (parentFolderId) {
         const tenantId = getTenantIdFromSession(session);
-        if (await isPathDenied(tenantId, session.userId, 'contacts', parentFolderId)) throw new Error('Access restricted by deny list');
+        if (await isPathDenied(tenantId, session.userId, 'contacts', parentFolderId)) throw new ToolCallError('Access restricted by deny list');
       }
       await graph.api(`/me/contacts/${args.contactId}`).delete();
       return { status: 'deleted', contactId: args.contactId };
@@ -2366,13 +2388,13 @@ const tools: ToolDef[] = [
       required: ['displayName'],
     },
     handler: async (args, session) => {
-      if (!args.displayName) throw new Error('displayName is required');
+      if (!args.displayName) throw new ToolCallError('displayName is required');
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
       // Guard the parent: creating a child under a deny-listed folder is denied.
       if (args.parentFolderId && args.parentFolderId !== 'contacts-root') {
-        if (await isPathDenied(tenantId, session.userId, 'contacts', args.parentFolderId)) throw new Error('Access restricted by deny list');
+        if (await isPathDenied(tenantId, session.userId, 'contacts', args.parentFolderId)) throw new ToolCallError('Access restricted by deny list');
       }
       const apiPath = args.parentFolderId && args.parentFolderId !== 'contacts-root'
         ? `/me/contactFolders/${args.parentFolderId}/childFolders`
@@ -2398,16 +2420,16 @@ const tools: ToolDef[] = [
     },
     handler: async (args, session) => {
       const input = Array.isArray(args.contacts) ? args.contacts : [];
-      if (input.length === 0) throw new Error('contacts must be a non-empty array');
+      if (input.length === 0) throw new ToolCallError('contacts must be a non-empty array');
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
       // Deny-list check once for the shared target folder.
       if (args.folderId && args.folderId !== 'contacts-root') {
-        if (await isPathDenied(tenantId, session.userId, 'contacts', args.folderId)) throw new Error('Access restricted by deny list');
+        if (await isPathDenied(tenantId, session.userId, 'contacts', args.folderId)) throw new ToolCallError('Access restricted by deny list');
       } else {
         const defaultFolder = await resolveDefaultContactFolder(graph, session.userId);
-        if (defaultFolder && await isPathDenied(tenantId, session.userId, 'contacts', defaultFolder)) throw new Error('Access to the default contacts folder is restricted by the deny list');
+        if (defaultFolder && await isPathDenied(tenantId, session.userId, 'contacts', defaultFolder)) throw new ToolCallError('Access to the default contacts folder is restricted by the deny list');
       }
       const url = contactsApiPath(args.folderId);
       const results = await runContactBatch(graph, input, url);
@@ -2448,7 +2470,7 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       // Deny-list check on notebookId
       const tenantId = getTenantIdFromSession(session);
-      if (await isPathDenied(tenantId, session.userId, 'onenote', args.notebookId)) throw new Error('Access restricted by deny list');
+      if (await isPathDenied(tenantId, session.userId, 'onenote', args.notebookId)) throw new ToolCallError('Access restricted by deny list');
       const result = await graph.api(`/me/onenote/notebooks/${args.notebookId}/sections`).select('id,displayName,createdDateTime').top(100).get();
       // Post-filter sections by section ID against deny list (section-level blocks)
       const allSections = (result.value ?? []).map((s: { id: string; displayName: string; createdDateTime: string }) => ({ ...s }));
@@ -2470,7 +2492,7 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       // Deny-list check on notebookId
       const tenantId = getTenantIdFromSession(session);
-      if (await isPathDenied(tenantId, session.userId, 'onenote', args.notebookId)) throw new Error('Access restricted by deny list');
+      if (await isPathDenied(tenantId, session.userId, 'onenote', args.notebookId)) throw new ToolCallError('Access restricted by deny list');
       const result = await graph.api(`/me/onenote/notebooks/${args.notebookId}/sections`).post({ displayName: args.displayName });
       return { id: result.id, displayName: result.displayName, status: 'created' };
     },
@@ -2488,10 +2510,10 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       // Check section-level deny first, then parent notebook
       const tenantId = getTenantIdFromSession(session);
-      if (await isPathDenied(tenantId, session.userId, 'onenote', args.sectionId)) throw new Error('Access restricted by deny list — section is blocked');
+      if (await isPathDenied(tenantId, session.userId, 'onenote', args.sectionId)) throw new ToolCallError('Access restricted by deny list — section is blocked');
       const notebookId = await resolveSectionNotebook(graph, args.sectionId);
       if (notebookId) {
-        if (await isPathDenied(tenantId, session.userId, 'onenote', notebookId)) throw new Error('Access restricted by deny list — parent notebook is blocked');
+        if (await isPathDenied(tenantId, session.userId, 'onenote', notebookId)) throw new ToolCallError('Access restricted by deny list — parent notebook is blocked');
       }
       // HTML-escape the title to prevent XSS via title injection
       const safeTitle = String(args.title).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -2538,7 +2560,7 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
       // Block enumerating channels of a denied team (deny list keys on team/channel IDs).
-      if (await isPathDenied(tenantId, session.userId, 'teams', args.teamId)) throw new Error('Access restricted by deny list');
+      if (await isPathDenied(tenantId, session.userId, 'teams', args.teamId)) throw new ToolCallError('Access restricted by deny list');
       // Graph GET /teams/{teamId}/channels does not support $top — appending it fails the whole request.
       const result = await graph.api(`/teams/${args.teamId}/channels`).select('id,displayName,membershipType').get();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2571,7 +2593,7 @@ const tools: ToolDef[] = [
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
-      if (await isPathDenied(tenantId, session.userId, 'teams', args.chatId)) throw new Error('Access restricted by deny list');
+      if (await isPathDenied(tenantId, session.userId, 'teams', args.chatId)) throw new ToolCallError('Access restricted by deny list');
       await enforceOutboundPolicy({
         graph, tenantId, userId: session.userId, channel: 'teamsMessages', alwaysNotifies: true,
         recipients: () => teamsMemberRecipients(graph, `/chats/${encodeGraphId(args.chatId, 'chatId')}/members`, 'ChatMember.Read'),
@@ -2602,8 +2624,8 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
       // Deny-list check on both the team and the channel (deny list keys on IDs for teams).
-      if (await isPathDenied(tenantId, session.userId, 'teams', args.teamId)) throw new Error('Access restricted by deny list');
-      if (await isPathDenied(tenantId, session.userId, 'teams', args.channelId)) throw new Error('Access restricted by deny list');
+      if (await isPathDenied(tenantId, session.userId, 'teams', args.teamId)) throw new ToolCallError('Access restricted by deny list');
+      if (await isPathDenied(tenantId, session.userId, 'teams', args.channelId)) throw new ToolCallError('Access restricted by deny list');
       // Channel members include guests and, on a shared channel, people from other tenants.
       // `/allMembers`, not `/members`: a shared channel also reaches the indirect
       // members of every team it is shared with, and only `/allMembers` lists them.
@@ -2945,19 +2967,13 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
       };
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';
-      context.error(`MCP tool ${toolName} error:`, message);
+      // The full detail stays server-side under a reference the client is
+      // given when its message is replaced by the generic one.
+      const reference = newErrorReference();
+      context.error(`MCP tool ${toolName} error [ref ${reference}]:`, errorLogDetail(err));
 
       // Log denied access for policy/deny-list errors thrown inside tool handlers
-      const isDenied = message.includes('restricted by the deny list') ||
-        message.includes('Access restricted by deny list') ||
-        message.includes('read-only mode') ||
-        message.includes('not in the allowed sites') ||
-        message.includes('is not enabled') ||
-        message.includes('disabled for your account') ||
-        message.includes('for this agent key') ||
-        message.includes(ENFORCED_MODE_MARKER) ||
-        message.includes(SEND_MODE_UI_ONLY_MARKER) ||
-        message.includes(OUTBOUND_POLICY_MARKER);
+      const isDenied = DENIED_ERROR_PATTERNS.some((p) => message.includes(p));
       if (auth && isDenied) {
         const errorResource = [
           toolArgs.siteId, toolArgs.driveId, toolArgs.listId, toolArgs.itemId,
@@ -2978,9 +2994,13 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
       }
 
       if (message.includes('Re-authentication required')) {
-        return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Session expired. Please re-authenticate at: ${authLoginUrl()}\n\nError: ${message}` }], isError: true } };
+        return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Session expired. Please re-authenticate at: ${authLoginUrl()}` }], isError: true } };
       }
-      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${message}` }], isError: true } };
+      // Only messages written for the caller (refusals, argument errors, Graph
+      // 4xx the user can act on) reach the client. Anything else can carry
+      // Graph or provider internals, so the client gets a generic message.
+      const clientMessage = clientFacingMessage(err, DENIED_ERROR_PATTERNS) ?? genericToolErrorMessage(reference);
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${clientMessage}` }], isError: true } };
     }
   }
 

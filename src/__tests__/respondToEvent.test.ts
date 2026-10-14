@@ -130,6 +130,7 @@ jest.mock('@azure/functions', () => ({
 
 import { app } from '@azure/functions';
 import '../functions/mcp/mcpEndpoint.js';
+import { GraphError } from '@microsoft/microsoft-graph-client';
 
 interface HttpRegistration {
   handler: (req: HttpRequest, context: InvocationContext) => Promise<{ status: number; jsonBody?: unknown }>;
@@ -167,8 +168,7 @@ function toolResult(res: { jsonBody?: unknown }): { parsed: unknown; isError: bo
 }
 
 function graphNotFound(code = 'ErrorItemNotFound', statusCode = 404): Error {
-  const err = new Error(code) as Error & { statusCode: number; code: string };
-  err.statusCode = statusCode;
+  const err = new GraphError(statusCode, code);
   err.code = code;
   return err;
 }
