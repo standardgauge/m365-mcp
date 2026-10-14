@@ -349,6 +349,106 @@ the reads `allowed`, and the write, service, settings and logout refusals
 `denied`. That burst is expected, and its absence after a deploy is worth
 noticing.
 
+## Handling keys
+
+For owners minting keys and the operators who answer for them.
+
+### One key per app
+
+Mint a key for each app or agent, and never hand one key to two of them. The
+audit trail names the key, not the program holding it, so two apps on one key
+read as one in every audit row, and revoking it to stop one breaks the other.
+Separate keys also let each app be narrowed to what it needs, and keep the
+`deploy-smoke` key's expected burst of refusals out of any other key's history.
+Keys are cheap to mint and to edit for exactly this reason (see **Editing a
+key**). Label each one for the app that holds it.
+
+### How long a key should live
+
+The tenant maximum is a ceiling, not a recommendation. Pick the shortest
+lifetime that does not make rotation a chore, and leave the reminder on.
+
+| Use | Longest lifetime | Why |
+|---|---|---|
+| A one-off test, a demo, a prompt being iterated on | 1 to 7 days | Nobody needs it next week, and an expired key needs no clean-up |
+| An app in development on someone's own machine | 30 days | The same cap as a sign-in. Conditional Access is not evaluated when a key is used (see **Operating notes**), so a copy on a laptop is the case it does not cover |
+| An unattended job on a server, key in a secret store (a nightly report) | 90 days | Rotated quarterly on the reminder. Long enough that rotation is a routine, short enough that a copy that leaked unnoticed dies on its own |
+| The post-deploy smoke key, read-only, held only as a pipeline secret | 365 days | Read-only on every service, so a leaked copy can read but not write. See **First-party use** above |
+| A key that can write mail or files, held anywhere but a secret store | 7 days | Write reach outside a secret store is the combination to keep short |
+
+To make these limits rather than advice, set the tenant's
+`maxKeyLifetimeDays` (**Admin → Agent Keys**) to the longest row you accept,
+for example 90. The maximum applies to every key, the smoke key included: below
+365, the smoke key is minted for the maximum and rotated on its reminder.
+
+### How fast a revocation takes effect
+
+The key row is read from storage on every request, without a cache, and
+revoking marks that row before anything else. A request that arrives after the
+revoke returns is refused on every replica, and logged as `auth.agent_key`
+denied with reason `key revoked`. A request already in flight finishes.
+
+Plan around **30 seconds** all the same. That is `SESSION_REVALIDATE_MS`, the
+bound on the key's cached session, which revocation also deletes. It is the
+documented guarantee if the first check ever regresses, and the same bound as
+logout. If storage is unreachable, a key request is refused with 503 rather
+than served from cache, so an outage does not keep a revoked key alive.
+
+### If a key may have been disclosed
+
+A key in a repository, a log, a chat or a ticket, or on a machine that was
+lost, is disclosed. Revoke it first and investigate afterwards: a replacement
+takes a minute, and the investigation does not need the key to stay live.
+
+1. **Revoke** it under **My Settings → Agent Keys** (the owner) or **Admin →
+   Agent Keys** (a Global Administrator).
+2. **Review the audit log** for everything done under the key's device label,
+   `agent-key:<label>#<keyId>`, over the key's whole life.
+3. **Rotate**: mint a replacement for the app with the same or a narrower
+   policy, put it in the app's secret store, and confirm the app's next calls
+   appear under the new key id.
+
+The queries, what to look for, and when one key becomes a wider incident are in
+[incident response](incident-response.md#a-disclosed-agent-key).
+
+### Customer-pilot smoke
+
+Before a customer pilot, show on the customer's own tenant that each key
+control holds on a live instance, not only in the unit suite. Four of the six
+checks are the post-deploy **Functional smoke**, which runs on every deploy once
+go-live item 10.5 is done; the other two are one-time manual checks with a
+throwaway key.
+
+| Check | How it is shown |
+|---|---|
+| Mint | Go-live [item 10.5](customer-go-live.md#10-first-user-first-call-sign-off): the administrator mints the smoke key through the browser |
+| Allow/deny matrix | The [functional smoke](operations-runbook.md#functional-smoke): one real read per held service, and every service outside the key refused |
+| Read-only | The functional smoke: no write tool listed, a write on every held service refused, and `POST /api/mail/settings`, the admin API and logout refused |
+| Audit | The functional smoke's burst of `allowed` and `denied` rows under `agent-key:deploy-smoke#<keyId>`; confirm it in `M365McpAudit_CL` after the first run |
+| Site restriction | Manual, below. The smoke key has no site restriction by design |
+| Revoke | Manual, below. The smoke key has to stay live |
+
+For the two manual checks, mint a key labelled `pilot-smoke`, SharePoint only,
+read-only, restricted to one site, one day, reminder off. Then, with the key in
+`KEY` and the id of a site outside the key in `OTHER_SITE` (the administrator's own
+`list_sites` lists them):
+
+```bash
+mcp() {
+  curl -sS https://your-mcp-host.example.com/api/mcp \
+    -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":$1}"
+}
+mcp '{"name":"list_sites","arguments":{}}'                       # only the one site
+mcp "{\"name\":\"list_sharepoint_lists\",\"arguments\":{\"siteId\":\"$OTHER_SITE\"}}"   # "not in the allowed sites list"
+```
+
+Revoke the key in the browser, then repeat the first call at once. It answers
+with a `Session expired` tool error instead of the site, and the audit log shows the site refusal (`list_sharepoint_lists`
+denied, `Site not in allowedSites`) and `auth.agent_key` denied with `key
+revoked`, both under `agent-key:pilot-smoke#<keyId>`. Record the four results
+with the go-live record.
+
 ## Operating notes
 
 - A key costs one extra Table Storage point read per request over a session
