@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from 'react';
-import FolderBrowser from './FolderBrowser';
 
 interface AllowedSite {
   id: string;
@@ -95,11 +94,11 @@ export default function AllowedSites({ userId, isGlobalAdmin }: Props) {
     if (allowedSites.some((s) => s.id === selectedSiteId)) return;
     const updated = [...allowedSites, { id: site.id, name: site.displayName }];
     setSelectedSiteId('');
-    save(updated);
+    void save(updated);
   };
 
   const handleRemove = (id: string) => {
-    save(allowedSites.filter((s) => s.id !== id));
+    void save(allowedSites.filter((s) => s.id !== id));
   };
 
   /** Resolve a SharePoint site URL server-side (via the session) and add it. */
@@ -225,7 +224,7 @@ export default function AllowedSites({ userId, isGlobalAdmin }: Props) {
                 placeholder="https://yourtenant.sharepoint.com/sites/your-site"
                 value={manualUrl}
                 onChange={(e) => setManualUrl(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') handleManualAdd(); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') void handleManualAdd(); }}
                 disabled={saving || resolving}
               />
               <button

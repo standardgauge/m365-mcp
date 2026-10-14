@@ -69,7 +69,7 @@ export default function AuditLog() {
 
   // Fetch on mount
   useEffect(() => {
-    fetchEntries({ userEmail, startDate, endDate, operation, result });
+    void fetchEntries({ userEmail, startDate, endDate, operation, result });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -83,7 +83,7 @@ export default function AuditLog() {
   }) => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      fetchEntries(filters);
+      void fetchEntries(filters);
     }, 300);
   }, [fetchEntries]);
 
@@ -91,7 +91,7 @@ export default function AuditLog() {
 
   const handleSearch = () => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    fetchEntries(currentFilters);
+    void fetchEntries(currentFilters);
   };
 
   const handleExportCsv = async () => {
@@ -211,6 +211,7 @@ export default function AuditLog() {
             </thead>
             <tbody>
               {entries.map((entry, i) => (
+                // eslint-disable-next-line @eslint-react/no-array-index-key -- audit rows carry no id and the page is replaced wholesale on every fetch, never reordered in place
                 <tr key={i} style={{ background: i % 2 === 0 ? '#fff' : '#fafafa' }}>
                   <td style={{ padding: '5px 10px', borderBottom: '1px solid #eee', whiteSpace: 'nowrap', color: '#555' }}>
                     {new Date(entry.timestamp).toLocaleString()}

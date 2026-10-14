@@ -28,6 +28,11 @@ jobs:
       - name: TypeScript type check
         run: npx tsc --noEmit
 
+      # Vite strips types without checking them, so the admin SPA (and its
+      # component tests) are type-checked here against their own tsconfig.
+      - name: TypeScript type check (admin UI)
+        run: npx tsc -p tsconfig.admin.json
+
       - name: ESLint
         run: npx eslint . --max-warnings 0
 
@@ -172,6 +177,14 @@ jobs:
           for f in install-mcp.ps1.template install-mcp.sh.template m365-mcp-shim.js; do
             test -f "dist/install/$f" || { echo "ERROR dist/install/$f missing after build"; exit 1; }
           done
+
+      - name: Build admin UI
+        run: npm run build:admin
+
+      # The admin SPA's component tests (Vitest + React Testing Library in
+      # jsdom): agent-key minting, editing, narrowing and revoking.
+      - name: Admin UI tests
+        run: npm run test:admin
 
   # ── Container boot (pull requests) ───────────────────────────────────────────
   # container-scan below builds the image only after merge, so nothing proved a

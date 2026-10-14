@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import KeyScopeFields, { SERVICE_LABELS, SERVICE_ORDER, serviceNames } from './KeyScopeFields';
+import KeyScopeFields, { SERVICE_LABELS, SERVICE_ORDER, isNarrowingOf, serviceNames } from './KeyScopeFields';
 import type { KeyPolicy, SitePick } from './KeyScopeFields';
 
 interface TenantPolicy { allowKeys: boolean; disabledServices: string[]; readOnlyServices: string[]; maxKeyLifetimeDays: number; ownersMayWiden: boolean }
@@ -58,7 +58,7 @@ export default function AgentKeyPolicy({ userId, enabledServices, allowedSites }
     }
   }, [userId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
   const save = async (patch: Partial<TenantPolicy>) => {
     setSaving(true);
@@ -118,6 +118,9 @@ export default function AgentKeyPolicy({ userId, enabledServices, allowedSites }
       setSaving(false);
     }
   };
+
+  // An administrator may only narrow; the server refuses anything else, and so does the form.
+  const editWidens = editing ? !isNarrowingOf(editScope, editing.policy) : false;
 
   const live = (keys ?? []).filter((k) => !k.revokedAt);
   const revoked = (keys ?? []).filter((k) => k.revokedAt);
@@ -271,7 +274,7 @@ export default function AgentKeyPolicy({ userId, enabledServices, allowedSites }
             disabled={saving}
           />
           <div className="confirm-actions">
-            <button type="submit" className="confirm-btn" disabled={saving || editScope.services.length === 0}>{saving ? 'Saving…' : 'Save'}</button>
+            <button type="submit" className="confirm-btn" disabled={saving || editScope.services.length === 0 || editWidens}>{saving ? 'Saving…' : 'Save'}</button>
             <button type="button" className="confirm-btn" onClick={() => setEditing(null)} disabled={saving}>Cancel</button>
           </div>
         </form>

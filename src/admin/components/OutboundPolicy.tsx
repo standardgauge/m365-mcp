@@ -78,7 +78,7 @@ export default function OutboundPolicy({ userId, enabledServices, targetUserId }
     }
   }, [userId, targetUserId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
   const handleChange = async (channel: Channel, mode: Mode) => {
     setSaving(channel);

@@ -41,7 +41,7 @@ const FOLDER_ICONS: Record<string, string> = {
   archive: '📦',
 };
 
-function folderIcon(wellKnownName: string | null, name: string): string {
+function folderIcon(wellKnownName: string | null): string {
   if (wellKnownName && FOLDER_ICONS[wellKnownName]) return FOLDER_ICONS[wellKnownName];
   return '📁';
 }
@@ -111,7 +111,7 @@ export default function MailFolderBrowser({ userId, accessToken, onSelect }: Pro
   const renderTree = (nodes: MailTreeNode[], pathPrefix: number[] = []) =>
     nodes.map((node, i) => {
       const nodePath = [...pathPrefix, i];
-      const icon = folderIcon(node.folder.wellKnownName, node.folder.name);
+      const icon = folderIcon(node.folder.wellKnownName);
       return (
         <div key={node.folder.id}>
           <div className="tree-node">

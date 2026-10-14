@@ -180,7 +180,7 @@ export default function FolderBrowser({ userId, accessToken, onSelect, allowedSi
             value={selectedSite?.id ?? ''}
             onChange={(e) => {
               const site = visibleSites.find((s) => s.id === e.target.value);
-              if (site) selectSite(site);
+              if (site) void selectSite(site);
             }}
           >
             <option value="">— select a site —</option>

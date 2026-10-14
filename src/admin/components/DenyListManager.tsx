@@ -114,7 +114,7 @@ export default function DenyListManager({ scope, userId, targetUserId, keyId, re
     }
   }, [listEndpoint, userId, subjectQuery, activeTypes.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
   const addEntry = async (type: DenyListType, path: string, description: string) => {
     if (!path.trim()) return;

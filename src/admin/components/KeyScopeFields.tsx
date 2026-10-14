@@ -67,7 +67,11 @@ export default function KeyScopeFields({ value, onChange, grantable, tenantReadO
                 <input type="checkbox" checked={on} disabled={disabled || (!on && !canAdd) || (!on && !grantable.includes(s))}
                   onChange={(e) => {
                     const services = toggle(value.services, s, e.target.checked);
-                    const readOnlyServices = e.target.checked ? value.readOnlyServices : value.readOnlyServices.filter((x) => x !== s);
+                    // Re-adding a service the key holds read-only brings the flag back with it; its
+                    // read-only box is locked in narrow-only mode, so it could not be set afterwards.
+                    const readOnlyServices = !e.target.checked
+                      ? value.readOnlyServices.filter((x) => x !== s)
+                      : roLockedByBase ? toggle(value.readOnlyServices, s, true) : value.readOnlyServices;
                     const allowedSites = s === 'sharepoint' && !e.target.checked ? [] : value.allowedSites;
                     onChange({ services, readOnlyServices, allowedSites });
                   }} />

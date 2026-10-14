@@ -19,6 +19,7 @@ dev/
 # Test artifacts
 coverage/
 src/__tests__/
+src/admin/__tests__/
 
 # Infra source — not needed in image
 infra/
