@@ -396,10 +396,11 @@ shim's local-file limits.
 
 | # | STRIDE | Threat | Current mitigation | Gap |
 |---|---|---|---|---|
-| 10.1 | D | Flooding public endpoints. | Per-address limit on `login`, `install-poll`, `install-confirm`, `mcp` and `device`, keyed on the ingress-appended forwarded address (IPv6 by `/64`), answering `429`. Optional ingress IP restriction for tenants with named egress. Container Apps scales to three replicas. | The limit is per replica and in memory, so three replicas allow three times it, and a distributed source with many addresses is not slowed. A volumetric attack needs an edge service (Front Door with WAF rate rules); not in the templates. |
+| 10.1 | D | Flooding public endpoints. | Per-address limit on `login`, `install-poll`, `install-confirm`, `mcp` and `device`, keyed on the ingress-appended forwarded address (IPv6 by `/64`), answering `429`. Optional ingress IP restriction for tenants with named egress. Container Apps scales to three replicas. | The limit is per replica and in memory, so three replicas allow three times it (the per-route ceilings are in the [runbook](operations-runbook.md#rate-limiting-and-ingress-restriction)), and a distributed source with many addresses is not slowed. Production expects an edge rate limit (Front Door or Application Gateway WAF) with ingress restricted to the edge, set and verified at [go-live item 3.4](customer-go-live.md#3-hostname-redirect-uri-and-frontend-url) and described in [production ingress](operations-runbook.md#production-ingress-edge-rate-limit-and-body-size). Operator setting, not in the templates; an instance without an edge relies on this row's mitigation alone. |
 | 10.2 | D | An unknown bearer token or an oversized request costs disproportionate work. | A token lookup is one point read on its hash, hit or miss: rows from before multi-session support are re-keyed to the hash (or dropped, if no token can reach them) once at process start, so there is no scan fallback. A request carries at most three token candidates, so at most three reads. A JSON-RPC batch is capped at 20 messages; an empty or larger batch gets `-32600` before any session lookup. | None. |
 | 10.3 | D | MSAL cache write failure signs users out. | A failed or losing write is logged and the account's existing row stands, so the next refresh uses the refresh token already there. Writes do not fail for size, because a row holds one account. | None. |
 | 10.4 | D | Cold start. | Minimum one replica in the templates. | Operator setting. |
+| 10.5 | D | A very large request body holds memory and a worker before any handler can refuse it. | The Functions host refuses a body over `FUNCTIONS_REQUEST_BODY_SIZE_LIMIT`, 100 MB by default. Production sets it to the largest legitimate inline attachment (32 MB suggested) and sets the same cap at the edge, verified with an over-cap request answering `413` at go-live item 3.4. | Container Apps ingress has no body cap of its own, so an instance that keeps the default accepts 100 MB bodies. Operator setting. |
 
 ---
 
@@ -462,7 +463,8 @@ line names the rows it exercises.
    session-row identity column edits with and without
    `MCP_SESSION_REQUIRE_IDENTITY_BINDING` (2.2, 2.3).
 8. **Availability.** Unknown-token request cost, batch size, device-flow
-   start-up cost (10.1, 10.2, 1.4).
+   start-up cost, request body cap, and whether the edge limit can be walked
+   around through the Container Apps hostname (10.1, 10.2, 10.5, 1.4).
 
 Out of scope: Microsoft Graph and Entra ID themselves, and any instance the
 tester's client does not own (see [SECURITY.md](../SECURITY.md)).
