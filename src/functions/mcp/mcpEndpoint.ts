@@ -61,6 +61,7 @@ import {
 } from '../../services/sharepointSearch.js';
 import { collectPage } from '../../services/graphPaging.js';
 import { readMailAttachment } from '../../services/mailAttachmentContent.js';
+import { readDriveFileContent } from '../../services/driveFileRead.js';
 
 /**
  * Streamable HTTP MCP endpoint.
@@ -552,7 +553,7 @@ const tools: ToolDef[] = [
   },
   {
     name: 'read_file',
-    description: 'Fetch content of a SharePoint file (text as UTF-8, binary as base64)',
+    description: 'Fetch content of a SharePoint file (text as UTF-8, binary as base64). Files over the server\'s readable-size cap (default 150 MB) are refused before download.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -572,10 +573,7 @@ const tools: ToolDef[] = [
       const tenantId = getTenantIdFromSession(session);
       if (await isPathDenied(tenantId, session.userId, 'sharepoint', filePath)) throw new Error('Access restricted by deny list');
       if (!metadata.file) throw new Error('Item is not a file');
-      const stream = await graph.api(`${dp}/items/${args.itemId}/content`).getStream();
-      const chunks: Buffer[] = [];
-      for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
-      const buf = Buffer.concat(chunks);
+      const buf = await readDriveFileContent(graph, `${dp}/items/${args.itemId}/content`, metadata);
       const mime = metadata.file.mimeType ?? 'application/octet-stream';
       const isText = isTextMime(mime);
       return { id: metadata.id, name: metadata.name, mimeType: mime, size: metadata.size, content: isText ? buf.toString('utf-8') : buf.toString('base64'), encoding: isText ? 'utf-8' : 'base64' };
@@ -1448,7 +1446,7 @@ const tools: ToolDef[] = [
   },
   {
     name: 'read_onedrive_file',
-    description: 'Fetch content of a file from personal OneDrive',
+    description: 'Fetch content of a file from personal OneDrive (text as UTF-8, binary as base64). Files over the server\'s readable-size cap (default 150 MB) are refused before download.',
     inputSchema: { type: 'object', properties: { itemId: prop('string', 'File item ID') }, required: ['itemId'] },
     handler: async (args, session) => {
       const token = await getValidAccessTokenForSession(session);
@@ -1459,10 +1457,7 @@ const tools: ToolDef[] = [
       const tenantId = getTenantIdFromSession(session);
       if (await isPathDenied(tenantId, session.userId, 'onedrive', filePath)) throw new Error('Access restricted by deny list');
       if (!metadata.file) throw new Error('Item is not a file');
-      const stream = await graph.api(`/me/drive/items/${args.itemId}/content`).getStream();
-      const chunks: Buffer[] = [];
-      for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
-      const buf = Buffer.concat(chunks);
+      const buf = await readDriveFileContent(graph, `/me/drive/items/${args.itemId}/content`, metadata);
       const mime = metadata.file.mimeType ?? 'application/octet-stream';
       const isText = isTextMime(mime);
       return { id: metadata.id, name: metadata.name, mimeType: mime, size: metadata.size, content: isText ? buf.toString('utf-8') : buf.toString('base64'), encoding: isText ? 'utf-8' : 'base64' };

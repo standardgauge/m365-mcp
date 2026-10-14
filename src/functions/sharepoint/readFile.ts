@@ -6,6 +6,7 @@ import { withPolicyEnforcement } from '../../services/policyEnforcement.js';
 import { assertOpaqueId } from '../../services/opaqueId.js';
 import type { AuthResult } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
+import { FileTooLargeError, readDriveFileContent } from '../../services/driveFileRead.js';
 
 // MIME types we treat as readable text and return as UTF-8 strings
 const TEXT_MIME_PREFIXES = ['text/', 'application/json', 'application/xml', 'application/javascript'];
@@ -70,12 +71,13 @@ async function readFileHandler(
     ? `/sites/${siteId}/drives/${driveId}/items/${itemId}/content`
     : `/sites/${siteId}/drive/items/${itemId}/content`;
 
-  const stream = await graph.api(contentPath).getStream();
-  const chunks: Buffer[] = [];
-  for await (const chunk of stream) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+  let fileBuffer: Buffer;
+  try {
+    fileBuffer = await readDriveFileContent(graph, contentPath, metadata);
+  } catch (err) {
+    if (err instanceof FileTooLargeError) return { status: 413, jsonBody: { error: err.message } };
+    throw err;
   }
-  const fileBuffer = Buffer.concat(chunks);
 
   const mimeType: string = metadata.file.mimeType ?? 'application/octet-stream';
   const textContent = isTextMime(mimeType);
