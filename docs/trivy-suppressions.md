@@ -22,13 +22,11 @@ file is the long-form record behind those one-liners.
 ## Why the base-OS layer is report-only — ``
 
 The runtime image's OS layer is Microsoft's vendor base image
-(`mcr.microsoft.com/azure-functions/node:4-node22`, currently `debian 12`). We
-do not build that image and cannot bump its OS packages independently. `4-node22`
-is a rolling tag CI already re-pulls fresh on every `main` push, so the only
-remediation available to us for an OS-layer CVE is to wait for Microsoft to
-rebuild the host image — or for Dependabot's docker ecosystem watch
-(`.github/dependabot.yml`) to bump the tag when a newer (e.g. Debian 13) variant
-ships.
+(`mcr.microsoft.com/azure-functions/node`, a versioned `node22` host build,
+currently `debian 12`). We do not build that image and cannot bump its OS
+packages independently, so the only remediation available to us for an OS-layer
+CVE is to move to a newer host build once Microsoft publishes one, by hand or
+through Dependabot's docker ecosystem watch (`.github/dependabot.yml`).
 
 Gating on OS-layer findings therefore reddens `main` CI on every new base-OS CVE
 wave with no action we can take. The trigger for this change was the July-2026
@@ -52,6 +50,32 @@ The move to the Debian 12 `4-node22` base image did not by itself justify
 re-gating: the newer OS still accrues `linux-libc-dev` kernel-header waves,
 so the report-only posture remains the correct long-term stance for a consumed
 vendor image.
+
+## .NET runtime in the Functions host: patch, never suppress
+
+The Functions host is an ASP.NET Core application and it serves every request
+this image receives. Trivy reads its runtime from
+`usr/share/dotnet/shared/Microsoft.{NETCore,AspNetCore}.App/<version>/*.deps.json`
+and gates on it like any other library. A fixable HIGH or CRITICAL there is
+reachable from the public surface, so it is **not** a `.trivyignore` candidate
+the way the vendored MessagePack assembly below is.
+
+The fix is a newer host build. That is why the Dockerfile pins a versioned tag
+(`4.<host>-<rebuild>-node22`) instead of the rolling `4-node22`: Microsoft
+publishes the versioned build first and moves the rolling tag later. In
+October 2026 the rolling tag still served .NET 8.0.31, carrying CVE-2026-70188
+(CRITICAL, ASP.NET Core) and a batch of HIGH runtime advisories, while
+`4.1055.250-1-node22` with 8.0.32 was already published. Pinned, this was a
+one-line bump. On the rolling tag the only move was to wait.
+
+When the scan fails on `Microsoft.NETCore.App.Runtime` or
+`Microsoft.AspNetCore.App.Runtime`:
+
+1. List the newer tags: `curl -s https://mcr.microsoft.com/v2/azure-functions/node/tags/list`.
+2. Read a candidate's runtime version from its image config `Env`
+   (`DOTNET_VERSION`, `ASPNET_VERSION`) and pick the first build at or above the
+   advisory's fixed version.
+3. Bump `Dockerfile` and `Dockerfile.backend.dev` together, tag and digest.
 
 ## `uuid` < 11.1.1 via `@azure/msal-node` — retired
 
