@@ -175,6 +175,7 @@ function callTool(name: string, args: Record<string, unknown>) {
   const req = {
     method: 'POST', headers: new Map<string, string>(),
     json: () => Promise.resolve({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
+    text: () => Promise.resolve(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } })),
   } as unknown as HttpRequest;
   return mcpHandler(req, ctx);
 }
@@ -182,6 +183,7 @@ async function listToolNames(): Promise<string[]> {
   const req = {
     method: 'POST', headers: new Map<string, string>(),
     json: () => Promise.resolve({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    text: () => Promise.resolve(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })),
   } as unknown as HttpRequest;
   const res = await mcpHandler(req, ctx);
   const body = res.jsonBody as { result?: { tools?: Array<{ name: string }> } };
@@ -194,6 +196,7 @@ function toolIsError(res: { jsonBody?: unknown }): { isError: boolean; text: str
 function makeReq(opts: { params?: Record<string, string>; query?: Record<string, string>; body?: unknown }): HttpRequest {
   return {
     json: async () => opts.body ?? {},
+    text: () => Promise.resolve(JSON.stringify(opts.body ?? {})),
     params: opts.params ?? {},
     query: { get: (k: string) => (opts.query && k in opts.query ? opts.query[k] : null) },
     headers: new Map<string, string>(),

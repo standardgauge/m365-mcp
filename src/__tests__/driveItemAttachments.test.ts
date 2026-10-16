@@ -130,6 +130,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
     method: 'POST',
     headers: new Map<string, string>(),
     json: () => Promise.resolve({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
+    text: () => Promise.resolve(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } })),
   } as unknown as HttpRequest;
   const ctx = { error: jest.fn(), warn: jest.fn(), log: jest.fn() } as unknown as InvocationContext;
   const res = await handler(req, ctx);

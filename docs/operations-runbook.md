@@ -653,6 +653,18 @@ down rather than failing.
 
 Things to know:
 
+  * **Body size.** `/api/mcp` refuses a request body over `MCP_MAX_BODY_BYTES`
+    (default 16 MiB) with `413` before it parses the body and before it looks
+    up a session, first on the declared `Content-Length` and then on the
+    bytes actually received, so a client that lies about its length gains
+    nothing. The default is sized to the largest call the shim makes on its
+    own: one local file at its 10 MB cap, inlined as base64 (about 13.3 MiB).
+    Several large local attachments on one `create_draft` or `send_mail` can
+    still go over it; share a link for those, or raise the variable. Lowering
+    the cap below about 14 MiB breaks shim uploads of files the shim accepts.
+    Put a limit of the same size at the ingress as well, so the bytes never
+    reach a replica: Container Apps ingress has no body limit of its own,
+    Front Door and Application Gateway both do.
   * **Per replica.** With three replicas an address can reach up to three times the
     limit. That is deliberate: the limiter makes the routes cost something to
     hammer, it does not meter them.

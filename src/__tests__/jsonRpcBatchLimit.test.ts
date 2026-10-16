@@ -75,6 +75,7 @@ function post(body: unknown) {
     method: 'POST',
     headers: new Map<string, string>(),
     json: () => Promise.resolve(body),
+    text: () => Promise.resolve(JSON.stringify(body)),
   } as unknown as HttpRequest;
   const ctx = { error: jest.fn(), warn: jest.fn(), log: jest.fn() } as unknown as InvocationContext;
   return handler(req, ctx);
