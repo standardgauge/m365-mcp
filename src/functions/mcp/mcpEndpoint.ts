@@ -2998,17 +2998,21 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
 export const MAX_JSONRPC_BATCH = 20;
 
 /**
- * Largest request body the endpoint will read, in bytes. Default 8 MiB, which
- * sits above the largest legitimate tool call (an inline `write_*_file`
- * payload or a batch of twenty) and below anything that could make a single
- * unauthenticated request buffer and parse a serious amount of memory. The
+ * Largest request body the endpoint will read, in bytes. Default 16 MiB, which
+ * sits above the largest legitimate tool call and below anything that could
+ * make a single unauthenticated request buffer and parse a serious amount of
+ * memory. The largest legitimate call is the stdio shim inlining one local
+ * file at its own cap (`MAX_LOCAL_FILE_BYTES`, 10 MiB, in
+ * src/install/m365-mcp-shim.js): base64 makes that about 13.3 MiB, and the
+ * rest is envelope headroom. Raise one and you raise the other; a test
+ * serializes the shim's real request against this default. The
  * check runs before the body is parsed and before authentication, so an
  * oversize request costs the server a header read and nothing else.
  * `MCP_MAX_BODY_BYTES` overrides it; the ingress in front of the app should
  * carry a limit of its own (operations runbook, "Rate limiting and ingress
  * restriction").
  */
-export const DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024;
+export const DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024;
 
 export function maxBodyBytes(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.MCP_MAX_BODY_BYTES?.trim();

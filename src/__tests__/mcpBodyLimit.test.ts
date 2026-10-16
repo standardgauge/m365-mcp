@@ -11,8 +11,13 @@
  *   - a body that is not JSON is a -32700 parse error, not a 500
  *   - a body under the cap flows through as before
  *   - MCP_MAX_BODY_BYTES overrides the default and ignores nonsense values
+ *   - the default admits the stdio shim's request for a file at the shim's own cap
  */
 import { jest } from '@jest/globals';
+import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import type { HttpRequest, InvocationContext } from '@azure/functions';
 
 const mockAuthenticateRequest = jest.fn<() => Promise<unknown>>();
@@ -113,5 +118,42 @@ describe('MCP request body cap', () => {
     expect(maxBodyBytes({ MCP_MAX_BODY_BYTES: '-5' })).toBe(DEFAULT_MAX_BODY_BYTES);
     expect(maxBodyBytes({ MCP_MAX_BODY_BYTES: 'lots' })).toBe(DEFAULT_MAX_BODY_BYTES);
     expect(maxBodyBytes({ MCP_MAX_BODY_BYTES: ' 2048 ' })).toBe(2048);
+  });
+});
+
+// The default has to admit what the stdio shim sends for a file it accepts.
+// Serialize the shim's real rewrite of a file at its own cap, so the two
+// limits cannot drift apart again.
+describe('MCP body cap against the stdio shim', () => {
+  const shim = require('../install/m365-mcp-shim.js');
+  let home: string;
+
+  beforeEach(() => {
+    home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cap-home-')));
+    fs.mkdirSync(path.join(home, 'Documents'));
+    const p = path.join(home, 'Documents', 'largest allowed upload.pdf');
+    fs.writeFileSync(p, crypto.randomBytes(shim.MAX_LOCAL_FILE_BYTES));
+  });
+
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  const call = (name: string, args: Record<string, unknown>) => ({
+    jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name, arguments: args },
+  });
+
+  it.each([
+    ['write_onedrive_file', { path: '/Shared/Reports/2026/largest allowed upload.pdf', localPath: '~/Documents/largest allowed upload.pdf' }],
+    ['create_draft', { subject: 'Report', to: ['someone@example.com'], body: 'Attached.', attachments: [{ path: '~/Documents/largest allowed upload.pdf' }] }],
+    ['send_mail', { subject: 'Report', to: ['someone@example.com'], body: 'Attached.', attachments: [{ path: '~/Documents/largest allowed upload.pdf' }] }],
+  ])('%s with a file at the shim cap fits under the default and is served', async (tool, args) => {
+    const body = JSON.stringify(shim.rewriteToolCall(call(tool, args), { home, env: {} }));
+    const bytes = Buffer.byteLength(body, 'utf8');
+    expect(bytes).toBeGreaterThan(shim.MAX_LOCAL_FILE_BYTES);
+    expect(bytes).toBeLessThanOrEqual(DEFAULT_MAX_BODY_BYTES);
+    const r = await post(body, { 'content-length': String(bytes) }).res;
+    expect(r.status).not.toBe(413);
+    expect(mockAuthenticateRequest).toHaveBeenCalledTimes(1);
   });
 });
