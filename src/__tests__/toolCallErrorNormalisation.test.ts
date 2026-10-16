@@ -250,6 +250,14 @@ describe('tools/call — internal failures are normalised', () => {
     expect(logged).toContain('lookup failed <- caused by Error: socket hang up');
   });
 
+  it('replaces a plain Error whose text happens to contain a policy phrase', async () => {
+    const { text, logged } = await failWith(new Error('backend feature is not enabled on shard-17.internal.example.com'));
+    expect(text).not.toContain('shard-17');
+    expect(text).not.toContain('is not enabled');
+    expect(text).toMatch(REFERENCE_RE);
+    expect(logged).toContain('shard-17.internal.example.com');
+  });
+
   it('gives each failure its own reference', async () => {
     const a = (await failWith(new Error('one'))).text.match(REFERENCE_RE)?.[1];
     const b = (await failWith(new Error('two'))).text.match(REFERENCE_RE)?.[1];
@@ -320,9 +328,10 @@ describe('clientFacingMessage', () => {
     expect(clientFacingMessage(new GraphError(-1, 'no status'))).toBeNull();
   });
 
-  it('allows a plain Error carrying a policy marker, but not a Graph 5xx that happens to', () => {
-    const markers = ['is not enabled'];
-    expect(clientFacingMessage(new Error('Service "teams" is not enabled for this tenant'), markers)).toContain('is not enabled');
-    expect(clientFacingMessage(new GraphError(500, 'Feature is not enabled on shard 7'), markers)).toBeNull();
+  it('judges by type, not by wording: a policy phrase in a plain Error or Graph 5xx is still internal', () => {
+    expect(clientFacingMessage(new Error('backend feature is not enabled on shard-17.internal'))).toBeNull();
+    expect(clientFacingMessage(new Error('Access restricted by deny list'))).toBeNull();
+    expect(clientFacingMessage(new GraphError(500, 'Feature is not enabled on shard 7'))).toBeNull();
+    expect(clientFacingMessage(new ToolCallError('Service "teams" is not enabled for this tenant'))).toContain('is not enabled');
   });
 });

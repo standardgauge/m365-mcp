@@ -9,8 +9,10 @@
  * end may be an agent key that has been compromised, so it gets a generic
  * message and a reference id, and the detail goes to the server log.
  *
- * The split is an allow-list: a message reaches the client only when it is
- * recognised as client-facing. Anything new defaults to generic.
+ * The split is an allow-list by type: a message reaches the client only when
+ * the error is one of the caller-facing classes or an actionable real
+ * GraphError. Message text never decides it, so a plain Error that happens to
+ * contain a policy phrase is still internal. Anything new defaults to generic.
  */
 import { randomUUID } from 'node:crypto';
 import { GraphError } from '@microsoft/microsoft-graph-client';
@@ -42,11 +44,10 @@ const CLIENT_FACING_CLASSES = [
 
 /**
  * The text a failure may show the client, or null when it is internal and must
- * be replaced by the generic message. `extraPatterns` lets the caller add
- * policy markers it already classifies (the denied-audit set), so a refusal the
- * audit log records as denied is never hidden from the agent.
+ * be replaced by the generic message. A policy refusal reaches the agent
+ * because it is thrown as a caller-facing class, not because of its wording.
  */
-export function clientFacingMessage(err: unknown, extraPatterns: readonly string[] = []): string | null {
+export function clientFacingMessage(err: unknown): string | null {
   if (!(err instanceof Error)) return null;
   if (CLIENT_FACING_CLASSES.some((cls) => err instanceof cls)) return err.message;
   // A Graph error is judged by its status alone: its text is Graph's, so a 5xx
@@ -56,7 +57,6 @@ export function clientFacingMessage(err: unknown, extraPatterns: readonly string
     const code = typeof err.code === 'string' && err.code ? ` ${err.code}` : '';
     return `Microsoft Graph returned ${err.statusCode}${code}: ${err.message}`;
   }
-  if (extraPatterns.some((p) => err.message.includes(p))) return err.message;
   return null;
 }
 

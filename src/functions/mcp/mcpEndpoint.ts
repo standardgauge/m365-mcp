@@ -161,8 +161,10 @@ const SEND_MODE_UI_ONLY_MARKER = 'set_email_output_mode cannot switch to send mo
 
 /**
  * Substrings of a tool-handler error that mark it a policy refusal. The
- * tools/call catch audits a match as denied, and always shows it to the client
- * however it was thrown, since the agent has to see why it was refused.
+ * tools/call catch audits a match as denied. They do not decide what the client
+ * sees: a refusal reaches the agent because it is thrown as a ToolCallError (or
+ * another caller-facing class), so a plain Error carrying one of these phrases
+ * is still replaced by the generic message.
  */
 const DENIED_ERROR_PATTERNS: readonly string[] = [
   'restricted by the deny list',
@@ -2999,7 +3001,7 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
       // Only messages written for the caller (refusals, argument errors, Graph
       // 4xx the user can act on) reach the client. Anything else can carry
       // Graph or provider internals, so the client gets a generic message.
-      const clientMessage = clientFacingMessage(err, DENIED_ERROR_PATTERNS) ?? genericToolErrorMessage(reference);
+      const clientMessage = clientFacingMessage(err) ?? genericToolErrorMessage(reference);
       return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${clientMessage}` }], isError: true } };
     }
   }
