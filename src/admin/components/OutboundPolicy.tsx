@@ -31,13 +31,17 @@ const CHANNELS: { key: Channel; service: string; label: string; desc: string }[]
   },
 ];
 
-const MODE_LABEL: Record<Mode, string> = {
-  allow: 'Allow',
-  internal: 'Internal only',
-  block: 'Block',
-};
+// Maps, not objects: the modes are read from the API response, so a value
+// outside the Mode union must not resolve through the prototype chain.
+const MODE_LABEL = new Map<Mode, string>([
+  ['allow', 'Allow'],
+  ['internal', 'Internal only'],
+  ['block', 'Block'],
+]);
+const modeLabel = (m: Mode): string => MODE_LABEL.get(m) ?? m;
 
-const RANK: Record<Mode, number> = { allow: 0, internal: 1, block: 2 };
+const RANK = new Map<Mode, number>([['allow', 0], ['internal', 1], ['block', 2]]);
+const rank = (m: Mode): number => RANK.get(m) ?? 0;
 
 interface Props {
   /** Logged-in admin's userId (for auth headers) */
@@ -125,14 +129,14 @@ export default function OutboundPolicy({ userId, enabledServices, targetUserId }
           {CHANNELS.map((c) => {
             const serviceOff = !enabledServices.includes(c.service);
             const floor = tenantFloor?.[c.key] ?? 'allow';
-            const effective: Mode = RANK[floor] >= RANK[policy[c.key]] ? floor : policy[c.key];
+            const effective: Mode = rank(floor) >= rank(policy[c.key]) ? floor : policy[c.key];
             return (
               <div key={c.key} className={`service-row${serviceOff ? ' service-row--tenant-disabled' : ''}`}>
                 <span className="service-info">
                   <span className="service-name">{c.label}</span>
                   <span className="service-desc">
                     {c.desc}
-                    {targetUserId && floor !== 'allow' && ` Organization setting: ${MODE_LABEL[floor]}.`}
+                    {targetUserId && floor !== 'allow' && ` Organization setting: ${modeLabel(floor)}.`}
                   </span>
                 </span>
                 <select
@@ -142,14 +146,14 @@ export default function OutboundPolicy({ userId, enabledServices, targetUserId }
                   aria-label={c.label}
                 >
                   {(['allow', 'internal', 'block'] as Mode[]).map((m) => (
-                    <option key={m} value={m} disabled={targetUserId !== undefined && RANK[m] < RANK[floor]}>
-                      {MODE_LABEL[m]}
+                    <option key={m} value={m} disabled={targetUserId !== undefined && rank(m) < rank(floor)}>
+                      {modeLabel(m)}
                     </option>
                   ))}
                 </select>
                 {effective !== 'allow' && (
                   <span className="override-badge">
-                    {targetUserId && RANK[floor] >= RANK[policy[c.key]] ? 'Tenant' : MODE_LABEL[effective]}
+                    {targetUserId && rank(floor) >= rank(policy[c.key]) ? 'Tenant' : modeLabel(effective)}
                   </span>
                 )}
               </div>

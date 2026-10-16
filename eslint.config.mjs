@@ -116,9 +116,9 @@ export default [
       ],
       '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/no-floating-promises': 'error',
-      // detect-object-injection is left off here: it is a Node heuristic for
-      // request-controlled keys, and every hit in the SPA indexes an array by
-      // number or a Record by a typed union.
+      // Same policy as the server code: each hit is fixed or suppressed on
+      // its own line with a reason (AGENTS.md).
+      'security/detect-object-injection': 'warn',
       'security/detect-unsafe-regex': 'error',
     },
   },

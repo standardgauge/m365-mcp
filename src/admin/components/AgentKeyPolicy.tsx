@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import KeyScopeFields, { SERVICE_LABELS, SERVICE_ORDER, isNarrowingOf, serviceNames } from './KeyScopeFields';
+import KeyScopeFields, { SERVICE_ORDER, isNarrowingOf, serviceLabel, serviceNames } from './KeyScopeFields';
 import type { KeyPolicy, SitePick } from './KeyScopeFields';
 
 interface TenantPolicy { allowKeys: boolean; disabledServices: string[]; readOnlyServices: string[]; maxKeyLifetimeDays: number; ownersMayWiden: boolean }
@@ -198,7 +198,7 @@ export default function AgentKeyPolicy({ userId, enabledServices, allowedSites }
                 const allowed = !policy.disabledServices.includes(s);
                 return (
                   <tr key={s} className={tenantOn ? undefined : 'service-row--tenant-disabled'}>
-                    <td>{SERVICE_LABELS[s] ?? s}{!tenantOn && <span className="service-desc"> (not enabled for the tenant)</span>}</td>
+                    <td>{serviceLabel(s)}{!tenantOn && <span className="service-desc"> (not enabled for the tenant)</span>}</td>
                     <td>
                       <input type="checkbox" checked={allowed} disabled={saving}
                         onChange={(e) => save({ disabledServices: toggleIn(policy.disabledServices, s, !e.target.checked) })} />
