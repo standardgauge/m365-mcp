@@ -11,6 +11,8 @@
  *
  * The builder's Node major also has to match the azure-functions runtime's, so
  * native modules compiled in stage 1 load in stage 2 (.github/dependabot.yml).
+ * The runtime is read from either the rolling `4-node22` form or a versioned
+ * host build such as `4.1055.250-1-node22`.
  */
 import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
@@ -55,7 +57,7 @@ describe('Docker base images', () => {
     (file) => {
       const bases = baseImages(file);
       const builder = bases.map((b) => b.match(/\/library\/node:(\d+)/)).find(Boolean);
-      const runtime = bases.map((b) => b.match(/azure-functions\/node:\d+-node(\d+)/)).find(Boolean);
+      const runtime = bases.map((b) => b.match(/azure-functions\/node:\d[\d.-]*-node(\d+)/)).find(Boolean);
       expect(builder).toBeTruthy();
       expect(runtime).toBeTruthy();
       expect(builder![1]).toBe(runtime![1]);
