@@ -92,7 +92,7 @@ export default function UserManagement({ userId, enabledServices }: Props) {
     }
   }, [headers]);
 
-  useEffect(() => { loadOverrides(selectedUser); }, [selectedUser, loadOverrides]);
+  useEffect(() => { void loadOverrides(selectedUser); }, [selectedUser, loadOverrides]);
 
   const loadDraftPolicy = useCallback(async (targetId: string) => {
     if (!targetId) { setDraftPolicy(null); return; }
@@ -106,7 +106,7 @@ export default function UserManagement({ userId, enabledServices }: Props) {
     }
   }, [headers]);
 
-  useEffect(() => { loadDraftPolicy(selectedUser); }, [selectedUser, loadDraftPolicy]);
+  useEffect(() => { void loadDraftPolicy(selectedUser); }, [selectedUser, loadDraftPolicy]);
 
   const handleDraftPolicyToggle = async (enforceDraft: boolean) => {
     setSavingDraftPolicy(true);

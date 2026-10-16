@@ -45,7 +45,7 @@ export default function EmailOutputPolicy({ userId }: Props) {
     }
   }, [userId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
   const handleToggle = async (enforceDraft: boolean) => {
     setSaving(true);

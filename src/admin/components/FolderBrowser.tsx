@@ -95,6 +95,7 @@ export default function FolderBrowser({ userId, accessToken, onSelect, allowedSi
   const toggleNode = async (path: number[]) => {
     const newTree = JSON.parse(JSON.stringify(tree)) as TreeNode[];
     let node = newTree[path[0]];
+    // eslint-disable-next-line security/detect-object-injection -- path is number[] of array positions built by this component's own render
     for (let i = 1; i < path.length; i++) node = node.children![path[i]];
 
     if (!node.expanded && node.children === null) {
@@ -180,7 +181,7 @@ export default function FolderBrowser({ userId, accessToken, onSelect, allowedSi
             value={selectedSite?.id ?? ''}
             onChange={(e) => {
               const site = visibleSites.find((s) => s.id === e.target.value);
-              if (site) selectSite(site);
+              if (site) void selectSite(site);
             }}
           >
             <option value="">— select a site —</option>

@@ -431,7 +431,7 @@ npm run dev:admin
 
 `docker compose up` runs the whole stack in containers, Azurite included, if you would rather not install the Functions runtime locally.
 
-Run `npm test` before opening a pull request.
+Run `npm test` and `npm run test:admin` before opening a pull request; `AGENTS.md` has the full check list.
 
 ---
 

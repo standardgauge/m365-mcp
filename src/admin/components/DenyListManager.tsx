@@ -114,7 +114,7 @@ export default function DenyListManager({ scope, userId, targetUserId, keyId, re
     }
   }, [listEndpoint, userId, subjectQuery, activeTypes.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
   const addEntry = async (type: DenyListType, path: string, description: string) => {
     if (!path.trim()) return;
@@ -164,12 +164,16 @@ export default function DenyListManager({ scope, userId, targetUserId, keyId, re
   };
 
   const renderTable = (type: DenyListType) => {
+    // eslint-disable-next-line security/detect-object-injection -- type is the DenyListType union and entries is a Record<DenyListType, ...>
     const typeEntries = entries[type];
+    // eslint-disable-next-line security/detect-object-injection -- as above, Record<DenyListType, string>
     const path = newPath[type];
+    // eslint-disable-next-line security/detect-object-injection -- as above, Record<DenyListType, string>
     const desc = newDesc[type];
     return (
       <div key={type} style={{ marginBottom: 20 }}>
         <h3>
+          {/* eslint-disable-next-line security/detect-object-injection -- type is the DenyListType union and TYPE_LABELS a Record<DenyListType, string> */}
           {TYPE_LABELS[type]}
           <span className="badge-count">{typeEntries.length}</span>
         </h3>

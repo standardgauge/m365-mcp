@@ -67,7 +67,7 @@ export default function AgentKeys({ userId, grantableServices, allowedSites }: P
     }
   }, [userId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
   const grantable = grantableServices.filter((s) => !(tenantPolicy?.disabledServices ?? []).includes(s));
   const tenantReadOnly = tenantPolicy?.readOnlyServices ?? [];

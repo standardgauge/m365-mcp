@@ -74,6 +74,7 @@ export default function OneNoteBrowser({ userId, accessToken, onSelect }: Props)
 
   const toggleNode = async (index: number) => {
     const newNodes = [...nodes];
+    // eslint-disable-next-line security/detect-object-injection -- index is the numeric array position passed from this component's own map()
     const node = { ...newNodes[index] };
 
     if (!node.expanded && node.sections === null) {
@@ -86,6 +87,7 @@ export default function OneNoteBrowser({ userId, accessToken, onSelect }: Props)
       }
     }
     node.expanded = !node.expanded;
+    // eslint-disable-next-line security/detect-object-injection -- as above; writes back to the same array position
     newNodes[index] = node;
     setNodes(newNodes);
   };

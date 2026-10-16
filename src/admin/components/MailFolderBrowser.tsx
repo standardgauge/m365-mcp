@@ -31,19 +31,18 @@ async function apiFetch(path: string, userId: string, accessToken?: string) {
   return res.json();
 }
 
-// Well-known folder icons
-const FOLDER_ICONS: Record<string, string> = {
-  inbox: '📥',
-  sentItems: '📤',
-  drafts: '📝',
-  deletedItems: '🗑️',
-  junkEmail: '🚫',
-  archive: '📦',
-};
+// Well-known folder icons. A Map, because wellKnownName comes from Graph.
+const FOLDER_ICONS = new Map<string, string>([
+  ['inbox', '📥'],
+  ['sentItems', '📤'],
+  ['drafts', '📝'],
+  ['deletedItems', '🗑️'],
+  ['junkEmail', '🚫'],
+  ['archive', '📦'],
+]);
 
-function folderIcon(wellKnownName: string | null, name: string): string {
-  if (wellKnownName && FOLDER_ICONS[wellKnownName]) return FOLDER_ICONS[wellKnownName];
-  return '📁';
+function folderIcon(wellKnownName: string | null): string {
+  return (wellKnownName && FOLDER_ICONS.get(wellKnownName)) || '📁';
 }
 
 export default function MailFolderBrowser({ userId, accessToken, onSelect }: Props) {
@@ -80,6 +79,7 @@ export default function MailFolderBrowser({ userId, accessToken, onSelect }: Pro
   const toggleNode = async (path: number[]) => {
     const newTree: MailTreeNode[] = JSON.parse(JSON.stringify(tree));
     let node = newTree[path[0]];
+    // eslint-disable-next-line security/detect-object-injection -- path is number[] of array positions built by this component's own render
     for (let i = 1; i < path.length; i++) node = node.children![path[i]];
 
     if (!node.expanded && node.children === null && node.folder.childFolderCount > 0) {
@@ -111,7 +111,7 @@ export default function MailFolderBrowser({ userId, accessToken, onSelect }: Pro
   const renderTree = (nodes: MailTreeNode[], pathPrefix: number[] = []) =>
     nodes.map((node, i) => {
       const nodePath = [...pathPrefix, i];
-      const icon = folderIcon(node.folder.wellKnownName, node.folder.name);
+      const icon = folderIcon(node.folder.wellKnownName);
       return (
         <div key={node.folder.id}>
           <div className="tree-node">

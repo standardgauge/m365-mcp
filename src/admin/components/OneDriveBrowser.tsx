@@ -59,6 +59,7 @@ export default function OneDriveBrowser({ userId, accessToken, onSelect }: Props
   const toggleNode = async (path: number[]) => {
     const newTree: TreeNode[] = JSON.parse(JSON.stringify(tree));
     let node = newTree[path[0]];
+    // eslint-disable-next-line security/detect-object-injection -- path is number[] of array positions built by this component's own render
     for (let i = 1; i < path.length; i++) node = node.children![path[i]];
 
     if (!node.expanded && node.children === null && node.folder.childCount > 0) {

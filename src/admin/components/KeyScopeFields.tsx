@@ -1,16 +1,21 @@
 import React from 'react';
 
-export const SERVICE_LABELS: Record<string, string> = {
-  mail: 'Mail', sharepoint: 'SharePoint', calendar: 'Calendar', onedrive: 'OneDrive',
-  onenote: 'OneNote', contacts: 'Contacts', teams: 'Teams',
-};
+// A Map, not an object: service names arrive from the API, and a name like
+// "constructor" must not resolve through the prototype chain.
+const SERVICE_LABELS = new Map<string, string>([
+  ['mail', 'Mail'], ['sharepoint', 'SharePoint'], ['calendar', 'Calendar'], ['onedrive', 'OneDrive'],
+  ['onenote', 'OneNote'], ['contacts', 'Contacts'], ['teams', 'Teams'],
+]);
+export function serviceLabel(s: string): string {
+  return SERVICE_LABELS.get(s) ?? s;
+}
 export const SERVICE_ORDER = ['mail', 'sharepoint', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams'];
 
 export interface SitePick { id: string; name: string }
 export interface KeyPolicy { services: string[]; readOnlyServices: string[]; allowedSites: SitePick[] }
 
 export function serviceNames(list: string[]): string {
-  return list.length ? list.map((s) => SERVICE_LABELS[s] ?? s).join(', ') : '—';
+  return list.length ? list.map(serviceLabel).join(', ') : '—';
 }
 
 /** True when `next` grants no more than `prev`. Mirrors isNarrowingOf on the server. */
@@ -67,12 +72,16 @@ export default function KeyScopeFields({ value, onChange, grantable, tenantReadO
                 <input type="checkbox" checked={on} disabled={disabled || (!on && !canAdd) || (!on && !grantable.includes(s))}
                   onChange={(e) => {
                     const services = toggle(value.services, s, e.target.checked);
-                    const readOnlyServices = e.target.checked ? value.readOnlyServices : value.readOnlyServices.filter((x) => x !== s);
+                    // Re-adding a service the key holds read-only brings the flag back with it; its
+                    // read-only box is locked in narrow-only mode, so it could not be set afterwards.
+                    const readOnlyServices = !e.target.checked
+                      ? value.readOnlyServices.filter((x) => x !== s)
+                      : roLockedByBase ? toggle(value.readOnlyServices, s, true) : value.readOnlyServices;
                     const allowedSites = s === 'sharepoint' && !e.target.checked ? [] : value.allowedSites;
                     onChange({ services, readOnlyServices, allowedSites });
                   }} />
                 <span className="service-info">
-                  <span className="service-name">{SERVICE_LABELS[s] ?? s}</span>
+                  <span className="service-name">{serviceLabel(s)}</span>
                   {!on && !canAdd && <span className="service-desc">Not on this key; adding it would widen the key, which is not allowed here.</span>}
                   {!on && canAdd && !grantable.includes(s) && <span className="service-desc">Not available to you, so not grantable.</span>}
                 </span>

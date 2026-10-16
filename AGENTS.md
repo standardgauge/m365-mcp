@@ -8,12 +8,16 @@ the server is and how to deploy it; this file covers how changes are made.
 ```bash
 npm ci
 npx tsc --noEmit          # type check
-npx eslint . --max-warnings 0   # lint; warnings fail, see below
-npm test                  # Jest, the whole suite
+npx tsc -p tsconfig.admin.json  # type check the admin UI and its tests
+npx eslint . --max-warnings 0   # lint, admin UI included; warnings fail, see below
+npm test                  # Jest, the whole server suite
+npm run test:admin        # Vitest + React Testing Library, the admin UI suite
 bash scripts/identifier-scan.sh   # no deployment-specific names in the tree
 ```
 
-Run all four before opening a pull request. CI runs the same set plus a
+Run all of them before opening a pull request. The admin UI's component
+tests live in `src/admin/__tests__/` and run in jsdom; the server's Jest suite
+in `src/__tests__/` does not see them. CI runs the same set plus a
 dependency audit, a secrets scan, CodeQL, a DCO sign-off check on every commit
 in a pull request (`CONTRIBUTING.md`), and a container boot test that fails if
 the image runs anything as root or if its installer surface fails its release

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import KeyScopeFields, { SERVICE_LABELS, SERVICE_ORDER, serviceNames } from './KeyScopeFields';
+import KeyScopeFields, { SERVICE_ORDER, isNarrowingOf, serviceLabel, serviceNames } from './KeyScopeFields';
 import type { KeyPolicy, SitePick } from './KeyScopeFields';
 
 interface TenantPolicy { allowKeys: boolean; disabledServices: string[]; readOnlyServices: string[]; maxKeyLifetimeDays: number; ownersMayWiden: boolean }
@@ -58,7 +58,7 @@ export default function AgentKeyPolicy({ userId, enabledServices, allowedSites }
     }
   }, [userId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
   const save = async (patch: Partial<TenantPolicy>) => {
     setSaving(true);
@@ -118,6 +118,9 @@ export default function AgentKeyPolicy({ userId, enabledServices, allowedSites }
       setSaving(false);
     }
   };
+
+  // An administrator may only narrow; the server refuses anything else, and so does the form.
+  const editWidens = editing ? !isNarrowingOf(editScope, editing.policy) : false;
 
   const live = (keys ?? []).filter((k) => !k.revokedAt);
   const revoked = (keys ?? []).filter((k) => k.revokedAt);
@@ -195,7 +198,7 @@ export default function AgentKeyPolicy({ userId, enabledServices, allowedSites }
                 const allowed = !policy.disabledServices.includes(s);
                 return (
                   <tr key={s} className={tenantOn ? undefined : 'service-row--tenant-disabled'}>
-                    <td>{SERVICE_LABELS[s] ?? s}{!tenantOn && <span className="service-desc"> (not enabled for the tenant)</span>}</td>
+                    <td>{serviceLabel(s)}{!tenantOn && <span className="service-desc"> (not enabled for the tenant)</span>}</td>
                     <td>
                       <input type="checkbox" checked={allowed} disabled={saving}
                         onChange={(e) => save({ disabledServices: toggleIn(policy.disabledServices, s, !e.target.checked) })} />
@@ -271,7 +274,7 @@ export default function AgentKeyPolicy({ userId, enabledServices, allowedSites }
             disabled={saving}
           />
           <div className="confirm-actions">
-            <button type="submit" className="confirm-btn" disabled={saving || editScope.services.length === 0}>{saving ? 'Saving…' : 'Save'}</button>
+            <button type="submit" className="confirm-btn" disabled={saving || editScope.services.length === 0 || editWidens}>{saving ? 'Saving…' : 'Save'}</button>
             <button type="button" className="confirm-btn" onClick={() => setEditing(null)} disabled={saving}>Cancel</button>
           </div>
         </form>

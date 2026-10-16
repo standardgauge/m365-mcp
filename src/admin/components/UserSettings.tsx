@@ -66,8 +66,8 @@ export default function UserSettings({ userId, accountName, enabledServices = ['
     } catch { /* ignore — defaults to draft */ }
   }, [userId]);
 
-  useEffect(() => { loadOverrides(); }, [loadOverrides]);
-  useEffect(() => { loadEmailMode(); }, [loadEmailMode]);
+  useEffect(() => { void loadOverrides(); }, [loadOverrides]);
+  useEffect(() => { void loadEmailMode(); }, [loadEmailMode]);
 
   const handleEmailModeChange = async (mode: EmailOutputMode) => {
     if (mode === emailOutputMode || emailModeEnforcedBy) return;
