@@ -187,7 +187,9 @@ export const TOOLS: McpTool[] = [
     description:
       'Fetch the content of a specific SharePoint file. Text-based files (plain text, JSON, ' +
       'XML, etc.) are returned as UTF-8 strings; binary files are base64-encoded. Access is ' +
-      'blocked if the file\'s path is on the deny list.',
+      'blocked if the file\'s path is on the deny list. A file larger than the server\'s ' +
+      'readable-size cap (MAX_READ_FILE_BYTES, default 150 MB) is refused before any of it is ' +
+      'downloaded, with an error naming the file size and the cap.',
     parameters: [
       {
         name: 'siteId',

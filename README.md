@@ -250,6 +250,7 @@ Copy `.env.example` to `.env` for local work, or set these as Container App secr
 | `AZURE_STORAGE_IDENTITY_CLIENT_ID` | With the endpoint | Client ID of the user-assigned identity holding Storage Table Data Contributor on the account. Unset uses the system-assigned identity. Set by the Bicep |
 | `AZURE_STORAGE_CONNECTION_STRING` | No | Account-key connection string, used only when `AZURE_STORAGE_TABLE_ENDPOINT` is unset: local development and instances whose infra predates it. Both unset falls back to the Azurite emulator |
 | `AUDIT_LOG_RETENTION_DAYS` | No | Days of `auditLog` rows to keep. Older rows are purged about once a day while the server is in use. Defaults to `365`; `0` keeps every row. See the operations runbook |
+| `MAX_READ_FILE_BYTES` | No | Largest file, in bytes, that `read_file` and `read_onedrive_file` (MCP and REST) will return. Both read the whole file into memory and return it inline, so a larger file is refused from its metadata size before any bytes are downloaded, and the download stops if the streamed bytes cross the cap. The refusal names the file size and the cap; REST returns `413`. Defaults to `157286400` (150 MB, the Graph attachment limit); unset, `0` or invalid values use the default |
 | `RATE_LIMIT_<ROUTE>_PER_MINUTE` | No | Requests per client address per minute, per replica, on the unauthenticated routes. `<ROUTE>` is `LOGIN` (default `30`), `DEVICE` (`10`), `INSTALL_POLL` (`120`), `INSTALL_CONFIRM` (`30`) or `MCP` (`1200`); `0` turns that route's limiter off. See the operations runbook |
 | `RATE_LIMIT_TRUSTED_PROXY_HOPS` | No | Proxies in front of the app that append to `X-Forwarded-For`. Default `1`, the Container Apps ingress; set `2` behind Front Door or an Application Gateway. Also decides the client IP recorded on audit rows |
 | `DEFAULT_MAIL_DENY_FOLDERS` | No | Comma-separated mail folder names always denied, matched by display name, case-insensitively |
@@ -361,7 +362,7 @@ Scheduling helpers `get_schedule`, `find_meeting_times`, and `list_rooms` round 
 |---|---|---|
 | `list_sites` | Read | Enumerate accessible sites |
 | `list_folders` | Read | List folder children, with files when `includeFiles=true`; `offset` pages large folders |
-| `read_file` | Read | Fetch file content as text or base64 |
+| `read_file` | Read | Fetch file content as text or base64. Refused over `MAX_READ_FILE_BYTES` |
 | `search_sharepoint` | Read | Full-text search |
 | `write_sharepoint_file` | Write | Upload or overwrite |
 | `delete_sharepoint_file` | Delete | Delete a file |
@@ -374,7 +375,7 @@ Scheduling helpers `get_schedule`, `find_meeting_times`, and `list_rooms` round 
 | Tool | Method | Description |
 |---|---|---|
 | `list_onedrive` | Read | List files and folders with type, size, and mime |
-| `read_onedrive_file` | Read | Fetch file content |
+| `read_onedrive_file` | Read | Fetch file content as text or base64. Refused over `MAX_READ_FILE_BYTES` |
 | `write_onedrive_file` | Write | Create or overwrite |
 | `create_onedrive_folder` | Write | Create a folder |
 | `move_onedrive_item` | Write | Move or rename |
