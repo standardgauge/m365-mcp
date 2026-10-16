@@ -1,5 +1,5 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-# Keep this Node major aligned with the azure-functions/node:4-node22 runtime in
+# Keep this Node major aligned with the azure-functions/node node22 runtime in
 # stage 2. Dependabot major bumps of the node image are ignored (.github/dependabot.yml)
 # so the builder never drifts ahead of the runtime; move both together on an LTS bump.
 # Pulled from the ECR Public mirror of the Docker Official Image, not Docker
@@ -23,7 +23,16 @@ RUN npm run build
 RUN npm run build:admin
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM mcr.microsoft.com/azure-functions/node:4-node22
+# Pinned to a versioned host build rather than the rolling `4-node22` tag. The
+# Functions host is the ASP.NET Core server in front of every request, so a .NET
+# runtime CVE in this image is reachable, not vendor noise. Microsoft publishes
+# the versioned tag first and moves `4-node22` later: in October 2026
+# 4.1055.250-1 shipped .NET 8.0.32 a day before the rolling tag did, while the
+# rolling tag still served 8.0.31 with a CRITICAL ASP.NET Core advisory. Pinned,
+# the patched host is one Dependabot or hand bump away instead of a wait on
+# Microsoft's retag. Dependabot's docker watch proposes newer versioned tags;
+# security updates skip its cooldown. See docs/trivy-suppressions.md.
+FROM mcr.microsoft.com/azure-functions/node:4.1055.250-1-node22@sha256:ede6fb7e132078c3c2a5760fd6b35179a15278d22ec3e93345deea2945768ab5
 
 # The Azure Functions host defaults to binding privileged port 80. A non-root
 # user (see USER below, F8 /) cannot bind ports < 1024, so point

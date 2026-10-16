@@ -430,11 +430,11 @@ jobs:
 
       # ── Base-OS scan (REPORT-ONLY) ────────────────────────────────────────────
       # OS-layer CVEs live entirely inside Microsoft's vendor base image
-      # (mcr.microsoft.com/azure-functions/node:4-node22, currently debian 12).
-      # We do not build that image and cannot bump its packages independently —
-      # `4-node22` is a rolling tag CI already re-pulls on every main push, so the
-      # only remediation available to us is to wait for Microsoft to rebuild (or
-      # for Dependabot's docker ecosystem watch to bump the tag). Gating on these
+      # (mcr.microsoft.com/azure-functions/node, a pinned node22 host build,
+      # currently debian 12). We do not build that image and cannot bump its
+      # packages independently, so the only remediation available to us is a
+      # newer host build from Microsoft (bumped by hand or by Dependabot's docker
+      # ecosystem watch). Gating on these
       # therefore reddens CI on every new base-OS CVE wave (e.g. the July-2026
       # linux-libc-dev kernel-header batch) with no action we can
       # take. Kernel-header CVEs in particular are non-exploitable in a container

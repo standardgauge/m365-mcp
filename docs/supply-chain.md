@@ -106,9 +106,9 @@ to Sigstore's public transparency log, which most operators will not want.
 
 **3. What is inside it.** The release SBOM for the tag that commit belongs to
 lists the application's npm packages exactly, because they come from the same
-lockfile. The OS layer can differ: the runtime base image tag
-(`azure-functions/node:4-node22`) is rolling, so an image built a week after
-the release may carry newer OS packages. For an exact inventory of the running
+lockfile. The OS layer can differ: the runtime base image is pinned to a
+versioned host build, but an image built after a later base-image bump carries
+that bump's OS packages and .NET runtime. For an exact inventory of the running
 image, catalogue it directly:
 
 ```bash
