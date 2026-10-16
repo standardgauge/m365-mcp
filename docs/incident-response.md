@@ -128,6 +128,20 @@ below only if the review in step 2 finds more than the key.
    The `policy.agent_key.update` and `policy.deny_list.agent_key.*` rows show
    the key's policy over time; what it could reach at the time is the policy
    in force then, not now.
+
+   The query only sees what the table still holds. `M365McpAudit_CL` follows
+   the workspace's 90-day retention unless it was given its own
+   ([runbook](operations-runbook.md#audit-trail-in-log-analytics)), and a key
+   can live up to the tenant maximum, 365 days by default. Compare the key's
+   creation date in the Agent Keys table with the oldest row returned. If the
+   key is older than the retained window, cover the gap from, in order: an
+   export of the table to a SIEM or archive, if the tenant runs one; the
+   storage copy, the `auditLog` table, which keeps rows for
+   `AUDIT_LOG_RETENTION_DAYS` (365 by default) but is editable by anyone with
+   the storage key, so it is weaker evidence. Say in the
+   record which part of the key's life was reviewed and which was not. To stop
+   the gap opening, set the table's total retention to at least the tenant's
+   `maxKeyLifetimeDays`, or lower the maximum to the retention you keep.
 3. **Rotate.** Mint a replacement with the same or a narrower policy, put it
    where the app reads it, and check the app's next calls appear under the new
    key id. Fix how the old one leaked first, or the new one follows it.

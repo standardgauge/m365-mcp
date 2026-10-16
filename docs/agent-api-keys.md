@@ -338,7 +338,12 @@ How the smoke key is minted, and why each choice:
   enabled is fine to leave off: the probe calls it to prove it is refused.
 - **No site restriction**, unless the tenant's own allow-list is the point:
   `list_sites` is a read, and an empty key list means the tenant's.
-- **365 days, with the reminder on.** The reminder puts the replacement date on
+- **90 days, with the reminder on.** Read-only limits what a leaked copy can
+  change, not what it can read: the key holds a Global Administrator's reach
+  across every enabled service, with no site restriction, and Conditional
+  Access is not evaluated when it is used. So it rotates on the same quarter as
+  any other unattended key in a secret store, and stays inside the audit
+  table's default 90-day retention. The reminder puts the replacement date on
   the owner's calendar a week ahead. Rotating is: mint the new key, `gh secret
   set SMOKE_AGENT_KEY`, dispatch a deploy to prove it, revoke the old one.
 - **Label it for what it is** (`deploy-smoke`), so its audit rows read as the
@@ -373,13 +378,17 @@ lifetime that does not make rotation a chore, and leave the reminder on.
 | A one-off test, a demo, a prompt being iterated on | 1 to 7 days | Nobody needs it next week, and an expired key needs no clean-up |
 | An app in development on someone's own machine | 30 days | The same cap as a sign-in. Conditional Access is not evaluated when a key is used (see **Operating notes**), so a copy on a laptop is the case it does not cover |
 | An unattended job on a server, key in a secret store (a nightly report) | 90 days | Rotated quarterly on the reminder. Long enough that rotation is a routine, short enough that a copy that leaked unnoticed dies on its own |
-| The post-deploy smoke key, read-only, held only as a pipeline secret | 365 days | Read-only on every service, so a leaked copy can read but not write. See **First-party use** above |
+| The post-deploy smoke key, read-only, held only as a pipeline secret | 90 days | Read-only stops writes, not reads, and the key reads its administrator owner's mail, files and calendar on every enabled service. It gets the unattended-key interval. See **First-party use** above |
 | A key that can write mail or files, held anywhere but a secret store | 7 days | Write reach outside a secret store is the combination to keep short |
 
 To make these limits rather than advice, set the tenant's
 `maxKeyLifetimeDays` (**Admin → Agent Keys**) to the longest row you accept,
 for example 90. The maximum applies to every key, the smoke key included: below
-365, the smoke key is minted for the maximum and rotated on its reminder.
+90, the smoke key is minted for the maximum and rotated on its reminder.
+
+Keep the maximum at or below the audit table's retention (90 days by default,
+see **If a key may have been disclosed**). A key that outlives its own audit
+rows cannot be reviewed over its whole life.
 
 ### How fast a revocation takes effect
 
@@ -403,7 +412,10 @@ takes a minute, and the investigation does not need the key to stay live.
 1. **Revoke** it under **My Settings → Agent Keys** (the owner) or **Admin →
    Agent Keys** (a Global Administrator).
 2. **Review the audit log** for everything done under the key's device label,
-   `agent-key:<label>#<keyId>`, over the key's whole life.
+   `agent-key:<label>#<keyId>`, over the key's whole life, or as much of it as
+   the logs still hold. `M365McpAudit_CL` keeps 90 days by default, so a key
+   older than its table's retention has an unreviewable start unless an older
+   copy exists. The incident-response section says where to look for one.
 3. **Rotate**: mint a replacement for the app with the same or a narrower
    policy, put it in the app's secret store, and confirm the app's next calls
    appear under the new key id.

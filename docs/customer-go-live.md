@@ -789,7 +789,7 @@ this item shows they hold on this deployment, with this configuration.
 - [ ] **10.5 Functional smoke key.** As the Global Administrator, mint an
       [agent key](agent-api-keys.md#first-party-use-the-post-deploy-smoke)
       under **My Settings → Agent Keys**: label `deploy-smoke`, every service
-      enabled in 8.2, every one of them read-only, no site restriction, 365
+      enabled in 8.2, every one of them read-only, no site restriction, 90
       days, reminder on. Store it on the fork without displaying it, and turn
       Issues on so a failing smoke has somewhere to report. This needs the
       key policy from 8.10 to allow keys; a tenant that turns keys off runs
