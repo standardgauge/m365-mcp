@@ -739,7 +739,8 @@ and at the edge, if there is one:
     `GreaterThan 33554432` with action `Block`. This reads the declared length
     only, which is why the in-app setting above stays on behind Front Door.
 
-**2. An edge rate limit.** Front Door (Standard or Premium) with a WAF policy, or
+**2. An edge rate limit.** Front Door Premium with a WAF policy (Standard cannot
+close the direct path; see 3), or
 an Application Gateway WAF v2, in front of the custom hostname. Two rate-limit
 custom rules, both grouped by client address:
 
@@ -754,9 +755,28 @@ presence, so treat its thresholds as approximate in the same way the app's are.
 
 **3. Close the direct path.** An edge that can be walked around is not a limit.
 The `containerAppFqdn` (`*.azurecontainerapps.io`) answers anyone unless ingress
-is restricted, so behind an edge restrict ingress to it: an `Allow` rule for the
-Application Gateway's public address, or for the `AzureFrontDoor.Backend` ranges
-from the published service tag list (or Front Door Premium Private Link instead).
+is restricted, so behind an edge the edge has to be the only way in:
+
+  * **Application Gateway:** an ingress `Allow` rule for the gateway's own public
+    address, and nothing else. That address belongs to this tenant's gateway
+    alone, so the rule admits no one else's traffic.
+  * **Front Door: Premium with Private Link, and the environment's public network
+    access disabled.** The origin is reached over a private endpoint, so the
+    `*.azurecontainerapps.io` name answers no one on the internet, another
+    Front Door profile included. Private Link to Container Apps needs a workload
+    profiles environment.
+  * **Front Door Standard is not a supported edge for this server.** Do not
+    restrict ingress to the `AzureFrontDoor.Backend` service tag and call the
+    path closed. Those ranges are shared by every Front Door profile in Azure,
+    so anyone can create their own profile, point it at this FQDN and reach the
+    app without passing this deployment's WAF or rate limits. Microsoft's
+    [origin security guidance](https://learn.microsoft.com/azure/frontdoor/origin-security#front-door-identifier)
+    says IP filtering alone is not enough and the origin must also check the
+    `X-Azure-FDID` header against its own profile's ID. Container Apps access
+    restrictions take IPv4 ranges only and cannot match a header, and the app
+    does not check `X-Azure-FDID` either, so on Standard there is nowhere to
+    make that check. Use Premium, or an Application Gateway.
+
 Then set `RATE_LIMIT_TRUSTED_PROXY_HOPS=2`, or every user shares the edge's
 bucket and every audit row records the edge's address.
 
@@ -787,6 +807,19 @@ seq 1 1600 | xargs -P 32 -I{} curl -s -o /dev/null -w '%{http_code}\n' "$HOST/he
 # Direct path closed.
 curl -s -o /dev/null -w '%{http_code}\n' --max-time 10 "$FQDN/health"
 # Expected: 403 or a refused connection, never 200.
+```
+
+Behind Front Door, also record that the origin is private, since a `403` from the
+direct FQDN alone does not show another Front Door profile is refused:
+
+```
+# Front Door: the origin uses Private Link and the connection was approved.
+az afd origin show -g <fd-rg> --profile-name <profile> --origin-group-name <group> \
+  --origin-name <origin> --query "sharedPrivateLinkResource.{target:privateLink.id, status:status}"
+# Expected: the Container Apps environment's resource ID, and "Approved".
+az containerapp env show -n <env> -g rg-m365-mcp \
+  --query properties.publicNetworkAccess
+# Expected: "Disabled".
 ```
 
 The rate-limit loop takes the client's address over the edge threshold for a
