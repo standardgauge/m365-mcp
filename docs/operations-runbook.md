@@ -653,9 +653,25 @@ down rather than failing.
 
 Things to know:
 
-  * **Per replica.** With three replicas an address can reach up to three times the
-    limit. That is deliberate: the limiter makes the routes cost something to
-    hammer, it does not meter them.
+  * **Per replica.** The count lives in each replica's memory, so an address can
+    reach the limit times the replica count before every replica refuses it.
+    That is deliberate: the limiter makes the routes cost something to hammer,
+    it does not meter them, and a shared counter would put a storage round trip
+    in front of every MCP call. The window also starts over on a replica that
+    restarts or a revision that rolls. With the template's `maxReplicas: 3` the
+    worst-case ceiling per address per minute is:
+
+    | Route | One replica | Three replicas |
+    |---|---|---|
+    | `login` | 30 | 90 |
+    | `device` | 10 | 30 |
+    | `install-poll` | 120 | 360 |
+    | `install-confirm` | 30 | 90 |
+    | `mcp` | 1200 | 3600 |
+
+    Raise `--max-replicas` and the ceiling rises with it. A source spread over
+    many addresses is not slowed at all. Both are why a production instance
+    puts an edge limit in front ([below](#production-ingress-edge-rate-limit-and-body-size)).
   * **Client address.** The limiter keys on the entry the ingress appended to
     `X-Forwarded-For` (the rightmost one), never on entries the client sent.
     IPv6 clients are grouped by `/64`. If you put Front Door or an Application
@@ -686,6 +702,130 @@ az containerapp ingress access-restriction remove -n m365-mcp -g rg-m365-mcp --r
 
 Once any `Allow` rule exists, every address not on the list is denied. The deploy
 workflow only swaps the image, so restrictions you set survive deploys.
+
+### Production ingress: edge rate limit and body size
+
+The in-app limiter above is a floor, not the production control. A production
+instance sets two limits in front of the app, and verifies both, before it takes
+users ([go-live item 3.4](customer-go-live.md#3-hostname-redirect-uri-and-frontend-url)).
+Neither is in the Bicep: where they live depends on what the tenant already runs
+at its edge, so they are an operator setting recorded with the deployment.
+
+**What sits in front of the app today.** Container Apps ingress terminates TLS
+and forwards. It has no rate limit and no configurable request body limit. The
+Azure Functions host inside the container refuses a body over
+`FUNCTIONS_REQUEST_BODY_SIZE_LIMIT` bytes, 104857600 (100 MB) by default, and
+that is the only body cap an instance has until you add one.
+
+**1. A body cap.** Size it to the largest request a user legitimately sends. That
+is a mail attachment or a file write carried inline: the bytes arrive base64 in
+the JSON body, a third larger than the file. A 32 MB cap carries about 23 MB of
+attachment, which is above what most tenants allow on mail anyway. Larger files
+go as a SharePoint or OneDrive link. Set it in two places so it holds whether or
+not an edge is present:
+
+```
+# In the app: the host refuses anything larger before a handler runs.
+az containerapp update -n m365-mcp -g rg-m365-mcp \
+  --set-env-vars FUNCTIONS_REQUEST_BODY_SIZE_LIMIT=33554432
+```
+
+and at the edge, if there is one:
+
+  * **Application Gateway WAF:** `maxRequestBodySizeInKb` with request body
+    enforcement on. It counts the body itself, so a chunked request with no
+    `Content-Length` is held to it too.
+  * **Front Door WAF:** a custom rule matching `RequestHeader` `Content-Length`
+    `GreaterThan 33554432` with action `Block`. This reads the declared length
+    only, which is why the in-app setting above stays on behind Front Door.
+
+**2. An edge rate limit.** Front Door Premium with a WAF policy (Standard cannot
+close the direct path; see 3), or
+an Application Gateway WAF v2, in front of the custom hostname. Two rate-limit
+custom rules, both grouped by client address:
+
+| Rule | Match | Threshold per minute per address | Why |
+|---|---|---|---|
+| `device-start` | path begins `/api/auth/device` | 10 | Each call starts a fifteen-minute background poll against Entra. Same as the app's one-replica limit, so the edge holds it at that whatever the replica count |
+| `whole-host` | every request | 1500 | Above the app's `mcp` limit plus installer polling for one office behind one NAT address, so the app's own `429` is what a busy legitimate client sees first and the edge catches what the per-replica ceiling lets through |
+
+Change a threshold here when you change the matching `RATE_LIMIT_*` variable, or
+the two disagree about which one a user hits. Front Door counts per point of
+presence, so treat its thresholds as approximate in the same way the app's are.
+
+**3. Close the direct path.** An edge that can be walked around is not a limit.
+The `containerAppFqdn` (`*.azurecontainerapps.io`) answers anyone unless ingress
+is restricted, so behind an edge the edge has to be the only way in:
+
+  * **Application Gateway:** an ingress `Allow` rule for the gateway's own public
+    address, and nothing else. That address belongs to this tenant's gateway
+    alone, so the rule admits no one else's traffic.
+  * **Front Door: Premium with Private Link, and the environment's public network
+    access disabled.** The origin is reached over a private endpoint, so the
+    `*.azurecontainerapps.io` name answers no one on the internet, another
+    Front Door profile included. Private Link to Container Apps needs a workload
+    profiles environment.
+  * **Front Door Standard is not a supported edge for this server.** Do not
+    restrict ingress to the `AzureFrontDoor.Backend` service tag and call the
+    path closed. Those ranges are shared by every Front Door profile in Azure,
+    so anyone can create their own profile, point it at this FQDN and reach the
+    app without passing this deployment's WAF or rate limits. Microsoft's
+    [origin security guidance](https://learn.microsoft.com/azure/frontdoor/origin-security#front-door-identifier)
+    says IP filtering alone is not enough and the origin must also check the
+    `X-Azure-FDID` header against its own profile's ID. Container Apps access
+    restrictions take IPv4 ranges only and cannot match a header, and the app
+    does not check `X-Azure-FDID` either, so on Standard there is nowhere to
+    make that check. Use Premium, or an Application Gateway.
+
+Then set `RATE_LIMIT_TRUSTED_PROXY_HOPS=2`, or every user shares the edge's
+bucket and every audit row records the edge's address.
+
+**Verify all three** from a machine outside the allowed ranges for the direct
+check, and from an ordinary client for the rest. Record the output in the
+go-live record.
+
+```
+HOST=https://your-mcp-host.example.com
+FQDN=https://$(az containerapp show -n m365-mcp -g rg-m365-mcp \
+  --query properties.configuration.ingress.fqdn -o tsv)
+
+# Body cap: one byte over is refused before the app reads it.
+head -c 33554433 /dev/zero | curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST -H 'Content-Type: application/json' --data-binary @- "$HOST/api/mcp"
+# Expected: 413, from the edge or the host.
+# The same request a megabyte under the cap reaches the handler instead.
+head -c 32505856 /dev/zero | curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST -H 'Content-Type: application/json' --data-binary @- "$HOST/api/mcp"
+# Expected: anything but 413 (the body is not JSON, so the app refuses it).
+
+# Edge rate limit: /health has no in-app limit, so a 429 here is the edge's.
+# Parallel, so 1600 requests land inside one minute.
+seq 1 1600 | xargs -P 32 -I{} curl -s -o /dev/null -w '%{http_code}\n' "$HOST/health" \
+  | sort | uniq -c
+# Expected: some 429s. All 200 means no edge limit is in force.
+
+# Direct path closed.
+curl -s -o /dev/null -w '%{http_code}\n' --max-time 10 "$FQDN/health"
+# Expected: 403 or a refused connection, never 200.
+```
+
+Behind Front Door, also record that the origin is private, since a `403` from the
+direct FQDN alone does not show another Front Door profile is refused:
+
+```
+# Front Door: the origin uses Private Link and the connection was approved.
+az afd origin show -g <fd-rg> --profile-name <profile> --origin-group-name <group> \
+  --origin-name <origin> --query "sharedPrivateLinkResource.{target:privateLink.id, status:status}"
+# Expected: the Container Apps environment's resource ID, and "Approved".
+az containerapp env show -n <env> -g rg-m365-mcp \
+  --query properties.publicNetworkAccess
+# Expected: "Disabled".
+```
+
+The rate-limit loop takes the client's address over the edge threshold for a
+minute; run it from a machine whose users can wait that long. On an instance
+with no edge, the body check still applies (the host's cap answers `413`) and the
+other two are recorded as not applicable, with the reason, in the record.
 
 ### Right-sizing vCPU/memory
 ```

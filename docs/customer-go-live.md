@@ -291,6 +291,31 @@ services decided in [Before you start](#before-you-start), and nothing more.
   prints the two values from 3.2, exactly. The value the container resolved
   is the one that matters, not the one the platform reports for the secret.
 
+- [ ] **3.4 Ingress limits set and shown to hold.** Container Apps ingress
+      has no rate limit and no body cap, and the app's own limiter is per
+      replica, so with three replicas an address gets up to three times each
+      route's limit. Set the three limits in
+      [production ingress](operations-runbook.md#production-ingress-edge-rate-limit-and-body-size):
+      a request body cap (`FUNCTIONS_REQUEST_BODY_SIZE_LIMIT`, and at the edge
+      if there is one), an edge rate limit on Front Door Premium or an
+      Application Gateway WAF, and ingress restricted to the edge so the
+      `*.azurecontainerapps.io` name cannot walk around it, with
+      `RATE_LIMIT_TRUSTED_PROXY_HOPS=2`. Behind Front Door the restriction is
+      Private Link with the environment's public network access disabled. An
+      `Allow` rule for the `AzureFrontDoor.Backend` service tag does not
+      count: those ranges admit every Front Door profile in Azure, not only
+      this one, and nothing on the Container Apps side can check
+      `X-Azure-FDID`. Front Door Standard is therefore not accepted here.
+
+  Check, after item 4, with the runbook's three verification commands: an
+  over-cap body gets `413`, a burst against `/health` gets `429`s, and the
+  direct FQDN is refused. Behind Front Door, add the runbook's Private Link
+  checks: the origin's private link approved and the environment's public
+  network access `Disabled`. An instance with no edge records the body check
+  and writes "no edge" against the other two, with who accepted that. That
+  instance's only flood control is the per-replica limiter
+  ([threat model](threat-model.md#10-availability), row 10.1).
+
 ---
 
 ## 4. Deploy fork and first image
@@ -784,7 +809,7 @@ this item shows they hold on this deployment, with this configuration.
       this list can vouch for.
 
 - [ ] **10.4 Re-run the live checks that waited on a running image**: 2.5,
-      3.3, 5.4, 7.3.
+      3.3, 3.4, 5.4, 7.3.
 
 - [ ] **10.5 Functional smoke key.** As the Global Administrator, mint an
       [agent key](agent-api-keys.md#first-party-use-the-post-deploy-smoke)
@@ -861,7 +886,8 @@ it in as you go. A blank cell is an item not done.
 | 2.4 | Consented scope list, verbatim | | | |
 | 2.6 | Assignment required: yes; assigned users or group | | | |
 | 3 | Hostname; values of `OAUTH_REDIRECT_URI` and `FRONTEND_URL` as resolved | | | |
-| 4 | Fork; deploy principal name and role scopes; deployed commit and image tag | | | |
+| 3.4 | Body cap in bytes, in the app and at the edge; edge service and tier, and its two rate-limit thresholds; ingress restriction (gateway address, or Front Door Private Link with public access disabled); output of the three checks and, behind Front Door, the Private Link checks; or "no edge" and who accepted it | | | |
+| 4 | Fork; deploy principal name and role scopes; deployed commit and image tag; the release it belongs to and the CI evidence on that release ([supply chain](supply-chain.md#release-evidence-the-ci-runs-for-the-tagged-commit)) | | | |
 | 5 | Storage account settings from 5.1; role assignments from 5.3 | | | |
 | 6.2 | The two key hash prefixes | | | |
 | 6.4 | Envelope binding variables set: yes | | | |
