@@ -26,6 +26,9 @@
   built image, and how to run them against a deployment
 - [Trivy suppressions](trivy-suppressions.md) — why each image-scan finding is
   suppressed, and what would un-suppress it
+- [Scale review](scale-review.md) — what fails first in very large tenants:
+  storage fan-out, memory, paging, throttling, observability, ranked with
+  evidence and the work it implies
 
 Deployment is [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml),
 which is inert until you set `DEPLOY_ENABLED`. The Bicep templates are under
