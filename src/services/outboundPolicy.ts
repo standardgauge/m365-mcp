@@ -45,6 +45,7 @@
 import type { TableClient, TableEntity } from '@azure/data-tables';
 import { getTableClient as getStorageTableClient } from './storageClient.js';
 import type { Client } from '@microsoft/microsoft-graph-client';
+import { ToolCallError } from './toolCallError.js';
 
 const TABLE = 'OutboundPolicy';
 /** RowKey of the tenant-wide row; same value and reasoning as the draft-mode policy. */
@@ -88,8 +89,8 @@ export const OUTBOUND_POLICY_MARKER = "Blocked by your administrator's outbound 
 
 /** A refusal under the outbound policy. Maps to 403 on REST routes. */
 export class OutboundPolicyError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = 'OutboundPolicyError';
   }
 }
@@ -316,9 +317,13 @@ export async function enforceOutboundPolicy(check: OutboundCheck): Promise<void>
   // than a raw error surfacing as a 500.
   const refuse = (what: string, err: unknown): OutboundPolicyError => {
     if (err instanceof OutboundPolicyError) return err;
-    const detail = err instanceof Error ? err.message : String(err);
+    // Only a message written for the caller is quoted. Anything else (a storage
+    // or Graph failure) stays on the cause, so the refusal never carries
+    // provider internals to the client.
+    const detail = err instanceof ToolCallError ? ` (${err.message})` : '';
     return new OutboundPolicyError(
-      `${OUTBOUND_POLICY_MARKER}: ${what} could not be read (${detail}), so the call was refused.`,
+      `${OUTBOUND_POLICY_MARKER}: ${what} could not be read${detail}, so the call was refused.`,
+      { cause: err },
     );
   };
 
@@ -454,7 +459,7 @@ export async function teamsMemberRecipients(
   } catch (err: unknown) {
     const status = (err as { statusCode?: number }).statusCode;
     if (permission && (status === 401 || status === 403)) {
-      throw new Error(`reading members needs the ${permission} permission on the app registration`);
+      throw new ToolCallError(`reading members needs the ${permission} permission on the app registration`);
     }
     throw err;
   }

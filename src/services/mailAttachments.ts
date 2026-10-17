@@ -27,6 +27,7 @@
 import 'isomorphic-fetch';
 import type { Client } from '@microsoft/microsoft-graph-client';
 import { assertOpaqueId } from './opaqueId.js';
+import { ToolCallError } from './toolCallError.js';
 
 /**
  * Attachment bytes ready to hand to Graph. `content` is base64-encoded file bytes. Inline caller
@@ -84,12 +85,12 @@ export function decodedByteLength(base64: string): number {
 
 function optionalString(value: unknown, field: string): string | undefined {
   if (value === undefined || value === null) return undefined;
-  if (typeof value !== 'string' || value.trim() === '') throw new Error(`${field} must be a non-empty string`);
+  if (typeof value !== 'string' || value.trim() === '') throw new ToolCallError(`${field} must be a non-empty string`);
   return value;
 }
 
 function requiredId(value: unknown, field: string): string {
-  if (typeof value !== 'string' || value === '') throw new Error(`${field} must be a non-empty string`);
+  if (typeof value !== 'string' || value === '') throw new ToolCallError(`${field} must be a non-empty string`);
   // Drive and site IDs are interpolated into Graph paths, so hold them to the same
   // rule as top-level opaque ID arguments. The tools/call gate only checks
   // top-level arguments, not fields nested inside attachments[].
@@ -105,11 +106,11 @@ function requiredId(value: unknown, field: string): string {
  */
 export function parseAttachments(raw: unknown): MailAttachmentRequest[] {
   if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) throw new Error('attachments must be an array');
+  if (!Array.isArray(raw)) throw new ToolCallError('attachments must be an array');
 
   return raw.map((item, i): MailAttachmentRequest => {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      throw new Error(`attachments[${i}] must be an object`);
+      throw new ToolCallError(`attachments[${i}] must be an object`);
     }
     const { name, contentType, content, driveItemId, siteId, itemId, driveId } = item as Record<string, unknown>;
 
@@ -119,12 +120,12 @@ export function parseAttachments(raw: unknown): MailAttachmentRequest[] {
       (siteId !== undefined || itemId !== undefined || driveId !== undefined) && 'siteId + itemId',
     ].filter(Boolean);
     if (sources.length === 0) {
-      throw new Error(
+      throw new ToolCallError(
         `attachments[${i}] needs a source: content (base64 file bytes), driveItemId (OneDrive), or siteId + itemId (SharePoint)`,
       );
     }
     if (sources.length > 1) {
-      throw new Error(`attachments[${i}] takes exactly one source, got ${sources.join(' and ')}`);
+      throw new ToolCallError(`attachments[${i}] takes exactly one source, got ${sources.join(' and ')}`);
     }
 
     if (driveItemId !== undefined) {
@@ -139,7 +140,7 @@ export function parseAttachments(raw: unknown): MailAttachmentRequest[] {
 
     if (content === undefined) {
       if (siteId === undefined || itemId === undefined) {
-        throw new Error(`attachments[${i}] needs both siteId and itemId to attach a SharePoint file`);
+        throw new ToolCallError(`attachments[${i}] needs both siteId and itemId to attach a SharePoint file`);
       }
       return {
         source: 'sharepoint',
@@ -153,21 +154,21 @@ export function parseAttachments(raw: unknown): MailAttachmentRequest[] {
     }
 
     if (typeof name !== 'string' || name.trim() === '') {
-      throw new Error(`attachments[${i}].name is required`);
+      throw new ToolCallError(`attachments[${i}].name is required`);
     }
     if (typeof content !== 'string' || content === '') {
-      throw new Error(`attachments[${i}].content (base64 file bytes) must be a non-empty string`);
+      throw new ToolCallError(`attachments[${i}].content (base64 file bytes) must be a non-empty string`);
     }
     const stripped = content.replace(/\s/g, '');
     if (!BASE64_RE.test(stripped) || stripped.length % 4 !== 0) {
-      throw new Error(`attachments[${i}].content must be base64-encoded`);
+      throw new ToolCallError(`attachments[${i}].content must be base64-encoded`);
     }
     const size = decodedByteLength(stripped);
     if (size === 0) {
-      throw new Error(`attachments[${i}].content decoded to 0 bytes`);
+      throw new ToolCallError(`attachments[${i}].content decoded to 0 bytes`);
     }
     if (size > MAX_ATTACHMENT_BYTES) {
-      throw new Error(
+      throw new ToolCallError(
         `attachments[${i}] ("${name}") is ${size} bytes, over the ${MAX_ATTACHMENT_BYTES}-byte (150 MB) Graph limit`,
       );
     }

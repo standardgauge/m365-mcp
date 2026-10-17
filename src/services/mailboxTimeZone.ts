@@ -23,6 +23,7 @@
  */
 
 import { Client } from '@microsoft/microsoft-graph-client';
+import { ToolCallError } from './toolCallError.js';
 
 /**
  * Fetch the mailbox's configured time zone. `mailboxPath` is the Graph base for
@@ -37,7 +38,7 @@ export async function resolveMailboxTimeZone(graph: Client, mailboxPath = '/me')
   const settings: any = await graph.api(`${mailboxPath}/mailboxSettings`).select('timeZone').get();
   const tz = settings?.timeZone;
   if (!tz || typeof tz !== 'string') {
-    throw new Error(
+    throw new ToolCallError(
       'Could not determine a time zone for this calendar write: no explicit timeZone was supplied and the ' +
       'mailbox has no configured time zone (mailboxSettings.timeZone). Pass an explicit timeZone ' +
       "(e.g. \"America/Los_Angeles\") and retry.",

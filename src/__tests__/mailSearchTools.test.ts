@@ -254,7 +254,9 @@ describe('search_mail', () => {
     respond = () => new Error('MailboxNotEnabledForRESTAPI');
     const r = toolResult(await callTool('search_mail', { folderId: SENT, to: 'x' }));
     expect(r.isError).toBe(true);
-    expect(r.text).toMatch(/Mail search failed/);
+    // The Graph detail is internal: the client gets the generic message and a reference.
+    expect(r.text).toMatch(/internal server error\. Reference: [0-9a-f-]{36}/);
+    expect(r.text).not.toContain('MailboxNotEnabledForRESTAPI');
   });
 });
 

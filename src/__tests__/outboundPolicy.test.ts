@@ -42,6 +42,7 @@ import {
   OutboundPolicyError,
   OUTBOUND_POLICY_MARKER,
 } from '../services/outboundPolicy.js';
+import { ToolCallError } from '../services/toolCallError.js';
 
 const TENANT = 'tenant-abc';
 const OTHER_TENANT = 'tenant-other';
@@ -224,7 +225,8 @@ describe('enforceOutboundPolicy', () => {
     const unreadable = check(fakeGraph({ '/organization': new Error('403 Forbidden') }).graph);
     await expect(unreadable).rejects.toBeInstanceOf(OutboundPolicyError);
     await expect(unreadable).rejects.toThrow(OUTBOUND_POLICY_MARKER);
-    await expect(unreadable).rejects.toThrow(/domains could not be read \(403 Forbidden\)/);
+    await expect(unreadable).rejects.toThrow(/domains could not be read, so the call was refused/);
+    await expect(unreadable).rejects.toMatchObject({ cause: expect.objectContaining({ message: '403 Forbidden' }) });
   });
 
   it('refuses when the recipients cannot be read', async () => {
@@ -235,7 +237,18 @@ describe('enforceOutboundPolicy', () => {
       recipients: async () => { throw new Error('Forbidden'); },
     });
     await expect(p).rejects.toBeInstanceOf(OutboundPolicyError);
-    await expect(p).rejects.toThrow(/could not be read \(Forbidden\)/);
+    await expect(p).rejects.toThrow(/could not be read, so the call was refused/);
+    await expect(p).rejects.toMatchObject({ cause: expect.objectContaining({ message: 'Forbidden' }) });
+  });
+
+  it('quotes a recipient-read failure written for the caller', async () => {
+    rows({ teamsMessages: 'internal' });
+    const { graph } = fakeGraph({});
+    const p = enforceOutboundPolicy({
+      graph, tenantId: TENANT, userId: USER, channel: 'teamsMessages',
+      recipients: async () => { throw new ToolCallError('reading members needs the ChannelMember.Read.All permission on the app registration'); },
+    });
+    await expect(p).rejects.toThrow(/could not be read \(reading members needs the ChannelMember\.Read\.All permission/);
   });
 
   it('fails closed when the policy cannot be read', async () => {
@@ -246,7 +259,8 @@ describe('enforceOutboundPolicy', () => {
     });
     await expect(p).rejects.toBeInstanceOf(OutboundPolicyError);
     await expect(p).rejects.toThrow(OUTBOUND_POLICY_MARKER);
-    await expect(p).rejects.toThrow(/outbound policy could not be read \(storage down\)/);
+    await expect(p).rejects.toThrow(/outbound policy could not be read, so the call was refused/);
+    await expect(p).rejects.not.toThrow(/storage down/);
   });
 });
 

@@ -138,6 +138,7 @@ jest.mock('@azure/functions', () => ({
 
 import { app } from '@azure/functions';
 import '../functions/mcp/mcpEndpoint.js';
+import { GraphError } from '@microsoft/microsoft-graph-client';
 import {
   parseMailboxAddresses,
   validateFromAddress,
@@ -342,7 +343,7 @@ describe('reply/forward tools — From', () => {
   });
 
   it('deletes the draft when setting From fails, rather than leave one on the wrong address', async () => {
-    mockGraphPatch.mockRejectedValue(new Error('ErrorSendAsDenied'));
+    mockGraphPatch.mockRejectedValue(Object.assign(new GraphError(403, 'Send As denied'), { code: 'ErrorSendAsDenied' }));
     const { isError, text } = toolResult(await callTool('reply_to_message', replyArgs('reply_to_message')));
     expect(isError).toBe(true);
     expect(text).toContain('ErrorSendAsDenied');

@@ -517,6 +517,18 @@ az containerapp revision list \
 
 
 
+### Issue: a tool call returns "internal server error. Reference: …"
+
+The call failed for a reason the client is not shown: a Graph 5xx or 401, a storage or network error, or a bug. The server logged the detail under the same reference. Search the console logs for it:
+
+```
+ContainerAppConsoleLogs_CL
+| where ContainerAppName_s == "m365-mcp"
+| where Log_s contains "<reference>"
+```
+
+The line reads `MCP tool <name> error [ref <reference>]:` followed by the error, its Graph status and code where there is one, and each underlying cause. Policy refusals, argument errors and Graph 4xx responses the user can act on are returned to the client as they are and never take this path.
+
 ### Issue: SharePoint tools return "No sites enabled"
 
   1. Navigate to the admin UI: `https://your-mcp-host.example.com/`.
