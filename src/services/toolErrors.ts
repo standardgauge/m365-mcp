@@ -20,6 +20,7 @@ import { ValidationError } from './opaqueId.js';
 import { FromAddressError } from './mailFrom.js';
 import { OutboundPolicyError } from './outboundPolicy.js';
 import { AttachmentSourceError } from './driveAttachments.js';
+import { FileTooLargeError } from './driveFileRead.js';
 import { ToolCallError } from './toolCallError.js';
 
 export { ToolCallError };
@@ -40,6 +41,7 @@ const CLIENT_FACING_CLASSES = [
   FromAddressError,
   OutboundPolicyError,
   AttachmentSourceError,
+  FileTooLargeError,
 ] as const;
 
 /**

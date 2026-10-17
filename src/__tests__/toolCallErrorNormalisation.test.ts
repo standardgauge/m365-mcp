@@ -133,6 +133,7 @@ import { logAccess } from '../services/auditLog.js';
 import { clientFacingMessage, ToolCallError } from '../services/toolErrors.js';
 import { ValidationError } from '../services/opaqueId.js';
 import { OutboundPolicyError } from '../services/outboundPolicy.js';
+import { FileTooLargeError } from '../services/driveFileRead.js';
 
 interface HttpRegistration {
   handler: (req: HttpRequest, context: InvocationContext) => Promise<{ status: number; jsonBody?: unknown }>;
@@ -155,6 +156,7 @@ function rpc(method: string, params: Record<string, unknown>): Promise<{ status:
     method: 'POST',
     headers: new Map<string, string>(),
     json: () => Promise.resolve({ jsonrpc: '2.0', id: 1, method, params }),
+    text: () => Promise.resolve(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })),
   } as unknown as HttpRequest;
   ctx = { error: jest.fn(), warn: jest.fn(), log: jest.fn() } as unknown as InvocationContext & { error: jest.Mock };
   return handler(req, ctx);
@@ -318,6 +320,8 @@ describe('clientFacingMessage', () => {
     expect(clientFacingMessage(new ToolCallError('pass `since`'))).toBe('pass `since`');
     expect(clientFacingMessage(new ValidationError('itemId must be a non-empty string'))).toBe('itemId must be a non-empty string');
     expect(clientFacingMessage(new OutboundPolicyError('Blocked by policy'))).toBe('Blocked by policy');
+    const tooLarge = new FileTooLargeError('big.bin', 200, 100);
+    expect(clientFacingMessage(tooLarge)).toBe(tooLarge.message);
   });
 
   it('refuses a plain Error, a non-Error, and Graph statuses the user cannot act on', () => {
