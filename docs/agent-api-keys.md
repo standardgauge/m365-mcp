@@ -386,9 +386,10 @@ To make these limits rather than advice, set the tenant's
 for example 90. The maximum applies to every key, the smoke key included: below
 90, the smoke key is minted for the maximum and rotated on its reminder.
 
-Keep the maximum at or below the audit table's retention (90 days by default,
-see **If a key may have been disclosed**). A key that outlives its own audit
-rows cannot be reviewed over its whole life.
+Keep the maximum at or below the audit table's interactive retention
+(`retentionInDays`, 90 days by default; see **If a key may have been
+disclosed**). A key that outlives its own directly queryable audit rows cannot
+be reviewed over its whole life without a search job or an older copy.
 
 ### How fast a revocation takes effect
 
@@ -413,9 +414,10 @@ takes a minute, and the investigation does not need the key to stay live.
    Agent Keys** (a Global Administrator).
 2. **Review the audit log** for everything done under the key's device label,
    `agent-key:<label>#<keyId>`, over the key's whole life, or as much of it as
-   the logs still hold. `M365McpAudit_CL` keeps 90 days by default, so a key
-   older than its table's retention has an unreviewable start unless an older
-   copy exists. The incident-response section says where to look for one.
+   the logs still hold. `M365McpAudit_CL` is directly queryable for 90 days by
+   default, so the start of an older key needs long-term retention (read back
+   with a search job) or an older copy. The incident-response section says how
+   to retrieve each.
 3. **Rotate**: mint a replacement for the app with the same or a narrower
    policy, put it in the app's secret store, and confirm the app's next calls
    appear under the new key id.

@@ -129,19 +129,47 @@ below only if the review in step 2 finds more than the key.
    the key's policy over time; what it could reach at the time is the policy
    in force then, not now.
 
-   The query only sees what the table still holds. `M365McpAudit_CL` follows
-   the workspace's 90-day retention unless it was given its own
+   The query only sees the table's **interactive** retention
+   (`retentionInDays`). `M365McpAudit_CL` follows the workspace's 90 days
+   unless it was given its own
    ([runbook](operations-runbook.md#audit-trail-in-log-analytics)), and a key
    can live up to the tenant maximum, 365 days by default. Compare the key's
    creation date in the Agent Keys table with the oldest row returned. If the
-   key is older than the retained window, cover the gap from, in order: an
-   export of the table to a SIEM or archive, if the tenant runs one; the
-   storage copy, the `auditLog` table, which keeps rows for
-   `AUDIT_LOG_RETENTION_DAYS` (365 by default) but is editable by anyone with
-   the storage key, so it is weaker evidence. Say in the
-   record which part of the key's life was reviewed and which was not. To stop
-   the gap opening, set the table's total retention to at least the tenant's
-   `maxKeyLifetimeDays`, or lower the maximum to the retention you keep.
+   key is older than the interactive window, cover the gap from, in order:
+
+   - **Long-term retention, if the table has it.** Rows past `retentionInDays`
+     but inside `totalRetentionInDays` are kept but not returned by the query
+     above. Check with `az monitor log-analytics workspace table show -g
+     rg-m365-mcp --workspace-name m365-mcp-logs -n M365McpAudit_CL --query
+     "{interactive:retentionInDays,total:totalRetentionInDays}"`. If total
+     exceeds interactive, run a search job over the older window. It writes
+     the matching rows to a new `_SRCH` table you then query like any other:
+
+     ```
+     az monitor log-analytics workspace table search-job create \
+       -g rg-m365-mcp --workspace-name m365-mcp-logs \
+       -n M365McpAudit_<keyId-without-dashes>_SRCH \
+       --search-query 'M365McpAudit_CL | where DeviceLabel endswith "#<keyId>" or TargetResource startswith "key:<keyId>"' \
+       --start-search-time "<key created, UTC>" \
+       --end-search-time "<start of interactive window, UTC>" \
+       --limit 1000
+     ```
+
+     A search job takes one table and a filtering subset of KQL (`where`,
+     `extend`, `project`, no `order by` or `summarize`), runs asynchronously,
+     and is billed per GB scanned. Restoring the table for the window is the
+     alternative for a large review
+     ([Microsoft docs](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure#analytics-long-term-and-total-retention)).
+   - **An export of the table to a SIEM or archive,** if the tenant runs one.
+   - **The storage copy,** the `auditLog` table, which keeps rows for
+     `AUDIT_LOG_RETENTION_DAYS` (365 by default) but is editable by anyone
+     with the storage key, so it is weaker evidence.
+
+   Say in the record which part of the key's life was reviewed, from which
+   source, and which was not. To stop the gap opening at all, set the table's
+   **interactive** retention to at least the tenant's `maxKeyLifetimeDays`,
+   or lower the maximum to the interactive retention you keep. Total
+   retention alone keeps the rows but leaves the review behind a search job.
 3. **Rotate.** Mint a replacement with the same or a narrower policy, put it
    where the app reads it, and check the app's next calls appear under the new
    key id. Fix how the old one leaked first, or the new one follows it.
