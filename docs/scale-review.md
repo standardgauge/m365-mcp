@@ -121,7 +121,9 @@ one read each with the deny list loaded once per call.
 - **Scale.** One to three replicas, scaled out when a replica averages more than
   20 concurrent requests (`infra/main.bicep:376-389`). Beyond three there is no
   more scaling; each replica then absorbs whatever arrives.
-- **Time.** Container Apps ingress gives a request 240 seconds by default. The
+- **Time.** The standard Container Apps ingress, which the templates deploy,
+  times a request out at 240 seconds, and nothing on the container app changes
+  that ([F3](#f3-the-runtime-envelope-stops-at-three-small-replicas)). The
   Functions host has no `functionTimeout` set (`host.json`), so a handler keeps
   running after the ingress has answered 504. Nothing in `src/` passes an
   `AbortSignal` or a timeout to a Graph or Table call, and Node's fetch has no
@@ -283,7 +285,7 @@ at 20 concurrent requests (`infra/main.bicep:341-344`, `376-389`;
 `infra/container-app.bicep:270-273`, `299-312`). The runbook describes the
 allocation as adequate for about twenty concurrent users
 (`docs/operations-runbook.md`, Right-sizing). No handler has a deadline, and
-the ingress has a 240 second one.
+the ingress has a fixed 240 second one.
 
 **Why it fails at scale.** At tier B the instance already runs near its
 scale-out ceiling (33 requests in flight against a trigger of 20 per replica
@@ -306,8 +308,23 @@ events (an all-hands, a rollout). Blast radius: the instance.
   seconds overall, 60 seconds per Graph call, 5 seconds per Table operation)
   through `AbortSignal`, and return a retryable JSON-RPC error when it is
   spent, so work the client has stopped waiting for is not finished anyway.
-- Document the ingress `requestTimeoutSeconds` setting for operators who want
-  longer calls, and keep the server's deadline under it.
+- Treat 240 seconds as a fixed boundary, and say so in the runbook. It is the
+  standard ingress's request timeout, and the container app's ingress settings
+  have no property that raises it. Premium ingress mode, set on the managed
+  environment, adds `ingressConfiguration.requestIdleTimeout` (minutes, 4 to
+  30, default 4), but that disconnects an idle request rather than setting a
+  per-request deadline, and it needs a workload-profiles environment with a
+  dedicated profile of at least two nodes for the ingress proxy, billed at that
+  profile's rate. The templates' environment has no workload profiles
+  (`infra/main.bicep:241-255`, `infra/container-app.bicep:175-189`). Keep the
+  server's deadline under 240 seconds on either mode.
+- Work that has to outlive the request should not hold it open. Start it as a
+  job, return a handle at once, and answer a second call with its status and
+  result, with the job's state in storage so any replica can serve that call.
+  Streaming progress is the other shape, but it only helps where the ingress
+  timeout counts idle time, which Microsoft documents for premium ingress and
+  not for the standard 240 seconds, so test it against the deployed ingress
+  before relying on it.
 
 Size: small for the configuration, medium for the deadlines. The target tier
 is [D1](#decisions).
@@ -365,11 +382,27 @@ resource units, though at admin volumes that is minor.
 **Likelihood and blast radius.** High. Blast radius: the admin console in
 exactly the organizations this review is about.
 
-**Fix.** Ask for roles only and page:
-`/me/transitiveMemberOf/microsoft.graph.directoryRole?$select=roleTemplateId&$top=999`
-(or `/me/memberOf/microsoft.graph.directoryRole`), following `nextLink` until
-exhausted or matched, and cache the answer per session for a few minutes.
-Size: small.
+**Fix.** Keep the request the code makes, add `$top=999`, and page it:
+`/me/transitiveMemberOf?$select=id,roleTemplateId&$top=999`, following
+`@odata.nextLink` until the Global Administrator template ID turns up or there
+is no next link. Bound the walk the way `fetchAllTenantUsers` bounds its loop,
+with a visited set and a page cap (`src/functions/admin/getTenantUsers.ts:35-62`),
+but without the `ConsistencyLevel` header that loop sends, and fail closed on
+the cap or on an error at any page, as the check does now. Graph documents the
+header and `$count` as required only for `$search`, `$filter`, `$orderby` and
+OData casts, so this request needs neither. At 999 objects a page, the
+documented maximum, an administrator in 3,000 groups costs at most four reads.
+Cache the verdict per session for a few minutes; a cached yes outlives a role
+removal by up to that long, so keep the window short.
+
+Casting to roles only (`/me/transitiveMemberOf/microsoft.graph.directoryRole`)
+is a different request. Graph requires the `ConsistencyLevel: eventual` header
+and `$count=true` for an OData cast on this collection, and answers it from an
+index that Microsoft documents as possibly behind recent changes, so an
+administrator whose role was just removed could keep passing the check. Don't
+use it for an authorization decision. The
+`/me/memberOf/microsoft.graph.directoryRole` variant has the same requirement
+and is not transitive. Size: small.
 
 ### F6 Session rows are scanned decrypted and never purged
 
@@ -477,16 +510,32 @@ external monitor. An operator learns about it from users.
 
 **Fix.**
 
-- Keep `/health` shallow for the probes. Add `/health/deep` (or `?deep=1`)
-  for external monitors, returning cached results of cheap dependency checks:
-  a Table Storage point read with a two second budget, a managed identity
-  token, and the MSAL configuration, plus the process's heap size and event
-  loop delay.
+- Keep `/health` shallow and anonymous for the probes, and add no dependency
+  detail to it.
+- Give the deep check its own route, never an anonymous one, rather than a
+  `?deep=1` on `/health`. The templates' ingress is external and their
+  environment has no virtual network (`infra/main.bicep:241-255`, `280-288`),
+  so there the route needs a credential: a monitor secret kept in Key Vault and
+  referenced the way the application keys are (`300-329`), sent in a request
+  header, compared in constant time, and refused with the same bare 401 whether
+  it is missing or wrong. An instance reachable only from a private network
+  can rely on that boundary instead.
+- Run the checks on a timer and serve the last result, so calling the route
+  cannot drive storage or token traffic: a Table Storage point read with a two
+  second budget, a managed identity token, and whether the MSAL configuration
+  loads.
+- Return verdicts only: `ok`, `degraded` or `fail` overall and per check, and
+  when each check last ran. No configuration values, IDs, endpoints or error
+  text. Heap size and event loop delay are metrics (next item), read in
+  Application Insights behind Azure access control, not response fields.
+- Where no external monitor needs the route, publish the same verdicts as
+  Application Insights availability results and add no endpoint at all.
 - Emit custom metrics (Application Insights `trackMetric`, or OpenTelemetry):
   `graph.requests` by host and status, `graph.retries`,
   `graph.retry_after_seconds`, `graph.latency`, `table.ops` by table and
   status, `table.latency`, `tool.duration` by tool, `tool.outbound_calls`,
-  `policy.fail_closed`, `sessions.cached`, `rate_limit.refusals`.
+  `policy.fail_closed`, `sessions.cached`, `rate_limit.refusals`,
+  `process.heap_used`, `process.event_loop_delay`.
 - Log one structured line per tool call: tool, duration, Graph calls, Table
   operations, retries, outcome.
 - Exclude the warning and error categories from sampling, or raise the cap.
@@ -842,12 +891,12 @@ them can be finished.
 |---|---|---|---|
 | B1 | Cache policy reads in process and load the deny list once per call | [F1](#f1-every-tool-call-fans-out-to-table-storage) | Short-TTL bounded caches for settings, allow-list, overrides and deny lists; one load per handler; no `createTable` on reads; count fail-closed events. |
 | B2 | Cap and stream file and attachment reads | [F2](#f2-file-and-attachment-reads-are-unbounded-in-memory) | Size gate from metadata, configurable caps, running-total abort, no base64 round trips for drive attachments, no pretty-printing of large results. |
-| B3 | Raise the runtime envelope and give every call a deadline | [F3](#f3-the-runtime-envelope-stops-at-three-small-replicas) | Template defaults for a large tier, `AbortSignal` budgets per call, per Graph call and per Table operation, documented ingress timeout. |
+| B3 | Raise the runtime envelope and give every call a deadline | [F3](#f3-the-runtime-envelope-stops-at-three-small-replicas) | Template defaults for a large tier, `AbortSignal` budgets per call, per Graph call and per Table operation under the fixed 240 second ingress timeout, a job shape for work that must outlive it. |
 | B4 | List allow-listed sites directly and page site search | [F4](#f4-site-listing-reads-one-page-and-filters-afterwards) | Enumerate allow-list entries by ID; `q` plus continuation for `list_sites`; page the admin picker route. |
-| B5 | Page the Global Administrator check and cache it | [F5](#f5-the-global-administrator-check-reads-one-page) | Directory-role cast with `$top=999` and `nextLink`; per-session cache for a few minutes. |
+| B5 | Page the Global Administrator check and cache it | [F5](#f5-the-global-administrator-check-reads-one-page) | Page the uncast `transitiveMemberOf` read with `$top=999` and `nextLink`, no OData cast; per-session cache for a few minutes. |
 | B6 | Index, project, paginate and purge the session table | [F6](#f6-session-rows-are-scanned-decrypted-and-never-purged) | User-keyed index rows, no decrypt on listings, paginated sessions API, purge past the absolute lifetime, run the legacy migration once. |
 | B7 | Route the outbound policy through the shared storage client | [F7](#f7-the-outbound-policy-reads-storage-through-the-wrong-client) | Use `storageClient.getTableClient`; add a test under the endpoint configuration. |
-| B8 | Deep health check, metrics and alert rules | [F8](#f8-nothing-reports-degradation) | `/health/deep` with cached dependency checks, custom metrics for Graph, storage and tools, one structured line per call, unsampled warnings, runbook alerts and queries. |
+| B8 | Deep health check, metrics and alert rules | [F8](#f8-nothing-reports-degradation) | An authenticated deep health check serving cached verdicts only, custom metrics for Graph, storage, tools and the process, one structured line per call, unsampled warnings, runbook alerts and queries. |
 | B9 | Rate-limit authenticated MCP calls per session and pass `Retry-After` through | [F9](#f9-the-rate-limiter-keys-on-the-egress-address) | Per-session budget after authentication, address limiter kept as a coarse ceiling, `retryAfterSeconds` in error data, shim waits once. |
 | B10 | Bound Graph retries, surface throttling, gate per-user concurrency | [F10](#f10-graph-retries-have-no-deadline-and-429s-are-opaque) | Custom retry options with a total budget and jitter, sanitized `Retry-After`, structured retryable errors, a semaphore of four per account. |
 | B11 | Opaque continuation tokens for the list tools | [F11](#f11-offset-paging-re-walks-from-page-one) | Signed or server-held `nextLink` cursors replacing numeric offsets; `pageCapReached`; the same argument for the first-page tools in F17. |
@@ -882,8 +931,20 @@ before-and-after is recorded.
 - Avoid getting throttled or blocked in SharePoint Online (resource units,
   per-app per-tenant limits, delegated search limit):
   <https://learn.microsoft.com/en-us/sharepoint/dev/general-development/how-to-avoid-getting-throttled-or-blocked-in-sharepoint-online>
-- Azure Container Apps ingress (request timeout):
+- Azure Container Apps ingress (the 240 second request timeout):
   <https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview>
+- Azure Container Apps premium ingress (workload profile requirements,
+  `requestIdleTimeout`):
+  <https://learn.microsoft.com/en-us/azure/container-apps/ingress-environment-configuration>
+  and <https://learn.microsoft.com/en-us/azure/container-apps/premium-ingress>;
+  the property on the managed environment:
+  <https://learn.microsoft.com/en-us/rest/api/resource-manager/containerapps/managed-environments/update?view=rest-resource-manager-containerapps-2025-07-01>
+- Microsoft Graph, list a user's transitive memberships (page sizes, and the
+  `ConsistencyLevel` header and `$count` an OData cast requires):
+  <https://learn.microsoft.com/en-us/graph/api/user-list-transitivememberof?view=graph-rest-1.0>
+- Microsoft Graph advanced query capabilities on directory objects (the
+  separate, eventually consistent index):
+  <https://learn.microsoft.com/en-us/graph/aad-advanced-queries>
 - Azure Table Storage scalability targets:
   <https://learn.microsoft.com/en-us/azure/storage/tables/scalability-targets>
 - Microsoft Graph JavaScript client retry handler (`RetryHandler`,
