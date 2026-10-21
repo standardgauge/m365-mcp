@@ -77,6 +77,23 @@ When the scan fails on `Microsoft.NETCore.App.Runtime` or
    advisory's fixed version.
 3. Bump `Dockerfile` and `Dockerfile.backend.dev` together, tag and digest.
 
+## Node in the Functions host: overlaid, not inherited
+
+The Functions image installs Node from NodeSource when Microsoft builds it, so a
+host tag carries whatever Node was current that day. The October 2026 Node
+security release (22.23.4) landed after every `node22` host build then
+published, all of which shipped 22.23.3. Waiting for a rebuild would have left
+the runtime unpatched for an unknown time.
+
+So both Dockerfiles replace `/usr/bin/node` in the runtime stage with the binary
+from the digest-pinned `node:22-slim` image (the `node-runtime` stage, amd64 to
+match the host). The runtime Node is then the one this repo pins, and a Node
+patch is a digest bump of `node:22-slim`: bump every `node:22-slim` digest in
+`Dockerfile`, `Dockerfile.backend.dev` and `Dockerfile.frontend.dev` together.
+The build fails if another `node` on `PATH` would shadow the overlay. To check
+what a candidate host tag ships on its own, read the `nodejs` package version
+from `var/lib/dpkg/status` in the layer built by `install-node.sh`.
+
 ## `uuid` < 11.1.1 via `@azure/msal-node` — retired
 
 `npm audit --omit=dev` used to report two linked moderates: `uuid` <11.1.1
