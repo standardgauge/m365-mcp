@@ -73,6 +73,7 @@ Decide which case you are in. It sets which kill-switch steps you need.
 |---|---|---|
 | **Vulnerability report, no sign of exploitation** | Nothing yet | Read the audit and Entra logs for the indicators the report describes. Apply the fix when it ships, or pin and take the mitigation the advisory gives. |
 | **One user's session token stolen** (lost laptop, token in a log or a backup) | Disable the user in Entra and revoke their sessions (step 2), then rotate the HMAC key (step 3; that key alone is enough here) | See the note below on why revoking alone is not enough. |
+| **An agent key disclosed** (in a repository, a log, a chat, on a lost machine) | Revoke the key ([A disclosed agent key](#a-disclosed-agent-key)) | Read its audit rows. Nothing else needs rotating unless they show use you cannot account for. |
 | **Activity under one user that the user did not do** | As above, and read that user's audit rows and Graph activity for the window | Check the user's sent items and drafts; ask whether their MCP client had a prompt-injected session. |
 | **Container App secrets exposed, or storage plus the data key** | Steps 1, 2, 3 and 5, in that order | The full rotation list below. |
 | **Code you did not intend is running** (unexpected `sha`, compromised fork or upstream) | Pin (`gh variable delete AUTO_UPDATE -R <fork>`), stop traffic (step 6), roll back to a known-good image ([runbook](operations-runbook.md#rollback)) | That code ran with every secret in the Container App. Treat it as the row above. |
@@ -87,6 +88,130 @@ keeps working until its 30-day absolute cap. There is no admin action that
 deletes one user's sessions, so the session row has to go another way: keep the
 user disabled until the cap passes, or roll the HMAC key, which signs everyone
 out.
+
+## A disclosed agent key
+
+An [agent key](agent-api-keys.md) acts as the user who minted it, within the
+key's own policy. A disclosed key is a narrower case than a stolen session
+token: a revoked key is refused at its own row, so the owner signing in again
+does not bring it back, and the owner's other sessions are untouched. Use the kill switch
+below only if the review in step 2 finds more than the key.
+
+1. **Revoke it.** The owner under **My Settings → Agent Keys**, or a Global
+   Administrator under **Admin → Agent Keys**. The key row is read on every
+   request, so the next request on any replica is refused; the documented
+   bound is 30 seconds ([how fast a revocation takes
+   effect](agent-api-keys.md#how-fast-a-revocation-takes-effect)). Do this
+   before investigating, even if the disclosure might be harmless. A
+   replacement takes a minute; a key left live while you find out does not
+   come back.
+2. **Review what was done under it.** Every row the key produced carries its
+   device label, `agent-key:<label>#<keyId>`, and the rows for changes to it
+   name it in `TargetResource` as `key:<keyId>`. The key id is shown in both Agent Keys tables.
+   Match on the id, since an owner can rename a key:
+
+   ```
+   M365McpAudit_CL
+   | where DeviceLabel endswith "#<keyId>" or TargetResource startswith "key:<keyId>"
+   | project TimeGenerated, Operation, TargetResource, Result, Reason, Source, ClientIp, Before, After
+   | order by TimeGenerated asc
+   ```
+
+   Look for a `ClientIp` the app does not run from, calls at hours the app
+   does not run, operations the app does not make, any write, and bursts of
+   `denied` rows, which are someone probing what the key may do. Calls after
+   the revoke show as `auth.agent_key` denied with reason `key revoked`: they
+   prove the copy was in use, so keep them. The Entra sign-in logs do not help
+   here. A key never reaches Entra; the server redeems the owner's refresh
+   token from its own outbound addresses whoever presents the key.
+
+   The `policy.agent_key.update` and `policy.deny_list.agent_key.*` rows show
+   the key's policy over time; what it could reach at the time is the policy
+   in force then, not now.
+
+   The query only sees the table's **interactive** retention
+   (`retentionInDays`). `M365McpAudit_CL` follows the workspace's 90 days
+   unless it was given its own
+   ([runbook](operations-runbook.md#audit-trail-in-log-analytics)), and a key
+   can live up to the tenant maximum, 365 days by default. Compare the key's
+   creation date in the Agent Keys table with the oldest row returned. If the
+   key is older than the interactive window, cover the gap from, in order:
+
+   - **Long-term retention, if the table has it.** Rows past `retentionInDays`
+     but inside `totalRetentionInDays` are kept but not returned by the query
+     above. Check with `az monitor log-analytics workspace table show -g
+     rg-m365-mcp --workspace-name m365-mcp-logs -n M365McpAudit_CL --query
+     "{interactive:retentionInDays,total:totalRetentionInDays}"`. If total
+     exceeds interactive, run a search job over the older window. It writes
+     the matching rows to a new `_SRCH` table you then query like any other:
+
+     ```
+     az monitor log-analytics workspace table search-job create \
+       -g rg-m365-mcp --workspace-name m365-mcp-logs \
+       -n M365McpAudit_<keyId-without-dashes>_SRCH \
+       --search-query 'M365McpAudit_CL | where DeviceLabel endswith "#<keyId>" or TargetResource startswith "key:<keyId>"' \
+       --start-search-time "<key created, UTC>" \
+       --end-search-time "<start of interactive window, UTC>"
+     ```
+
+     Leave `--limit` off. It caps the rows the job writes, and a busy or abused
+     key can pass any small figure, so a cap silently drops the evidence this
+     step is for. Without it the job stops at the service maximum of 100
+     million rows.
+
+     The job runs asynchronously and rows appear in the `_SRCH` table while it
+     is still running, so a query against it is not the answer until the job
+     has finished. `provisioningState` alone cannot tell you that: it only
+     ever reads `Updating`, `InProgress`, `Succeeded` or `Deleting`, and
+     completion is reported separately as `resultStatistics.progress`. Poll
+     both:
+
+     ```
+     az monitor log-analytics workspace table show \
+       -g rg-m365-mcp --workspace-name m365-mcp-logs \
+       -n M365McpAudit_<keyId-without-dashes>_SRCH \
+       --query "{state:provisioningState,progress:resultStatistics.progress,ingested:resultStatistics.ingestedRecords,limit:searchResults.limit}"
+     ```
+
+     The table is complete only when `state` is `Succeeded` **and**
+     `progress` is 100. `Updating` or `InProgress` means wait. A job that has
+     stopped with `progress` under 100, or has run for 24 hours without
+     reaching it, hit the 100-million-row maximum or the timeout: record the
+     table as incomplete and split the window into shorter search jobs. An
+     empty `limit` only shows no cap was requested; it is not evidence the
+     job finished, so don't read it as one.
+
+     Once complete, record `ingested` and the row count
+     (`M365McpAudit_<keyId-without-dashes>_SRCH | count`) with the window it
+     covers. The two should agree; if they don't, treat the table as
+     incomplete.
+
+     A search job takes one table and a filtering subset of KQL (`where`,
+     `extend`, `project`, no `order by` or `summarize`), runs for up to 24
+     hours, and is billed per GB scanned
+     ([search jobs](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/search-jobs)).
+     Restoring the table for the window is the alternative for a large review
+     ([retention](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure#analytics-long-term-and-total-retention)).
+   - **An export of the table to a SIEM or archive,** if the tenant runs one.
+   - **The storage copy,** the `auditLog` table, which keeps rows for
+     `AUDIT_LOG_RETENTION_DAYS` (365 by default) but is editable by anyone
+     with the storage key, so it is weaker evidence.
+
+   Say in the record which part of the key's life was reviewed, from which
+   source, and which was not. To stop the gap opening at all, set the table's
+   **interactive** retention to at least the tenant's `maxKeyLifetimeDays`,
+   or lower the maximum to the interactive retention you keep. Total
+   retention alone keeps the rows but leaves the review behind a search job.
+3. **Rotate.** Mint a replacement with the same or a narrower policy, put it
+   where the app reads it, and check the app's next calls appear under the new
+   key id. Fix how the old one leaked first, or the new one follows it.
+   Removing the old value from where it leaked is clean-up, not containment:
+   once revoked it opens nothing.
+
+If the review finds writes, sends or reads nobody can account for, it is now
+**Activity under one user that the user did not do** in the triage table, with
+the key's policy as the bound on what was reachable. Notify as for that case:
+the owner, and the people below whose decision a read of their data is.
 
 ## Kill switch, ordered by speed
 
@@ -183,6 +308,7 @@ or the runtime exposed, that is the whole list: they sit side by side.
 | `AZURE_CREDENTIALS` (deploy principal) | [Runbook](operations-runbook.md#azure_credentials-deploy-service-principal) | Also review the principal's role assignments. |
 | Sync token and any other fork secret | Mint new, `gh secret set` on the fork, revoke the old | Plus the fork's collaborators and deploy keys. |
 | Users' client session tokens | Invalidated by the HMAC key rotation | Users reinstall from `/install`. |
+| Agent keys | Invalidated by the HMAC key rotation: a key is looked up by its HMAC, so every key, the deploy smoke key included, stops matching | Owners mint replacements ([agent keys](agent-api-keys.md#if-a-key-may-have-been-disclosed)); the administrator re-mints the smoke key and runs `gh secret set SMOKE_AGENT_KEY`. Revoke the old rows too, so the tables stop listing them as live; they can never match again either way. |
 
 Then review what an attacker could have changed rather than read: the app
 registration's owners, permissions and consent grants; role assignments on the
