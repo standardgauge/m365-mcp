@@ -1,11 +1,14 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-# Keep this Node major aligned with the azure-functions/node node22 runtime in
-# stage 2. Dependabot major bumps of the node image are ignored (.github/dependabot.yml)
-# so the builder never drifts ahead of the runtime; move both together on an LTS bump.
-# Pulled from the ECR Public mirror of the Docker Official Image, not Docker
-# Hub: CI builds this file anonymously and Docker Hub rate-limits anonymous
-# pulls, which turned main red on a merge burst. Same image, same digest.
-FROM public.ecr.aws/docker/library/node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS builder
+# Built on the same image as the runtime in stage 2. It installs Node 22 with
+# npm, so the builder's Node major cannot drift from the runtime's, and every
+# build pulls from one registry instead of two. The builder used to come from
+# the ECR Public mirror of the Docker Official node image (and before that from
+# Docker Hub). Both rate-limit anonymous pulls from shared CI runner addresses:
+# on 2026-10-22 ECR Public answered every pull with 429 "Data limit exceeded",
+# which failed CI and the deploy on a tracking fork and held the release.
+# The runtime image is pulled from MCR on every build already. Keep the tag and
+# digest identical to stage 2 and bump both together.
+FROM mcr.microsoft.com/azure-functions/node:4.1055.250-1-node22@sha256:ede6fb7e132078c3c2a5760fd6b35179a15278d22ec3e93345deea2945768ab5 AS builder
 WORKDIR /build
 
 COPY package*.json ./

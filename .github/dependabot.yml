@@ -61,9 +61,11 @@ updates:
       # node22 runtime. Ignore major node bumps; move the builder deliberately,
       # together with the runtime image, when adopting a new Node LTS.
       #
-      # The builder pulls node from the ECR Public mirror, so the dependency
-      # name carries the registry path. "*library/node" matches that name and
-      # "node" matches the bare Docker Hub one, should it ever come back.
+      # The production builder now shares the runtime image; the dev
+      # Dockerfiles still pull node from the ECR Public mirror, so the
+      # dependency name carries the registry path. "*library/node" matches
+      # that name and "node" matches the bare Docker Hub one, should it ever
+      # come back.
       - dependency-name: "*library/node"
         update-types: ["version-update:semver-major"]
       - dependency-name: "node"
