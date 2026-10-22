@@ -767,25 +767,52 @@ so `Content-Length` `GreaterThan 16777216` asks whether the header is longer
 than sixteen million characters and never fires. Application Gateway does not
 document numeric semantics for that operator on a header either, so the same
 rule there would rest on an assumption. A regular expression is a string match
-on both, with no such question, so the edge rule is a `RegEx` match on a
-pattern that matches exactly the decimal values above the cap. For 16777216:
+on both, with no such question, so the edge rule is a `RegEx` match on
+patterns that together match exactly the decimal values above the cap.
+
+Front Door's regex dialect rejects capturing subexpressions, among other
+constructs
+([Front Door](https://learn.microsoft.com/azure/web-application-firewall/afds/waf-front-door-custom-rules#priority-action-types-and-match-conditions)),
+so the patterns use no parentheses at all. Each is anchored on its own and goes
+in as a separate match value of the one condition; a condition with several
+match values fires when any of them matches, on Front Door and Application
+Gateway alike. For 16777216, nine values:
 
 ```
-^0*([1-9][0-9]{8,}|[2-9][0-9]{7}|1[7-9][0-9]{6}|16[89][0-9]{5}|167[89][0-9]{4}|1677[89][0-9]{3}|16777[3-9][0-9]{2}|167772[2-9][0-9]|1677721[7-9])$
+^0*[1-9][0-9]{8,}$
+^0*[2-9][0-9]{7}$
+^0*1[7-9][0-9]{6}$
+^0*16[89][0-9]{5}$
+^0*167[89][0-9]{4}$
+^0*1677[89][0-9]{3}$
+^0*16777[3-9][0-9]{2}$
+^0*167772[2-9][0-9]$
+^0*1677721[7-9]$
 ```
 
-It matches 16777217 and up, any value of nine or more digits, and leading
-zeros; it does not match 16777216 or anything below. If you raise
-`MCP_MAX_BODY_BYTES`, the pattern has to be rebuilt for the new value, and
-checked against it before it goes in the policy:
+Together they match 16777217 and up, any value of nine or more digits, and
+leading zeros; none matches 16777216 or anything below. If you raise
+`MCP_MAX_BODY_BYTES`, the values have to be rebuilt for the new limit and
+checked against it before they go in the policy. Save them one per line in
+`content-length-patterns.txt`; `grep -f` treats each line as its own pattern
+and reports a match if any one matches, the same rule the WAF applies:
 
 ```
-P='<the pattern>'; LIMIT=16777216
+LIMIT=16777216
 for v in $((LIMIT - 1)) $LIMIT $((LIMIT + 1)) 0$((LIMIT + 1)) $((LIMIT * 10)); do
-  printf '%s ' "$v"; echo "$v" | grep -Eq "$P" && echo block || echo pass
+  printf '%s ' "$v"; echo "$v" | grep -Eqf content-length-patterns.txt && echo block || echo pass
 done
 # Expected: pass, pass, block, block, block.
+grep -c '[()]' content-length-patterns.txt
+# Expected: 0. No groups of any kind, so nothing Front Door rejects.
 ```
+
+`grep` is a different regex engine from either WAF's, so this shows the values
+are right, not that Azure accepts and enforces them. What establishes that is
+the over-cap request in the verification below getting the WAF's `403`: a
+value Azure refused would fail the policy update, and one it accepted but
+read differently would let the request through to the host's `413`. Record
+the policy update's output and that `403` in the go-live record.
 
   * **Application Gateway WAF:** not `maxRequestBodySizeInKb`. The current WAF
     engine (CRS 3.2 and later) accepts at most 2 MB there, so with request body
@@ -793,11 +820,12 @@ done
     gateway long before the 16 MiB cap. Turn request body enforcement **off**
     (`requestBodyEnforcement: false`; inspection stays on, up to its own
     2 MB inspect limit) and add a custom rule, priority 1, matching
-    `RequestHeaders` selector `Content-Length`, operator `Regex`, the pattern
-    above, with action `Block`.
+    `RequestHeaders` selector `Content-Length`, operator `Regex`, the nine
+    values above as its match values, with action `Block`.
     [Microsoft's limit](https://learn.microsoft.com/azure/web-application-firewall/ag/application-gateway-waf-request-size-limits).
   * **Front Door WAF:** a custom rule matching `RequestHeader` selector
-    `Content-Length`, operator `RegEx`, the pattern above, with action `Block`.
+    `Content-Length`, operator `RegEx`, the nine values above as its match
+    values, with action `Block`.
 
 Either rule reads the declared length only. A chunked request carries no
 `Content-Length`, passes the edge, and is held to the in-app cap instead,
@@ -904,13 +932,13 @@ seq 1 1600 | xargs -P 32 -I{} curl -s -o /dev/null -w '%{http_code}\n' "$HOST/he
 az network application-gateway waf-policy show -n <policy> -g <gw-rg> \
   --query "{enforcement:policySettings.requestBodyEnforcement, rules:customRules[?action=='Block'].{name:name, match:matchConditions}}"
 # Expected: enforcement false, and a rule matching RequestHeaders Content-Length
-# with operator Regex and the pattern above.
+# with operator Regex and the nine values above.
 
 # Front Door body cap: the same rule on the Front Door WAF policy.
 az network front-door waf-policy show -n <policy> -g <fd-rg> \
   --query "customRules.rules[?action=='Block'].{name:name, match:matchConditions}"
 # Expected: a rule matching RequestHeader Content-Length with operator RegEx
-# and the pattern above.
+# and the nine values above.
 
 # Direct path closed.
 curl -s -o /dev/null -w '%{http_code}\n' --max-time 10 "$FQDN/health"

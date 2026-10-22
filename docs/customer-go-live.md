@@ -307,7 +307,7 @@ services decided in [Before you start](#before-you-start), and nothing more.
       this one, and nothing on the Container Apps side can check
       `X-Azure-FDID`. Front Door Standard is therefore not accepted here.
       The edge body cap is a `Content-Length` custom rule using the
-      runbook's `RegEx` pattern, not `GreaterThan`: Front Door reads
+      runbook's `RegEx` match values, not `GreaterThan`: Front Door reads
       `GreaterThan` on a header as the length of the header string, so a
       numeric threshold there never fires, and Application Gateway documents
       no numeric semantics for it either. On an Application Gateway that
@@ -321,7 +321,9 @@ services decided in [Before you start](#before-you-start), and nothing more.
   behind an edge means the edge rule did not fire), a burst against `/health`
   gets `429`s, and the direct FQDN is refused. Add the runbook's WAF policy
   check for the edge in use (the `Content-Length` rule present with the
-  `RegEx` pattern; on an Application Gateway, enforcement off too). Behind an
+  `RegEx` match values, and the policy update that added it succeeded; on an
+  Application Gateway, enforcement off too). The over-cap `403` is what shows
+  the WAF accepted and enforces those values, not the local `grep` check. Behind an
   Application Gateway, scale the burst to the gateway's instance count.
   Behind Front Door, add the runbook's Private Link
   checks: the origin's private link approved and the environment's public
@@ -900,7 +902,7 @@ it in as you go. A blank cell is an item not done.
 | 2.4 | Consented scope list, verbatim | | | |
 | 2.6 | Assignment required: yes; assigned users or group | | | |
 | 3 | Hostname; values of `OAUTH_REDIRECT_URI` and `FRONTEND_URL` as resolved | | | |
-| 3.4 | Body cap in bytes, in the app and at the edge; edge service and tier, and its two rate-limit thresholds (Application Gateway: its maximum instance count and the resulting per-address ceilings, and the WAF policy check); the edge body-cap rule's `RegEx` pattern; ingress restriction (gateway address, or Front Door Private Link with public access disabled); output of the three checks (the body check's status code says which cap fired) and, behind Front Door, the Private Link checks; or "no edge" and who accepted it | | | |
+| 3.4 | Body cap in bytes, in the app and at the edge; edge service and tier, and its two rate-limit thresholds (Application Gateway: its maximum instance count and the resulting per-address ceilings, and the WAF policy check); the edge body-cap rule's `RegEx` match values; ingress restriction (gateway address, or Front Door Private Link with public access disabled); output of the three checks (the body check's status code says which cap fired) and, behind Front Door, the Private Link checks; or "no edge" and who accepted it | | | |
 | 4 | Fork; deploy principal name and role scopes; deployed commit and image tag; the release it belongs to and the CI evidence on that release ([supply chain](supply-chain.md#release-evidence-the-ci-runs-for-the-tagged-commit)) | | | |
 | 5 | Storage account settings from 5.1; role assignments from 5.3 | | | |
 | 6.2 | The two key hash prefixes | | | |
