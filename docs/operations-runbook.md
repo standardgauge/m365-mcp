@@ -759,7 +759,33 @@ az containerapp update -n m365-mcp -g rg-m365-mcp \
   --set-env-vars FUNCTIONS_REQUEST_BODY_SIZE_LIMIT=16777216
 ```
 
-and at the edge, if there is one:
+and at the edge, if there is one. Do not use `GreaterThan` on the header.
+Front Door documents `GreaterThan` and its relatives as size constraints on the
+matched value's length in bytes, not a numeric comparison
+([Front Door](https://learn.microsoft.com/azure/web-application-firewall/afds/waf-front-door-custom-rules#size-constraint)),
+so `Content-Length` `GreaterThan 16777216` asks whether the header is longer
+than sixteen million characters and never fires. Application Gateway does not
+document numeric semantics for that operator on a header either, so the same
+rule there would rest on an assumption. A regular expression is a string match
+on both, with no such question, so the edge rule is a `RegEx` match on a
+pattern that matches exactly the decimal values above the cap. For 16777216:
+
+```
+^0*([1-9][0-9]{8,}|[2-9][0-9]{7}|1[7-9][0-9]{6}|16[89][0-9]{5}|167[89][0-9]{4}|1677[89][0-9]{3}|16777[3-9][0-9]{2}|167772[2-9][0-9]|1677721[7-9])$
+```
+
+It matches 16777217 and up, any value of nine or more digits, and leading
+zeros; it does not match 16777216 or anything below. If you raise
+`MCP_MAX_BODY_BYTES`, the pattern has to be rebuilt for the new value, and
+checked against it before it goes in the policy:
+
+```
+P='<the pattern>'; CAP=16777216
+for v in $((CAP-1)) $CAP $((CAP+1)) 0$((CAP+1)) $((CAP*10)); do
+  printf '%s ' "$v"; echo "$v" | grep -Eq "$P" && echo block || echo pass
+done
+# Expected: pass, pass, block, block, block.
+```
 
   * **Application Gateway WAF:** not `maxRequestBodySizeInKb`. The current WAF
     engine (CRS 3.2 and later) accepts at most 2 MB there, so with request body
@@ -767,14 +793,17 @@ and at the edge, if there is one:
     gateway long before the 16 MiB cap. Turn request body enforcement **off**
     (`requestBodyEnforcement: false`; inspection stays on, up to its own
     2 MB inspect limit) and add a custom rule, priority 1, matching
-    `RequestHeaders` `Content-Length` `GreaterThan 16777216` with action
-    `Block`. Like the Front Door rule below, it reads the declared length only;
-    a chunked request with no `Content-Length` passes the gateway and is held to
-    the in-app cap instead, which is why that setting stays on here too.
+    `RequestHeaders` selector `Content-Length`, operator `Regex`, the pattern
+    above, with action `Block`.
     [Microsoft's limit](https://learn.microsoft.com/azure/web-application-firewall/ag/application-gateway-waf-request-size-limits).
-  * **Front Door WAF:** a custom rule matching `RequestHeader` `Content-Length`
-    `GreaterThan 16777216` with action `Block`. This reads the declared length
-    only, which is why the in-app setting above stays on behind Front Door.
+  * **Front Door WAF:** a custom rule matching `RequestHeader` selector
+    `Content-Length`, operator `RegEx`, the pattern above, with action `Block`.
+
+Either rule reads the declared length only. A chunked request carries no
+`Content-Length`, passes the edge, and is held to the in-app cap instead,
+which is why the in-app setting stays on behind an edge too. A WAF block
+answers `403`, and the host's cap answers `413`, so the verification below can
+tell which one fired.
 
 **2. An edge rate limit.** Front Door Premium with a WAF policy (Standard cannot
 close the direct path; see 3), or
@@ -853,8 +882,10 @@ FQDN=https://$(az containerapp show -n m365-mcp -g rg-m365-mcp \
 # so it cannot show whether the host and edge caps are set.
 head -c 16777217 /dev/zero | curl -s -o /dev/null -w '%{http_code}\n' \
   -X POST -H 'Content-Type: application/json' --data-binary @- "$HOST/api/mail/send"
-# Expected: 413, from the edge or the host. A 401 means neither cap is set and
-# the body reached the handler.
+# Expected behind an edge: 403, the WAF's block. A 413 there means the edge
+# rule did not fire and the host caught the body after it crossed the edge.
+# Expected with no edge: 413, from the host. A 401 means neither cap is set
+# and the body reached the handler.
 # The same request a megabyte under the cap reaches the handler instead.
 head -c 15728640 /dev/zero | curl -s -o /dev/null -w '%{http_code}\n' \
   -X POST -H 'Content-Type: application/json' --data-binary @- "$HOST/api/mail/send"
@@ -871,8 +902,15 @@ seq 1 1600 | xargs -P 32 -I{} curl -s -o /dev/null -w '%{http_code}\n' "$HOST/he
 
 # Application Gateway body cap: the custom rule, not WAF body enforcement.
 az network application-gateway waf-policy show -n <policy> -g <gw-rg> \
-  --query "{enforcement:policySettings.requestBodyEnforcement, rules:customRules[?action=='Block'].name}"
-# Expected: enforcement false, and the Content-Length rule among the rules.
+  --query "{enforcement:policySettings.requestBodyEnforcement, rules:customRules[?action=='Block'].{name:name, match:matchConditions}}"
+# Expected: enforcement false, and a rule matching RequestHeaders Content-Length
+# with operator Regex and the pattern above.
+
+# Front Door body cap: the same rule on the Front Door WAF policy.
+az network front-door waf-policy show -n <policy> -g <fd-rg> \
+  --query "customRules.rules[?action=='Block'].{name:name, match:matchConditions}"
+# Expected: a rule matching RequestHeader Content-Length with operator RegEx
+# and the pattern above.
 
 # Direct path closed.
 curl -s -o /dev/null -w '%{http_code}\n' --max-time 10 "$FQDN/health"
