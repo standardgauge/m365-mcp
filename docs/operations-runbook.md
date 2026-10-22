@@ -780,8 +780,8 @@ zeros; it does not match 16777216 or anything below. If you raise
 checked against it before it goes in the policy:
 
 ```
-P='<the pattern>'; CAP=16777216
-for v in $((CAP-1)) $CAP $((CAP+1)) 0$((CAP+1)) $((CAP*10)); do
+P='<the pattern>'; LIMIT=16777216
+for v in $((LIMIT - 1)) $LIMIT $((LIMIT + 1)) 0$((LIMIT + 1)) $((LIMIT * 10)); do
   printf '%s ' "$v"; echo "$v" | grep -Eq "$P" && echo block || echo pass
 done
 # Expected: pass, pass, block, block, block.
