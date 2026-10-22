@@ -5,7 +5,7 @@
 # Pulled from the ECR Public mirror of the Docker Official Image, not Docker
 # Hub: CI builds this file anonymously and Docker Hub rate-limits anonymous
 # pulls, which turned main red on a merge burst. Same image, same digest.
-FROM public.ecr.aws/docker/library/node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS builder
+FROM public.ecr.aws/docker/library/node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS builder
 WORKDIR /build
 
 COPY package*.json ./
@@ -21,6 +21,12 @@ RUN npm run build
 # configuration: sign-in runs on the server, so the image is the same for
 # every tenant.
 RUN npm run build:admin
+
+# ── Node runtime source ───────────────────────────────────────────────────────
+# The Node binary the runtime stage runs (see the overlay there). Same image and
+# digest as the builder, pinned to amd64 because the Functions image is
+# amd64-only: on an arm64 machine the builder resolves to arm64.
+FROM --platform=linux/amd64 public.ecr.aws/docker/library/node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS node-runtime
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 # Pinned to a versioned host build rather than the rolling `4-node22` tag. The
@@ -46,6 +52,16 @@ ENV AzureWebJobsScriptRoot=/home/site/wwwroot \
     FUNCTIONS_EXTENSION_VERSION=~4 \
     WEBSITE_NODE_DEFAULT_VERSION=~22 \
     ASPNETCORE_URLS=http://+:8080
+
+# Node runtime overlay. The Functions image installs Node from NodeSource when
+# Microsoft builds it, so its Node is only as current as that build: every
+# node22 host tag published through 2026-10-21 carries 22.23.3, which predates
+# the October 2026 Node security release (22.23.4). Replace it with the binary
+# from the node-runtime stage above, so the runtime Node is the one this file
+# pins and moves with the builder digest. The check fails the build if any
+# other node on PATH would shadow the overlay.
+COPY --from=node-runtime /usr/local/bin/node /usr/bin/node
+RUN [ "$(command -v node)" = /usr/bin/node ] && node --version
 
 WORKDIR /home/site/wwwroot
 
