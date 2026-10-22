@@ -9,6 +9,8 @@ The pieces:
 
 - every release carries an SBOM and a signed provenance attestation
   ([`release.yml`](../.github/workflows/release.yml));
+- every release archives the hosted CI runs for its commit with its release
+  notes ([release evidence](#release-evidence-the-ci-runs-for-the-tagged-commit));
 - every deploy pushes its image with a provenance statement attached
   ([`deploy.yml`](../.github/workflows/deploy.yml), `provenance: mode=max`);
 - every running instance reports the commit it was built from on `GET /health`.
@@ -62,6 +64,54 @@ on their merge ref to prove the signing path works between releases. Add
 which carries the commit SHA.
 
 That commit is what a deploy built from the tag reports on `/health`.
+
+### Release evidence: the CI runs for the tagged commit
+
+The SBOM and the attestation say what a release contains and where it was
+built. They do not say the commit passed its gates. That evidence is in two
+hosted CI runs, and every release archives both with its release notes, because
+Actions logs expire and a link to an expired run proves nothing.
+
+| Run | Event | Gates it carries |
+|---|---|---|
+| `ci.yml` on the tagged commit | push to `main` | type check, lint, tests, identifier scan, dependency audit, TruffleHog secrets scan, CodeQL, Trivy image scan |
+| `ci.yml` on the pull request that merged it | `pull_request` | the same source gates, plus container boot (non-root, healthcheck, key-store and logging assertions) and the [installer release gates](installer-release-gates.md) against the booted image |
+
+Container boot and the installer gates run only on pull requests, and Trivy
+only on the push. So no single run covers the release: the push run tested the
+tagged commit itself, and the pull-request run tested that pull request's merge
+with `main` as it stood then. The two trees are the same when `main` did not
+move between that run and the merge. When it did, say so in the notes.
+
+When the release is published, from a checkout of the canonical repository:
+
+```bash
+R=<owner>/m365-mcp; TAG=<tag>; SHA=$(git rev-list -n1 "$TAG")
+PUSH_RUN=$(gh run list -R "$R" --workflow ci.yml --event push --commit "$SHA" \
+  --json databaseId -q '.[0].databaseId')
+PR=$(gh api "repos/$R/commits/$SHA/pulls" -q '.[0].number')
+PR_HEAD=$(gh pr view "$PR" -R "$R" --json headRefOid -q .headRefOid)
+PR_RUN=$(gh run list -R "$R" --workflow ci.yml --event pull_request --commit "$PR_HEAD" \
+  --json databaseId -q '.[0].databaseId')
+
+for run in "$PUSH_RUN" "$PR_RUN"; do
+  gh run view "$run" -R "$R" --json url,headSha,event,conclusion,jobs \
+    -q '"\(.event) \(.headSha) \(.conclusion) \(.url)", (.jobs[] | "  \(.conclusion)\t\(.name)")'
+  gh run view "$run" -R "$R" --log > "ci-$run.log"
+done | tee ci-evidence.txt
+
+gh release upload "$TAG" ci-evidence.txt "ci-$PUSH_RUN.log" "ci-$PR_RUN.log" -R "$R"
+```
+
+Paste `ci-evidence.txt` into the release notes under **CI evidence** as well.
+Every job reads `success` except three that are `skipped` by design: `DCO
+Sign-off` and `Container Boot (PR)` on the push run, `Container Scan (Trivy)` on
+the pull-request run. A release with any other job not green, or with
+`Container Boot (PR)` skipped on the pull-request run, is not published.
+
+These files are a record, not an attestation: they are not in `SHA256SUMS` and
+nothing signs them. While the runs still exist, the runs are the authority and
+the files let anyone check them; after they expire, the files are what is left.
 
 ## What a running instance is
 
