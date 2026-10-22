@@ -151,15 +151,38 @@ below only if the review in step 2 finds more than the key.
        -n M365McpAudit_<keyId-without-dashes>_SRCH \
        --search-query 'M365McpAudit_CL | where DeviceLabel endswith "#<keyId>" or TargetResource startswith "key:<keyId>"' \
        --start-search-time "<key created, UTC>" \
-       --end-search-time "<start of interactive window, UTC>" \
-       --limit 1000
+       --end-search-time "<start of interactive window, UTC>"
      ```
 
+     Leave `--limit` off. It caps the rows the job writes, and a busy or abused
+     key can pass any small figure, so a cap silently drops the evidence this
+     step is for. Without it the job stops at the service maximum of 100
+     million rows.
+
+     The job runs asynchronously and rows appear in the `_SRCH` table while it
+     is still running, so a query against it is not the answer until the job
+     has finished. Poll until it reports `Succeeded`:
+
+     ```
+     az monitor log-analytics workspace table show \
+       -g rg-m365-mcp --workspace-name m365-mcp-logs \
+       -n M365McpAudit_<keyId-without-dashes>_SRCH \
+       --query "{state:provisioningState,limit:searchResults.limit}"
+     ```
+
+     `Updating` or `InProgress` means wait. Anything else, including partial
+     success (the job hit the row maximum or its 24-hour timeout), means the
+     table is incomplete: record it as incomplete and split the window into
+     shorter search jobs. Check `limit` is empty, then record the row count
+     (`M365McpAudit_<keyId-without-dashes>_SRCH | count`) with the window it
+     covers.
+
      A search job takes one table and a filtering subset of KQL (`where`,
-     `extend`, `project`, no `order by` or `summarize`), runs asynchronously,
-     and is billed per GB scanned. Restoring the table for the window is the
-     alternative for a large review
-     ([Microsoft docs](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure#analytics-long-term-and-total-retention)).
+     `extend`, `project`, no `order by` or `summarize`), runs for up to 24
+     hours, and is billed per GB scanned
+     ([search jobs](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/search-jobs)).
+     Restoring the table for the window is the alternative for a large review
+     ([retention](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure#analytics-long-term-and-total-retention)).
    - **An export of the table to a SIEM or archive,** if the tenant runs one.
    - **The storage copy,** the `auditLog` table, which keeps rows for
      `AUDIT_LOG_RETENTION_DAYS` (365 by default) but is editable by anyone
