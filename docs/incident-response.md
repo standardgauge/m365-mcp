@@ -161,21 +161,30 @@ below only if the review in step 2 finds more than the key.
 
      The job runs asynchronously and rows appear in the `_SRCH` table while it
      is still running, so a query against it is not the answer until the job
-     has finished. Poll until it reports `Succeeded`:
+     has finished. `provisioningState` alone cannot tell you that: it only
+     ever reads `Updating`, `InProgress`, `Succeeded` or `Deleting`, and
+     completion is reported separately as `resultStatistics.progress`. Poll
+     both:
 
      ```
      az monitor log-analytics workspace table show \
        -g rg-m365-mcp --workspace-name m365-mcp-logs \
        -n M365McpAudit_<keyId-without-dashes>_SRCH \
-       --query "{state:provisioningState,limit:searchResults.limit}"
+       --query "{state:provisioningState,progress:resultStatistics.progress,ingested:resultStatistics.ingestedRecords,limit:searchResults.limit}"
      ```
 
-     `Updating` or `InProgress` means wait. Anything else, including partial
-     success (the job hit the row maximum or its 24-hour timeout), means the
-     table is incomplete: record it as incomplete and split the window into
-     shorter search jobs. Check `limit` is empty, then record the row count
+     The table is complete only when `state` is `Succeeded` **and**
+     `progress` is 100. `Updating` or `InProgress` means wait. A job that has
+     stopped with `progress` under 100, or has run for 24 hours without
+     reaching it, hit the 100-million-row maximum or the timeout: record the
+     table as incomplete and split the window into shorter search jobs. An
+     empty `limit` only shows no cap was requested; it is not evidence the
+     job finished, so don't read it as one.
+
+     Once complete, record `ingested` and the row count
      (`M365McpAudit_<keyId-without-dashes>_SRCH | count`) with the window it
-     covers.
+     covers. The two should agree; if they don't, treat the table as
+     incomplete.
 
      A search job takes one table and a filtering subset of KQL (`where`,
      `extend`, `project`, no `order by` or `summarize`), runs for up to 24
