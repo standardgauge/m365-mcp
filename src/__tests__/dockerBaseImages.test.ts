@@ -13,6 +13,11 @@
  * native modules compiled in stage 1 load in stage 2 (.github/dependabot.yml).
  * The runtime is read from either the rolling `4-node22` form or a versioned
  * host build such as `4.1055.250-1-node22`.
+ *
+ * The production Dockerfile goes further: its builder stage runs on the
+ * runtime image itself, so stage 1 pulls from MCR rather than ECR Public, which
+ * rate-limited CI builds. The two `FROM` lines are separate literals,
+ * so the test pins them equal, tag and digest, against a one-sided bump.
  */
 import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
@@ -63,4 +68,13 @@ describe('Docker base images', () => {
       expect(builder![1]).toBe(runtime![1]);
     },
   );
+
+  it('Dockerfile: the builder stage uses the runtime image, tag and digest', () => {
+    const bases = baseImages('Dockerfile');
+    expect(bases.length).toBeGreaterThanOrEqual(2);
+    const builder = bases[0];
+    const runtime = bases[bases.length - 1];
+    expect(runtime).toMatch(/^mcr\.microsoft\.com\/azure-functions\/node:[^@]+@sha256:[0-9a-f]{64}$/);
+    expect(builder).toBe(runtime);
+  });
 });
