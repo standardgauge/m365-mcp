@@ -66,7 +66,7 @@ jobs:
       - name: TruffleHog secrets scan
         # Pinned to a commit SHA (v3.95.8) rather than a mutable @main ref so a
         # compromised upstream tag/branch can't silently run in CI (F15).
-        uses: trufflesecurity/trufflehog@00155c9dc586f34d189adc83d3ac2698c2ec551f # v3.95.8
+        uses: trufflesecurity/trufflehog@e76dff8a7e57d6df0c60ad8cbf5d5cba505a8fc9 # v3.99.2
         with:
           path: ./
           # Use event SHAs so push-to-main (where branch name == HEAD) doesn't fail
