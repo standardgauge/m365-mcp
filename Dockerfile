@@ -8,7 +8,7 @@
 # which failed CI and the deploy on a tracking fork and held the release.
 # The runtime image is pulled from MCR on every build already. Keep the tag and
 # digest identical to stage 2 and bump both together.
-FROM mcr.microsoft.com/azure-functions/node:4.1055.250-1-node22@sha256:ede6fb7e132078c3c2a5760fd6b35179a15278d22ec3e93345deea2945768ab5 AS builder
+FROM mcr.microsoft.com/azure-functions/node:4.1055.250-5-node22@sha256:8cdca1b3fc3b58145800d95258ff71ec05aba1f1274a4aa0baf4d5608c9f98dc AS builder
 WORKDIR /build
 
 COPY package*.json ./
@@ -35,7 +35,7 @@ RUN npm run build:admin
 # the patched host is one Dependabot or hand bump away instead of a wait on
 # Microsoft's retag. Dependabot's docker watch proposes newer versioned tags;
 # security updates skip its cooldown. See docs/trivy-suppressions.md.
-FROM mcr.microsoft.com/azure-functions/node:4.1055.250-1-node22@sha256:ede6fb7e132078c3c2a5760fd6b35179a15278d22ec3e93345deea2945768ab5
+FROM mcr.microsoft.com/azure-functions/node:4.1055.250-5-node22@sha256:8cdca1b3fc3b58145800d95258ff71ec05aba1f1274a4aa0baf4d5608c9f98dc
 
 # The Azure Functions host defaults to binding privileged port 80. A non-root
 # user (see USER below, F8 /) cannot bind ports < 1024, so point
