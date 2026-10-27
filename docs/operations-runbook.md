@@ -840,16 +840,24 @@ custom rules, both grouped by client address:
 
 | Rule | Match | Threshold per minute per address | Why |
 |---|---|---|---|
-| `device-start` | path begins `/api/auth/device` | 10 | Each call starts a fifteen-minute background poll against Entra. Same as the app's one-replica limit, so on Front Door Premium the edge holds it near that whatever the app's replica count. On Application Gateway the ceiling is this threshold times the gateway's instance count; see below |
+| `device-start` | path begins `/api/auth/device` | 10 | Each call starts a fifteen-minute background poll against Entra. Same as the app's one-replica limit, so on Front Door Premium the edge holds it near that whatever the app's replica count, with some overshoot from server-counter lag; see below. On Application Gateway the ceiling is this threshold times the gateway's instance count; see below |
 | `whole-host` | every request | 1500 | Above the app's `mcp` limit plus installer polling for one office behind one NAT address, so the app's own `429` is what a busy legitimate client sees first and the edge catches what the per-replica ceiling lets through |
 
 Change a threshold here when you change the matching `RATE_LIMIT_*` variable, or
 the two disagree about which one a user hits. Neither edge keeps one counter for
 the whole service, so neither threshold is exact:
 
-  * **Front Door** counts per point of presence. A client normally reaches one
-    POP, so the threshold is close to what one address gets; treat it as
-    approximate in the same way the app's are.
+  * **Front Door** keeps counters on each of its servers, and they lag each
+    other. A client usually reaches the same server and is blocked at the
+    threshold, but a client that opens a new connection per request can land
+    on a server whose counters have not caught up, and that first request
+    passes. Microsoft says that below about 200 requests a minute some
+    requests over the threshold get through
+    ([Microsoft](https://learn.microsoft.com/azure/web-application-firewall/afds/waf-front-door-rate-limit#rate-limits-and-azure-front-door-servers)).
+    `device-start` at 10 is well under that, so treat it as a soft cap that
+    stops a sustained flood rather than an exact 10: the app's own
+    per-replica limit is still what holds a single address to a precise
+    count. `whole-host` at 1500 is above the range Microsoft warns about.
   * **Application Gateway v2** keeps a separate counter on every gateway
     instance ([Microsoft](https://learn.microsoft.com/azure/web-application-firewall/ag/rate-limiting-overview#rate-limiting-details)).
     When the gateway scales out, one address spread across instances gets up
