@@ -23,6 +23,8 @@ export interface McpToolParameter {
    * as the `items` schema, overriding the scalar `{ type }` form. Used by `attachments`.
    */
   itemsSchema?: Record<string, unknown>;
+  /** Maximum array length when `type` is 'array'. Emitted as `maxItems` in the JSON Schema. */
+  maxItems?: number;
   description: string;
   required: boolean;
   enum?: string[];
@@ -1260,6 +1262,302 @@ export const TOOLS: McpTool[] = [
     endpoint: '/api/mcp',
     method: 'POST',
   },
+  {
+    name: 'list_planner_plans',
+    description:
+      "List Microsoft Planner plans: those shared with the signed-in user, or those owned by a Microsoft 365 group (a Team's ID is its group ID). Plans on the deny list are excluded.",
+    parameters: [
+      {
+        name: 'groupId',
+        type: 'string',
+        description: 'Microsoft 365 group (or Team) ID whose plans to list. Omit for the plans shared with you.',
+        required: false,
+      },
+      {
+        name: 'maxResults',
+        type: 'number',
+        description: 'Max plans to return (default 100, max 200).',
+        required: false,
+      },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
+    name: 'list_planner_buckets',
+    description:
+      'List the buckets (columns) in a Planner plan, in board order.',
+    parameters: [
+      {
+        name: 'planId',
+        type: 'string',
+        description: 'Plan ID (from list_planner_plans).',
+        required: true,
+      },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
+    name: 'list_planner_tasks',
+    description:
+      'List Planner tasks in a plan or a bucket, or the tasks assigned to the signed-in user across all plans when neither is given. Tasks in plans on the deny list are excluded.',
+    parameters: [
+      {
+        name: 'planId',
+        type: 'string',
+        description: 'Plan ID. Mutually exclusive with bucketId.',
+        required: false,
+      },
+      {
+        name: 'bucketId',
+        type: 'string',
+        description: 'Bucket ID. Mutually exclusive with planId.',
+        required: false,
+      },
+      {
+        name: 'includeCompleted',
+        type: 'boolean',
+        description: 'Include completed tasks (default true).',
+        required: false,
+      },
+      {
+        name: 'maxResults',
+        type: 'number',
+        description: 'Max tasks to return (default 100, max 200).',
+        required: false,
+      },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
+    name: 'get_planner_task',
+    description:
+      'Read one Planner task with its description and checklist.',
+    parameters: [
+      {
+        name: 'taskId',
+        type: 'string',
+        description: 'Task ID (from list_planner_tasks).',
+        required: true,
+      },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
+    name: 'create_planner_plan',
+    description:
+      'Create a Planner plan owned by a Microsoft 365 group (or Team) the signed-in user belongs to.',
+    parameters: [
+      {
+        name: 'groupId',
+        type: 'string',
+        description: 'Microsoft 365 group (or Team) ID that will own the plan.',
+        required: true,
+      },
+      {
+        name: 'title',
+        type: 'string',
+        description: 'Plan title.',
+        required: true,
+      },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
+    name: 'create_planner_bucket',
+    description:
+      'Add a bucket (column) to a Planner plan, placed first on the board.',
+    parameters: [
+      {
+        name: 'planId',
+        type: 'string',
+        description: 'Plan ID.',
+        required: true,
+      },
+      {
+        name: 'name',
+        type: 'string',
+        description: 'Bucket name.',
+        required: true,
+      },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
+    name: 'update_planner_bucket',
+    description:
+      'Rename a Planner bucket.',
+    parameters: [
+      {
+        name: 'bucketId',
+        type: 'string',
+        description: 'Bucket ID.',
+        required: true,
+      },
+      {
+        name: 'name',
+        type: 'string',
+        description: 'New bucket name.',
+        required: true,
+      },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
+    name: 'create_planner_task',
+    description:
+      'Create a Planner task with optional bucket, dates, status, priority, assignees and description. A bare date is stored at 12:00 UTC. Assignees may be Entra user IDs or email addresses.',
+    parameters: [
+      {
+        name: 'planId',
+        type: 'string',
+        description: 'Plan ID.',
+        required: true,
+      },
+      {
+        name: 'title',
+        type: 'string',
+        description: 'Task title.',
+        required: true,
+      },
+      {
+        name: 'bucketId',
+        type: 'string',
+        description: 'Bucket ID. Omit to create the task without a bucket.',
+        required: false,
+      },
+      {
+        name: 'startDateTime',
+        type: 'string',
+        description: 'Start date or date-time, ISO 8601.',
+        required: false,
+      },
+      {
+        name: 'dueDateTime',
+        type: 'string',
+        description: 'Due date or date-time, ISO 8601.',
+        required: false,
+      },
+      {
+        name: 'status',
+        type: 'string',
+        enum: ['notStarted', 'inProgress', 'completed'],
+        description: 'Progress (default notStarted).',
+        required: false,
+      },
+      {
+        name: 'priority',
+        type: 'string',
+        enum: ['urgent', 'important', 'medium', 'low'],
+        description: 'Priority (default medium).',
+        required: false,
+      },
+      {
+        name: 'assigneeIds',
+        type: 'array',
+        items: 'string',
+        maxItems: 20,
+        description: 'People to assign: Entra user object IDs or email addresses (at most 20).',
+        required: false,
+      },
+      {
+        name: 'description',
+        type: 'string',
+        description: 'Task description (plain text).',
+        required: false,
+      },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
+    name: 'update_planner_task',
+    description:
+      'Update a Planner task; only the fields passed change. assigneeIds replaces the whole assignee set; an empty string clears a date.',
+    parameters: [
+      {
+        name: 'taskId',
+        type: 'string',
+        description: 'Task ID.',
+        required: true,
+      },
+      {
+        name: 'title',
+        type: 'string',
+        description: 'New title.',
+        required: false,
+      },
+      {
+        name: 'bucketId',
+        type: 'string',
+        description: 'Bucket to move the task to (same plan).',
+        required: false,
+      },
+      {
+        name: 'startDateTime',
+        type: 'string',
+        description: 'Start date or date-time, ISO 8601; empty string clears it.',
+        required: false,
+      },
+      {
+        name: 'dueDateTime',
+        type: 'string',
+        description: 'Due date or date-time, ISO 8601; empty string clears it.',
+        required: false,
+      },
+      {
+        name: 'status',
+        type: 'string',
+        enum: ['notStarted', 'inProgress', 'completed'],
+        description: 'Progress.',
+        required: false,
+      },
+      {
+        name: 'priority',
+        type: 'string',
+        enum: ['urgent', 'important', 'medium', 'low'],
+        description: 'Priority.',
+        required: false,
+      },
+      {
+        name: 'assigneeIds',
+        type: 'array',
+        items: 'string',
+        maxItems: 20,
+        description: 'The complete new assignee set: Entra user object IDs or email addresses (at most 20).',
+        required: false,
+      },
+      {
+        name: 'description',
+        type: 'string',
+        description: 'New description (replaces the existing one).',
+        required: false,
+      },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
+    name: 'delete_planner_task',
+    description:
+      'Delete a Planner task. Cannot be undone; set status completed instead to close it.',
+    parameters: [
+      {
+        name: 'taskId',
+        type: 'string',
+        description: 'Task ID.',
+        required: true,
+      },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
 ];
 
 /** Returns the full MCP-compatible manifest object. */
@@ -1290,6 +1588,7 @@ export function getManifest(): object {
               type: p.type,
               description: p.description,
               ...(p.itemsSchema ? { items: p.itemsSchema } : p.items ? { items: { type: p.items } } : {}),
+              ...(p.maxItems !== undefined ? { maxItems: p.maxItems } : {}),
               ...(p.enum ? { enum: p.enum } : {}),
             },
           ])

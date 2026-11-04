@@ -8,7 +8,7 @@ interface DenyEntry {
   addedAt: string;
 }
 
-type DenyListType = 'sharepoint' | 'mail' | 'calendar' | 'onedrive' | 'onenote' | 'contacts' | 'teams';
+type DenyListType = 'sharepoint' | 'mail' | 'calendar' | 'onedrive' | 'onenote' | 'contacts' | 'teams' | 'planner';
 
 const TYPE_LABELS: Record<DenyListType, string> = {
   sharepoint: 'SharePoint Folders',
@@ -18,9 +18,10 @@ const TYPE_LABELS: Record<DenyListType, string> = {
   onenote: 'OneNote Notebooks',
   contacts: 'Contact Folders',
   teams: 'Teams',
+  planner: 'Planner Plans',
 };
 
-const ALL_TYPES: DenyListType[] = ['sharepoint', 'mail', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams'];
+const ALL_TYPES: DenyListType[] = ['sharepoint', 'mail', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams', 'planner'];
 
 interface Props {
   /** 'global' = admin-managed deny list; 'user' = per-user personal list */
@@ -64,15 +65,15 @@ async function apiFetch(path: string, userId: string, options?: RequestInit) {
 
 export default function DenyListManager({ scope, userId, targetUserId, keyId, readOnly = false, readOnlyBadge = 'Global Admin Setting', label, externalSpPath, externalMailPath, addedByName, hideAddInput = false, visibleTypes, bare = false }: Props) {
   const [entries, setEntries] = useState<Record<DenyListType, DenyEntry[]>>({
-    sharepoint: [], mail: [], calendar: [], onedrive: [], onenote: [], contacts: [], teams: [],
+    sharepoint: [], mail: [], calendar: [], onedrive: [], onenote: [], contacts: [], teams: [], planner: [],
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newPath, setNewPath] = useState<Record<DenyListType, string>>({
-    sharepoint: '', mail: '', calendar: '', onedrive: '', onenote: '', contacts: '', teams: '',
+    sharepoint: '', mail: '', calendar: '', onedrive: '', onenote: '', contacts: '', teams: '', planner: '',
   });
   const [newDesc, setNewDesc] = useState<Record<DenyListType, string>>({
-    sharepoint: '', mail: '', calendar: '', onedrive: '', onenote: '', contacts: '', teams: '',
+    sharepoint: '', mail: '', calendar: '', onedrive: '', onenote: '', contacts: '', teams: '', planner: '',
   });
 
   useEffect(() => { if (externalSpPath) setNewPath((p) => ({ ...p, sharepoint: externalSpPath })); }, [externalSpPath]);

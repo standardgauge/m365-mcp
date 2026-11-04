@@ -5,9 +5,9 @@ import { currentAgentKeyId } from './clientAddress.js';
 const GLOBAL_TABLE = 'GlobalDenyList';
 const USER_TABLE = 'UserDenyList';
 
-export type DenyListType = 'sharepoint' | 'mail' | 'calendar' | 'onedrive' | 'onenote' | 'contacts' | 'teams';
+export type DenyListType = 'sharepoint' | 'mail' | 'calendar' | 'onedrive' | 'onenote' | 'contacts' | 'teams' | 'planner';
 
-export const DENY_LIST_TYPES: readonly DenyListType[] = ['sharepoint', 'mail', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams'];
+export const DENY_LIST_TYPES: readonly DenyListType[] = ['sharepoint', 'mail', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams', 'planner'];
 
 export interface DenyListEntry {
   partitionKey: string;

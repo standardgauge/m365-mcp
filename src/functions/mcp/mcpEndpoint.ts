@@ -63,6 +63,26 @@ import {
 import { collectPage } from '../../services/graphPaging.js';
 import { readMailAttachment } from '../../services/mailAttachmentContent.js';
 import { readDriveFileContent } from '../../services/driveFileRead.js';
+import {
+  PLANNER_STATUS_VALUES,
+  PLANNER_PRIORITY_VALUES,
+  assertPlanAllowed,
+  filterDeniedPlans,
+  filterTasksByAllowedPlan,
+  getPlannerBucket,
+  getPlannerTask,
+  getPlannerTaskDetails,
+  plannerBucketBody,
+  plannerTaskBody,
+  assigneeInput,
+  MAX_ASSIGNEES,
+  resolveAssignees,
+  setPlannerTaskDescription,
+  shapeBucket,
+  shapePlan,
+  shapeTask,
+  shapeTaskDetails,
+} from '../../services/planner.js';
 
 /**
  * Streamable HTTP MCP endpoint.
@@ -135,6 +155,11 @@ const TOOL_SERVICE_MAP: Record<string, string> = {
   // Teams
   list_teams: 'teams', list_channels: 'teams',
   send_chat_message: 'teams', send_channel_message: 'teams',
+  // Planner
+  list_planner_plans: 'planner', list_planner_buckets: 'planner', list_planner_tasks: 'planner',
+  get_planner_task: 'planner', create_planner_plan: 'planner', create_planner_bucket: 'planner',
+  update_planner_bucket: 'planner', create_planner_task: 'planner', update_planner_task: 'planner',
+  delete_planner_task: 'planner',
 };
 
 /** Tools that accept a siteId parameter and should be validated against allowedSites. */
@@ -207,6 +232,9 @@ const WRITE_TOOLS: ReadonlySet<string> = new Set([
   'create_notebook', 'create_section', 'create_onenote_page',
   // Teams
   'send_chat_message', 'send_channel_message',
+  // Planner
+  'create_planner_plan', 'create_planner_bucket', 'update_planner_bucket',
+  'create_planner_task', 'update_planner_task', 'delete_planner_task',
 ]);
 
 /**
@@ -229,6 +257,7 @@ const OPAQUE_ID_PARAMS: ReadonlySet<string> = new Set([
   'destinationParentFolderId', 'attachmentId', 'mailboxId',
   'calendarId', 'targetCalendarId', 'eventId', 'contactId', 'notebookId', 'sectionId',
   'teamId', 'channelId', 'chatId', 'messageOrEventId',
+  'groupId', 'planId', 'bucketId', 'taskId',
 ]);
 
 function prop(type: string, description: string, opts?: Record<string, unknown>) {
@@ -499,6 +528,11 @@ function isGraphNotFound(err: unknown): boolean {
   const e = err as { statusCode?: number; code?: string } | null;
   return e?.statusCode === 404 || e?.code === 'ErrorItemNotFound' || e?.code === 'ErrorInvalidIdMalformed';
 }
+
+/** The fields update_planner_task can change; a call naming none of them is refused. */
+const PLANNER_TASK_UPDATE_FIELDS = [
+  'title', 'bucketId', 'startDateTime', 'dueDateTime', 'status', 'priority', 'assigneeIds', 'description',
+] as const;
 
 const tools: ToolDef[] = [
   // SharePoint
@@ -2644,6 +2678,326 @@ const tools: ToolDef[] = [
       return { id: result.id, teamId: args.teamId, channelId: args.channelId, webUrl: result.webUrl ?? null, status: 'sent' };
     },
   },
+  // Planner
+  {
+    name: 'list_planner_plans',
+    description:
+      'List Microsoft Planner plans. With no groupId, lists the plans shared with the signed-in user (Graph GET ' +
+      '/me/planner/plans); with a groupId, lists the plans owned by that Microsoft 365 group. A Team\'s ID is its ' +
+      'group ID, so list_teams gives you one. Plans on the deny list are excluded.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        groupId: prop('string', 'Microsoft 365 group (or Team) ID whose plans to list. Omit for the plans shared with you.'),
+        maxResults: prop('number', 'Max plans to return (default 100, max 200).'),
+      },
+      required: [],
+    },
+    handler: async (args, session) => {
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      const limit = resolveMaxResults(args.maxResults, 100, 200);
+      const path = args.groupId ? `/groups/${encodeGraphId(args.groupId, 'groupId')}/planner/plans` : '/me/planner/plans';
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const page = await collectPage(() => graph.api(path).get(), (link) => graph.api(link).get() as Promise<any>, 0, limit);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const plans = (page.items as any[]).map(shapePlan);
+      const allowed = await filterDeniedPlans(tenantId, session.userId, plans);
+      return toEnvelope(allowed, limit, page.hasMore);
+    },
+  },
+  {
+    name: 'list_planner_buckets',
+    description: 'List the buckets (columns) in a Planner plan, in board order. Use the bucket IDs with list_planner_tasks or create_planner_task.',
+    inputSchema: {
+      type: 'object',
+      properties: { planId: prop('string', 'Plan ID (from list_planner_plans)') },
+      required: ['planId'],
+    },
+    handler: async (args, session) => {
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      await assertPlanAllowed(graph, tenantId, session.userId, args.planId);
+      const path = `/planner/plans/${encodeGraphId(args.planId, 'planId')}/buckets`;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const page = await collectPage(() => graph.api(path).get(), (link) => graph.api(link).get() as Promise<any>, 0, 200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const buckets = (page.items as any[]).map(shapeBucket);
+      // Planner order hints sort as ordinal strings; the board shows the smallest first.
+      buckets.sort((a, b) => (a.orderHint ?? '') < (b.orderHint ?? '') ? -1 : (a.orderHint ?? '') > (b.orderHint ?? '') ? 1 : 0);
+      return toEnvelope(buckets, 200, page.hasMore);
+    },
+  },
+  {
+    name: 'list_planner_tasks',
+    description:
+      'List Planner tasks. Pass planId for every task in a plan, or bucketId for one bucket; pass neither for the tasks ' +
+      'assigned to the signed-in user across all plans (Graph GET /me/planner/tasks). Each task carries its status ' +
+      '(notStarted, inProgress, completed), priority, dates and assignee IDs. Use get_planner_task for the description ' +
+      'and checklist. Tasks in plans on the deny list are excluded.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        planId: prop('string', 'Plan ID (from list_planner_plans). Mutually exclusive with bucketId.'),
+        bucketId: prop('string', 'Bucket ID (from list_planner_buckets). Mutually exclusive with planId.'),
+        includeCompleted: prop('boolean', 'Include completed tasks (default true). Pass false for open work only.'),
+        maxResults: prop('number', 'Max tasks to return (default 100, max 200).'),
+      },
+      required: [],
+    },
+    handler: async (args, session) => {
+      if (args.planId && args.bucketId) throw new ToolCallError('Pass planId or bucketId, not both');
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      const limit = resolveMaxResults(args.maxResults, 100, 200);
+      let path = '/me/planner/tasks';
+      if (args.bucketId) {
+        const { item: bucket } = await getPlannerBucket(graph, args.bucketId);
+        await assertPlanAllowed(graph, tenantId, session.userId, bucket.planId);
+        path = `/planner/buckets/${encodeGraphId(args.bucketId, 'bucketId')}/tasks`;
+      } else if (args.planId) {
+        await assertPlanAllowed(graph, tenantId, session.userId, args.planId);
+        path = `/planner/plans/${encodeGraphId(args.planId, 'planId')}/tasks`;
+      }
+      // Completed tasks are filtered after the fetch, so the walk collects well past
+      // `limit` to keep a plan full of finished work from crowding out the open tasks.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const page = await collectPage(() => graph.api(path).get(), (link) => graph.api(link).get() as Promise<any>, 0, 1000);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let tasks = (page.items as any[]).map(shapeTask);
+      let incomplete = false;
+      if (path === '/me/planner/tasks') ({ tasks, incomplete } = await filterTasksByAllowedPlan(graph, tenantId, session.userId, tasks));
+      if (args.includeCompleted === false) tasks = tasks.filter((t) => t.status !== 'completed');
+      // Tasks dropped because their plan couldn't be resolved make the list short
+      // of the real answer, so they count as truncated just as another page would.
+      return toEnvelope(tasks, limit, page.hasMore || incomplete);
+    },
+  },
+  {
+    name: 'get_planner_task',
+    description: 'Read one Planner task with its description and checklist.',
+    inputSchema: {
+      type: 'object',
+      properties: { taskId: prop('string', 'Task ID (from list_planner_tasks)') },
+      required: ['taskId'],
+    },
+    handler: async (args, session) => {
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      const { item: task } = await getPlannerTask(graph, args.taskId);
+      await assertPlanAllowed(graph, tenantId, session.userId, task.planId);
+      const { item: details } = await getPlannerTaskDetails(graph, args.taskId);
+      return { ...shapeTask(task), ...shapeTaskDetails(details) };
+    },
+  },
+  {
+    name: 'create_planner_plan',
+    description:
+      'Create a Planner plan owned by a Microsoft 365 group (or Team). The signed-in user must be a member of the group. ' +
+      'Every member of the group can see the new plan.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        groupId: prop('string', 'Microsoft 365 group (or Team) ID that will own the plan'),
+        title: prop('string', 'Plan title'),
+      },
+      required: ['groupId', 'title'],
+    },
+    handler: async (args, session) => {
+      if (typeof args.title !== 'string' || !args.title.trim()) throw new ToolCallError('title must be a non-empty string');
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      // A plan blocked by title must not be creatable under that title.
+      if ((await filterDeniedPlans(tenantId, session.userId, [{ id: '', title: args.title }])).length === 0) {
+        throw new ToolCallError('Access restricted by deny list — a plan with that title is blocked');
+      }
+      const result = await graph.api('/planner/plans').post({
+        container: { url: `https://graph.microsoft.com/v1.0/groups/${encodeGraphId(args.groupId, 'groupId')}` },
+        title: args.title,
+      });
+      return { ...shapePlan(result), status: 'created' };
+    },
+  },
+  {
+    name: 'create_planner_bucket',
+    description: 'Add a bucket (column) to a Planner plan. The new bucket goes first on the board.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        planId: prop('string', 'Plan ID (from list_planner_plans)'),
+        name: prop('string', 'Bucket name'),
+      },
+      required: ['planId', 'name'],
+    },
+    handler: async (args, session) => {
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      const body = plannerBucketBody(args.planId, args.name);
+      await assertPlanAllowed(graph, tenantId, session.userId, args.planId);
+      const result = await graph.api('/planner/buckets').post(body);
+      return { ...shapeBucket(result), status: 'created' };
+    },
+  },
+  {
+    name: 'update_planner_bucket',
+    description: 'Rename a Planner bucket.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bucketId: prop('string', 'Bucket ID (from list_planner_buckets)'),
+        name: prop('string', 'New bucket name'),
+      },
+      required: ['bucketId', 'name'],
+    },
+    handler: async (args, session) => {
+      if (typeof args.name !== 'string' || !args.name.trim()) throw new ToolCallError('name must be a non-empty string');
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      const { item: bucket, etag } = await getPlannerBucket(graph, args.bucketId);
+      await assertPlanAllowed(graph, tenantId, session.userId, bucket.planId);
+      await graph.api(`/planner/buckets/${encodeGraphId(args.bucketId, 'bucketId')}`).header('If-Match', etag).patch({ name: args.name });
+      return { id: args.bucketId, name: args.name, planId: bucket.planId, status: 'updated' };
+    },
+  },
+  {
+    name: 'create_planner_task',
+    description:
+      'Create a Planner task in a plan, optionally in a bucket, with dates, status, priority, assignees and a ' +
+      'description. Dates take ISO 8601; a bare date such as "2026-11-10" is stored at 12:00 UTC so it shows as ' +
+      'that day in every US and European time zone. Assignees may be Entra user IDs or email addresses.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        planId: prop('string', 'Plan ID (from list_planner_plans)'),
+        title: prop('string', 'Task title'),
+        bucketId: prop('string', 'Bucket ID (from list_planner_buckets). Omit to create the task without a bucket.'),
+        startDateTime: prop('string', 'Start date (YYYY-MM-DD) or date-time, ISO 8601; a date-time without an offset is UTC'),
+        dueDateTime: prop('string', 'Due date (YYYY-MM-DD) or date-time, ISO 8601; a date-time without an offset is UTC'),
+        status: prop('string', 'Progress (default notStarted)', { enum: [...PLANNER_STATUS_VALUES] }),
+        priority: prop('string', 'Priority (default medium)', { enum: [...PLANNER_PRIORITY_VALUES] }),
+        assigneeIds: { type: 'array', items: { type: 'string' }, maxItems: MAX_ASSIGNEES, description: 'People to assign: Entra user object IDs or email addresses (at most 20)' },
+        description: prop('string', 'Task description (plain text, shown as Notes in Planner)'),
+      },
+      required: ['planId', 'title'],
+    },
+    handler: async (args, session) => {
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      if (args.description !== undefined && typeof args.description !== 'string') throw new ToolCallError('description must be a string');
+      // Checked before any Graph call, so an oversized assignee list costs nothing upstream.
+      if (args.assigneeIds !== undefined) assigneeInput(args.assigneeIds);
+      await assertPlanAllowed(graph, tenantId, session.userId, args.planId);
+      const assigneeIds = args.assigneeIds !== undefined ? await resolveAssignees(graph, args.assigneeIds) : undefined;
+      // The whole body is built, and so validated, before anything is written.
+      const body = { planId: args.planId, ...plannerTaskBody({ ...args, title: args.title ?? '', assigneeIds }) };
+      const task = await graph.api('/planner/tasks').post(body);
+      let descriptionWarning: string | undefined;
+      if (args.description) {
+        // The description lives on the task's details resource, which only exists
+        // once the task does. If setting it fails the task stays, and the caller is
+        // told so rather than shown a success that dropped half of what it sent.
+        try {
+          await setPlannerTaskDescription(graph, task.id, args.description);
+        } catch (err) {
+          descriptionWarning = `The task was created but its description was not saved (${clientFacingMessage(err) ?? 'the write was rejected'}). Retry with update_planner_task.`;
+        }
+      }
+      return { ...shapeTask(task), status: 'created', ...(descriptionWarning ? { descriptionWarning } : {}) };
+    },
+  },
+  {
+    name: 'update_planner_task',
+    description:
+      'Update a Planner task. Only the fields you pass change. status completed marks the task done. assigneeIds ' +
+      'replaces the whole assignee set (pass [] to unassign everyone). Pass an empty string for startDateTime or ' +
+      'dueDateTime to clear it. bucketId moves the task to another bucket in the same plan.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: prop('string', 'Task ID (from list_planner_tasks)'),
+        title: prop('string', 'New title'),
+        bucketId: prop('string', 'Bucket to move the task to (same plan)'),
+        startDateTime: prop('string', 'Start date (YYYY-MM-DD) or date-time, ISO 8601 (no offset means UTC); empty string clears it'),
+        dueDateTime: prop('string', 'Due date (YYYY-MM-DD) or date-time, ISO 8601 (no offset means UTC); empty string clears it'),
+        status: prop('string', 'Progress', { enum: [...PLANNER_STATUS_VALUES] }),
+        priority: prop('string', 'Priority', { enum: [...PLANNER_PRIORITY_VALUES] }),
+        assigneeIds: { type: 'array', items: { type: 'string' }, maxItems: MAX_ASSIGNEES, description: 'The complete new assignee set: Entra user object IDs or email addresses (at most 20)' },
+        description: prop('string', 'New description (replaces the existing one)'),
+      },
+      required: ['taskId'],
+    },
+    handler: async (args, session) => {
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      if (args.description !== undefined && typeof args.description !== 'string') throw new ToolCallError('description must be a string');
+      // eslint-disable-next-line security/detect-object-injection -- f iterates the PLANNER_TASK_UPDATE_FIELDS constant
+      if (!PLANNER_TASK_UPDATE_FIELDS.some((f) => args[f] !== undefined)) {
+        throw new ToolCallError('Nothing to update: pass at least one field to change');
+      }
+      // Checked before any Graph call, so an oversized assignee list costs nothing upstream.
+      if (args.assigneeIds !== undefined) assigneeInput(args.assigneeIds);
+      const { item: task, etag } = await getPlannerTask(graph, args.taskId);
+      await assertPlanAllowed(graph, tenantId, session.userId, task.planId);
+      const assigneeIds = args.assigneeIds !== undefined ? await resolveAssignees(graph, args.assigneeIds) : undefined;
+      // Empty when every field passed already holds its value (an unchanged assignee set, say); then nothing is PATCHed.
+      const body = plannerTaskBody({ ...args, assigneeIds }, Object.keys(task.assignments ?? {}));
+      let updated = task;
+      const fieldsWritten = Object.keys(body).length > 0;
+      if (fieldsWritten) {
+        const result = await graph
+          .api(`/planner/tasks/${encodeGraphId(args.taskId, 'taskId')}`)
+          .header('If-Match', etag)
+          .header('Prefer', 'return=representation')
+          .patch(body);
+        // Without the Prefer header honoured Graph answers 204; fall back to the
+        // read-before-write copy with the sent fields laid over it.
+        updated = result && typeof result === 'object' && result.id ? result : { ...task, ...body };
+      }
+      let descriptionWarning: string | undefined;
+      if (args.description !== undefined) {
+        if (!fieldsWritten) {
+          // Nothing else was written, so a failure here is a plain failure.
+          await setPlannerTaskDescription(graph, args.taskId, args.description);
+        } else {
+          // The task fields above are already saved. If the description write fails
+          // the caller is told which half landed rather than shown a bare error.
+          try {
+            await setPlannerTaskDescription(graph, args.taskId, args.description);
+          } catch (err) {
+            descriptionWarning = `The task fields were updated but the description was not saved (${clientFacingMessage(err) ?? 'the write was rejected'}). Retry with update_planner_task passing only description.`;
+          }
+        }
+      }
+      return { ...shapeTask(updated), status: 'updated', ...(descriptionWarning ? { descriptionWarning } : {}) };
+    },
+  },
+  {
+    name: 'delete_planner_task',
+    description: 'Delete a Planner task. This cannot be undone; to close a task without deleting it, set status completed with update_planner_task.',
+    inputSchema: {
+      type: 'object',
+      properties: { taskId: prop('string', 'Task ID (from list_planner_tasks)') },
+      required: ['taskId'],
+    },
+    handler: async (args, session) => {
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      const { item: task, etag } = await getPlannerTask(graph, args.taskId);
+      await assertPlanAllowed(graph, tenantId, session.userId, task.planId);
+      await graph.api(`/planner/tasks/${encodeGraphId(args.taskId, 'taskId')}`).header('If-Match', etag).delete();
+      return { id: args.taskId, planId: task.planId, status: 'deleted' };
+    },
+  },
 ];
 
 // ── JSON-RPC handler ──
@@ -2948,6 +3302,10 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
         toolArgs.teamId,
         toolArgs.channelId,
         toolArgs.chatId,
+        toolArgs.groupId,
+        toolArgs.planId,
+        toolArgs.bucketId,
+        toolArgs.taskId,
         toolArgs.path,
       ].filter(Boolean).join('/') || undefined;
       logAccess({
@@ -2980,7 +3338,8 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
         const errorResource = [
           toolArgs.siteId, toolArgs.driveId, toolArgs.listId, toolArgs.itemId,
           toolArgs.messageId, toolArgs.eventId, toolArgs.messageOrEventId, toolArgs.folderId,
-          toolArgs.attachmentId, toolArgs.mailboxId, toolArgs.path,
+          toolArgs.attachmentId, toolArgs.mailboxId,
+          toolArgs.groupId, toolArgs.planId, toolArgs.bucketId, toolArgs.taskId, toolArgs.path,
         ].filter(Boolean).join('/') || undefined;
         logAccess({
           tenantId: getTenantIdFromSession(auth.session),

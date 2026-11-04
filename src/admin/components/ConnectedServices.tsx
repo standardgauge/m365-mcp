@@ -8,6 +8,7 @@ const ALL_SERVICES: { key: string; label: string; description: string; implement
   { key: 'onenote', label: 'OneNote', description: 'Read OneNote notebooks', implemented: true },
   { key: 'contacts', label: 'Contacts', description: 'Manage contacts', implemented: true },
   { key: 'teams', label: 'Teams', description: 'Read and manage Teams channels and messages', implemented: true },
+  { key: 'planner', label: 'Planner', description: 'Read and manage Planner plans, buckets and tasks', implemented: true },
 ];
 
 interface Props {

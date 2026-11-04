@@ -37,7 +37,7 @@
 'use strict';
 
 /** Every service the server knows, in the order the probe walks them. */
-const SERVICES = ['mail', 'calendar', 'sharepoint', 'onedrive', 'onenote', 'contacts', 'teams'];
+const SERVICES = ['mail', 'calendar', 'sharepoint', 'onedrive', 'onenote', 'contacts', 'teams', 'planner'];
 
 /**
  * One read per service: the tool, and arguments that make it a real Graph call.
@@ -58,6 +58,7 @@ const READ_PROBES = {
   onenote: { tool: 'list_notebooks', args: () => ({}) },
   contacts: { tool: 'list_contact_folders', args: () => ({}) },
   teams: { tool: 'list_teams', args: () => ({}) },
+  planner: { tool: 'list_planner_plans', args: () => ({}) },
 };
 
 /**
@@ -75,6 +76,7 @@ const WRITE_PROBES = {
   onenote: { tool: 'create_section', args: { notebookId: REFUSED_ID, displayName: 'post-deploy smoke' } },
   contacts: { tool: 'delete_contact', args: { contactId: REFUSED_ID } },
   teams: { tool: 'send_channel_message', args: { teamId: REFUSED_ID, channelId: REFUSED_ID, content: 'post-deploy smoke' } },
+  planner: { tool: 'delete_planner_task', args: { taskId: REFUSED_ID } },
 };
 
 /**
@@ -94,6 +96,8 @@ const WRITE_TOOLS = [
   'create_contact_folder', 'create_contacts_batch',
   'create_notebook', 'create_section', 'create_onenote_page',
   'send_chat_message', 'send_channel_message',
+  'create_planner_plan', 'create_planner_bucket', 'update_planner_bucket',
+  'create_planner_task', 'update_planner_task', 'delete_planner_task',
 ];
 
 /**

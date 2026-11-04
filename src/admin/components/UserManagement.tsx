@@ -9,6 +9,7 @@ const ALL_SERVICES: { key: string; label: string }[] = [
   { key: 'onenote', label: 'OneNote' },
   { key: 'contacts', label: 'Contacts' },
   { key: 'teams', label: 'Teams' },
+  { key: 'planner', label: 'Planner' },
 ];
 
 interface TenantUser {

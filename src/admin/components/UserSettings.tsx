@@ -18,6 +18,7 @@ const ALL_SERVICES: { key: string; label: string; description: string }[] = [
   { key: 'onenote', label: 'OneNote', description: 'Read OneNote notebooks' },
   { key: 'contacts', label: 'Contacts', description: 'Manage contacts' },
   { key: 'teams', label: 'Teams', description: 'Read and manage Teams channels and messages' },
+  { key: 'planner', label: 'Planner', description: 'Read and manage Planner plans, buckets and tasks' },
 ];
 
 interface Props {
@@ -205,6 +206,14 @@ export default function UserSettings({ userId, accountName, enabledServices = ['
     ...(teamsEnabled ? ['teams' as const] : []),
   ];
 
+  // Planner plans are blocked by ID or title in the admin console; there is no
+  // plan browser to add personal entries from, so only the organizational list
+  // shows them.
+  const orgVisibleTypes = [
+    ...visibleTypes,
+    ...(enabledServices.includes('planner') ? ['planner' as const] : []),
+  ];
+
   const anyBrowserEnabled = spEnabled || mailEnabled || calendarEnabled || onedriveEnabled || onenoteEnabled || contactsEnabled || teamsEnabled;
   const optOutCount = disabledServices.length;
 
@@ -340,7 +349,7 @@ export default function UserSettings({ userId, accountName, enabledServices = ['
           userId={userId}
           readOnly
           label="Organizational Deny List"
-          visibleTypes={visibleTypes}
+          visibleTypes={orgVisibleTypes}
           bare
         />
       </CollapsibleSection>

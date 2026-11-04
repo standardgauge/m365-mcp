@@ -1,6 +1,6 @@
 # M365 MCP Server
 
-A Microsoft 365 [MCP](https://modelcontextprotocol.io) server that gives Claude and other AI agents read/write access to Outlook Mail, Calendar, SharePoint, OneDrive, Contacts, OneNote, and Teams through the Microsoft Graph API.
+A Microsoft 365 [MCP](https://modelcontextprotocol.io) server that gives Claude and other AI agents read/write access to Outlook Mail, Calendar, SharePoint, OneDrive, Contacts, OneNote, Teams, and Planner through the Microsoft Graph API.
 
 Every user signs in individually with delegated OAuth. There is no service account and no application-level Graph permission, so the server can only ever reach what the signed-in user could reach themselves. On top of that, a two-tier deny list and per-service read-only switches let an administrator carve out what AI is allowed to touch.
 
@@ -78,7 +78,7 @@ Every tool call passes through the deny list before it reaches Graph, and the sa
 
 ## Access controls
 
-**Two-tier deny list.** Tier 1 is global and administrator-managed: folders, paths, and calendars blocked for everyone. Tier 2 is per-user and self-managed, so an individual can hide their own folders from AI without asking an administrator. A user's tier 2 entries also apply when a delegate's agent opens that user's mailbox through `mailboxId`. They do not apply to a calendar the user has shared into someone else's calendar list, which that person reaches under their own calendar ID and name. To hide a shared calendar from every agent, use a tier 1 entry. Calendar entries match by calendar ID *or* display name, so a shared calendar such as "HR" or "Executive" can be blocked by name across every calendar tool.
+**Two-tier deny list.** Tier 1 is global and administrator-managed: folders, paths, and calendars blocked for everyone. Tier 2 is per-user and self-managed, so an individual can hide their own folders from AI without asking an administrator. A user's tier 2 entries also apply when a delegate's agent opens that user's mailbox through `mailboxId`. They do not apply to a calendar the user has shared into someone else's calendar list, which that person reaches under their own calendar ID and name. To hide a shared calendar from every agent, use a tier 1 entry. Calendar entries match by calendar ID *or* display name, so a shared calendar such as "HR" or "Executive" can be blocked by name across every calendar tool. Planner entries name a plan by ID or title and block every bucket and task in it; they are added in the admin console, since there is no plan browser for personal entries.
 
 **Per-service read-only mode.** The `readOnlyServices` setting keeps a service readable while refusing all of its write tools. Those write tools are also hidden from the MCP tool list, so a read-only service advertises only what it will actually do. The use case it was built for: let an agent read a calendar for scheduling context without letting it create, modify, or delete events.
 
@@ -204,16 +204,17 @@ Add these under **API permissions → Add a permission → Microsoft Graph → D
 | `ChatMessage.Send` | Sending 1:1 and group chat |
 | `ChatMember.Read` | Optional: checking chat members when the outbound policy limits Teams messages to internal recipients |
 | `ChannelMember.Read.All` | Optional: checking channel members for the same setting |
+| `Tasks.ReadWrite` | Planner plans, buckets and tasks |
 
 `Place.Read.All`, `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMember.Read.All`, and `Directory.Read.All` require administrator consent. Granting consent once for the tenant covers the rest, so individual users see no consent prompt on first sign-in.
 
-Trim this list to the services you actually intend to enable. If you are not deploying the Teams tools, leave the Teams permissions off the registration entirely; a permission not granted is one that cannot be misused.
+Trim this list to the services you actually intend to enable. If you are not deploying the Teams tools, leave the Teams permissions off the registration entirely; a permission not granted is one that cannot be misused. The same goes for `Tasks.ReadWrite` and Planner.
 
 ### The part that catches people: requested scopes are a subset of granted scopes
 
 `GRAPH_SCOPES` in `src/services/graphClient.ts` is **not** the list of permissions the tools use. It is the much shorter list MSAL names when requesting a token.
 
-This works because on the Entra v2.0 endpoint an access token carries *every* delegated permission consented for that resource, not only the ones named in the request. Calendar, OneNote, and Teams all rely on this: none of their scopes appears in `GRAPH_SCOPES`, and the tools work anyway because the permissions are granted on the app registration.
+This works because on the Entra v2.0 endpoint an access token carries *every* delegated permission consented for that resource, not only the ones named in the request. Calendar, OneNote, Teams, and Planner all rely on this: none of their scopes appears in `GRAPH_SCOPES`, and the tools work anyway because the permissions are granted on the app registration.
 
 Two consequences, both of which have caused real outages:
 
@@ -410,6 +411,23 @@ Notes, categories, and postal addresses round-trip: anything written reads back 
 ### Teams
 
 `list_teams`, `list_channels`, `send_channel_message`, and `send_chat_message`. These need the four Teams permissions on the registration; leave them ungranted to disable the surface. The two send tools are subject to the [outbound policy](#access-controls).
+
+### Planner (10 tools)
+
+| Tool | Method | Description |
+|---|---|---|
+| `list_planner_plans` | Read | Plans shared with the user, or owned by a Microsoft 365 group (a Team's ID is its group ID) |
+| `list_planner_buckets` | Read | A plan's buckets, in board order |
+| `list_planner_tasks` | Read | Tasks in a plan or bucket, or the user's own tasks across plans; `includeCompleted: false` for open work |
+| `get_planner_task` | Read | One task with its description and checklist |
+| `create_planner_plan` | Write | Create a plan owned by a group the user belongs to |
+| `create_planner_bucket` | Write | Add a bucket, first on the board |
+| `update_planner_bucket` | Write | Rename a bucket |
+| `create_planner_task` | Write | Create a task with bucket, dates, status, priority, assignees (at most 20, Planner's limit) and description |
+| `update_planner_task` | Write | Change any of those; `assigneeIds` replaces the set, an empty string clears a date |
+| `delete_planner_task` | Write | Delete a task |
+
+These need `Tasks.ReadWrite` on the registration, and the tenant has to switch the `planner` service on: it is off by default, like every service but mail and SharePoint. Assignees can be given as email addresses, which are resolved to user IDs through `User.ReadBasic.All`. Status and priority use the names the Planner UI shows (`notStarted`, `inProgress`, `completed`; `urgent`, `important`, `medium`, `low`), and a bare date such as `2026-11-20` is stored at 12:00 UTC so it shows as that day across the Americas, Europe and most of Asia. Dates must be ISO 8601 and real calendar dates; anything else, `2026-02-31` or `03/04/2026` included, is refused rather than reinterpreted, and a date-time with no offset is read as UTC. Planner refuses an update or delete without the item's current ETag; the tools read it immediately before writing, so the agent never handles one, and an edit that races someone else's still fails with Graph's 412. Assigning a task notifies the assignee and everything written to a plan is visible to its group's members, guests included. The [outbound policy](#access-controls) does not cover Planner, so read-only mode or the deny list is the control for a plan an agent should not write to.
 
 ---
 
