@@ -333,15 +333,19 @@ const PLAN_INDEX_LIMIT = 1000;
  * them. A plan that still has no title (unreadable, or past the cap) is treated
  * as blocked, so its tasks are dropped rather than returned unchecked. The deny
  * list itself is consulted once for every plan together.
+ *
+ * `incomplete` is true when any task was dropped because its plan couldn't be
+ * resolved, as opposed to dropped by the deny list. The caller reports that as
+ * truncated, so a capped answer is never presented as the whole list.
  */
 export async function filterTasksByAllowedPlan<T extends { planId?: string }>(
   graph: Client,
   tenantId: string,
   subject: DenySubject,
   tasks: T[],
-): Promise<T[]> {
+): Promise<{ tasks: T[]; incomplete: boolean }> {
   const planIds = [...new Set(tasks.map((t) => t.planId).filter((id): id is string => typeof id === 'string' && id.length > 0))];
-  if (planIds.length === 0) return [];
+  if (planIds.length === 0) return { tasks: [], incomplete: tasks.length > 0 };
 
   const titles = new Map<string, string | undefined>();
   try {
@@ -371,7 +375,10 @@ export async function filterTasksByAllowedPlan<T extends { planId?: string }>(
 
   const known = planIds.filter((id) => titles.has(id)).map((id) => ({ id, title: titles.get(id) }));
   const allowed = new Set((await filterDeniedPlans(tenantId, subject, known)).map((p) => p.id));
-  return tasks.filter((t) => typeof t.planId === 'string' && allowed.has(t.planId));
+  return {
+    tasks: tasks.filter((t) => typeof t.planId === 'string' && allowed.has(t.planId)),
+    incomplete: known.length < planIds.length || tasks.some((t) => typeof t.planId !== 'string' || t.planId.length === 0),
+  };
 }
 
 /** Body for a new bucket, placed first in the plan. */

@@ -2766,9 +2766,12 @@ const tools: ToolDef[] = [
       const page = await collectPage(() => graph.api(path).get(), (link) => graph.api(link).get() as Promise<any>, 0, 1000);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let tasks = (page.items as any[]).map(shapeTask);
-      if (path === '/me/planner/tasks') tasks = await filterTasksByAllowedPlan(graph, tenantId, session.userId, tasks);
+      let incomplete = false;
+      if (path === '/me/planner/tasks') ({ tasks, incomplete } = await filterTasksByAllowedPlan(graph, tenantId, session.userId, tasks));
       if (args.includeCompleted === false) tasks = tasks.filter((t) => t.status !== 'completed');
-      return toEnvelope(tasks, limit, page.hasMore);
+      // Tasks dropped because their plan couldn't be resolved make the list short
+      // of the real answer, so they count as truncated just as another page would.
+      return toEnvelope(tasks, limit, page.hasMore || incomplete);
     },
   },
   {
@@ -2942,7 +2945,8 @@ const tools: ToolDef[] = [
       // Empty when every field passed already holds its value (an unchanged assignee set, say); then nothing is PATCHed.
       const body = plannerTaskBody({ ...args, assigneeIds }, Object.keys(task.assignments ?? {}));
       let updated = task;
-      if (Object.keys(body).length > 0) {
+      const fieldsWritten = Object.keys(body).length > 0;
+      if (fieldsWritten) {
         const result = await graph
           .api(`/planner/tasks/${encodeGraphId(args.taskId, 'taskId')}`)
           .header('If-Match', etag)
@@ -2952,8 +2956,22 @@ const tools: ToolDef[] = [
         // read-before-write copy with the sent fields laid over it.
         updated = result && typeof result === 'object' && result.id ? result : { ...task, ...body };
       }
-      if (args.description !== undefined) await setPlannerTaskDescription(graph, args.taskId, args.description);
-      return { ...shapeTask(updated), status: 'updated' };
+      let descriptionWarning: string | undefined;
+      if (args.description !== undefined) {
+        if (!fieldsWritten) {
+          // Nothing else was written, so a failure here is a plain failure.
+          await setPlannerTaskDescription(graph, args.taskId, args.description);
+        } else {
+          // The task fields above are already saved. If the description write fails
+          // the caller is told which half landed rather than shown a bare error.
+          try {
+            await setPlannerTaskDescription(graph, args.taskId, args.description);
+          } catch (err) {
+            descriptionWarning = `The task fields were updated but the description was not saved (${clientFacingMessage(err) ?? 'the write was rejected'}). Retry with update_planner_task passing only description.`;
+          }
+        }
+      }
+      return { ...shapeTask(updated), status: 'updated', ...(descriptionWarning ? { descriptionWarning } : {}) };
     },
   },
   {
@@ -3278,6 +3296,10 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
         toolArgs.teamId,
         toolArgs.channelId,
         toolArgs.chatId,
+        toolArgs.groupId,
+        toolArgs.planId,
+        toolArgs.bucketId,
+        toolArgs.taskId,
         toolArgs.path,
       ].filter(Boolean).join('/') || undefined;
       logAccess({
@@ -3310,7 +3332,8 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
         const errorResource = [
           toolArgs.siteId, toolArgs.driveId, toolArgs.listId, toolArgs.itemId,
           toolArgs.messageId, toolArgs.eventId, toolArgs.messageOrEventId, toolArgs.folderId,
-          toolArgs.attachmentId, toolArgs.mailboxId, toolArgs.path,
+          toolArgs.attachmentId, toolArgs.mailboxId,
+          toolArgs.groupId, toolArgs.planId, toolArgs.bucketId, toolArgs.taskId, toolArgs.path,
         ].filter(Boolean).join('/') || undefined;
         logAccess({
           tenantId: getTenantIdFromSession(auth.session),

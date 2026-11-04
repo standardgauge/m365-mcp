@@ -84,6 +84,7 @@ jest.mock('../services/auditLog.js', () => ({ logAccess: jest.fn() }));
 jest.mock('@azure/functions', () => ({ app: { http: jest.fn() } }));
 
 import { app } from '@azure/functions';
+import { logAccess } from '../services/auditLog.js';
 import '../functions/mcp/mcpEndpoint.js';
 import { MAX_PLAN_LOOKUPS, plannerDate } from '../services/planner.js';
 
@@ -154,6 +155,7 @@ const PLANNER_WRITES = [
 
 beforeEach(() => {
   graphCalls.length = 0;
+  (logAccess as jest.Mock).mockClear();
   deniedPlans = [];
   mockGetEnabledServices.mockResolvedValue(['mail', 'planner']);
   mockGetReadOnlyServices.mockResolvedValue([]);
@@ -316,6 +318,17 @@ describe('list_planner_tasks', () => {
     routes['get /planner/plans/plan-2'] = { id: 'plan-2', title: 'Ops' };
     const r = await call('list_planner_tasks', {});
     expect(r.parsed.items.map((t: { id: string }) => t.id)).toEqual(['task-2']);
+    // plan-gone's task was dropped unchecked, so the list is not the whole answer.
+    expect(r.parsed.truncated).toBe(true);
+  });
+
+  it('does not report truncated when only the deny list dropped tasks', async () => {
+    deniedPlans = ['Launch'];
+    routes['get /me/planner/tasks'] = { value: [TASK, { ...TASK, id: 'task-2', planId: 'plan-2' }] };
+    routes['get /me/planner/plans'] = { value: [PLAN, { id: 'plan-2', title: 'Ops' }] };
+    const r = await call('list_planner_tasks', {});
+    expect(r.parsed.items.map((t: { id: string }) => t.id)).toEqual(['task-2']);
+    expect(r.parsed.truncated).toBe(false);
   });
 
   it("takes plan titles from the user's plan collection instead of reading each plan", async () => {
@@ -340,6 +353,8 @@ describe('list_planner_tasks', () => {
     expect(r.parsed.items.map((t: { planId: string }) => t.planId)).toEqual(
       Array.from({ length: 3 + MAX_PLAN_LOOKUPS }, (_, i) => `plan-x${i}`),
     );
+    // The task page was exhausted, but the plans past the cap make the answer partial.
+    expect(r.parsed.truncated).toBe(true);
   });
 });
 
@@ -520,6 +535,21 @@ describe('update_planner_task', () => {
     ]);
   });
 
+  it('reports a description that failed to save after the task fields were updated', async () => {
+    routes['patch /planner/tasks/task-1/details'] = new Error('boom');
+    const r = await call('update_planner_task', { taskId: 'task-1', status: 'completed', description: 'Three pages' });
+    expect(r.isError).toBe(false);
+    expect(r.parsed).toMatchObject({ id: 'task-1', status: 'updated' });
+    expect(r.parsed.descriptionWarning).toMatch(/task fields were updated but the description was not saved/);
+    expect(writes().map((c) => c.path)).toEqual(['/planner/tasks/task-1', '/planner/tasks/task-1/details']);
+  });
+
+  it('fails outright when only the description was to change and it failed', async () => {
+    routes['patch /planner/tasks/task-1/details'] = new Error('boom');
+    const r = await call('update_planner_task', { taskId: 'task-1', description: 'Three pages' });
+    expect(r.isError).toBe(true);
+  });
+
   it('refuses a call that changes nothing', async () => {
     const r = await call('update_planner_task', { taskId: 'task-1' });
     expect(r.isError).toBe(true);
@@ -569,5 +599,25 @@ describe('plannerDate', () => {
     ]) {
       expect(() => plannerDate(bad, 'dueDateTime')).toThrow(/ISO 8601/);
     }
+  });
+});
+
+describe('audit records', () => {
+  const lastAudit = () => (logAccess as jest.Mock).mock.calls.at(-1)?.[0] as { result: string; resource?: string };
+
+  it('records the plan and task as the resource of an allowed Planner call', async () => {
+    routes['patch /planner/tasks/task-1'] = TASK;
+    await call('update_planner_task', { taskId: 'task-1', title: 'x' });
+    expect(lastAudit()).toMatchObject({ result: 'allowed', resource: 'task-1' });
+    routes['get /planner/plans/plan-1/buckets'] = { value: [] };
+    await call('list_planner_buckets', { planId: 'plan-1' });
+    expect(lastAudit()).toMatchObject({ result: 'allowed', resource: 'plan-1' });
+  });
+
+  it('records the target of a Planner call the deny list refused', async () => {
+    deniedPlans = ['Launch'];
+    const r = await call('list_planner_tasks', { bucketId: 'bucket-1' });
+    expect(r.isError).toBe(true);
+    expect(lastAudit()).toMatchObject({ result: 'denied', resource: 'bucket-1' });
   });
 });
