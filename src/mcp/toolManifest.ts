@@ -23,6 +23,8 @@ export interface McpToolParameter {
    * as the `items` schema, overriding the scalar `{ type }` form. Used by `attachments`.
    */
   itemsSchema?: Record<string, unknown>;
+  /** Maximum array length when `type` is 'array'. Emitted as `maxItems` in the JSON Schema. */
+  maxItems?: number;
   description: string;
   required: boolean;
   enum?: string[];
@@ -1460,7 +1462,8 @@ export const TOOLS: McpTool[] = [
         name: 'assigneeIds',
         type: 'array',
         items: 'string',
-        description: 'People to assign: Entra user object IDs or email addresses At most 20.',
+        maxItems: 20,
+        description: 'People to assign: Entra user object IDs or email addresses (at most 20).',
         required: false,
       },
       {
@@ -1526,7 +1529,8 @@ export const TOOLS: McpTool[] = [
         name: 'assigneeIds',
         type: 'array',
         items: 'string',
-        description: 'The complete new assignee set: Entra user object IDs or email addresses At most 20.',
+        maxItems: 20,
+        description: 'The complete new assignee set: Entra user object IDs or email addresses (at most 20).',
         required: false,
       },
       {
@@ -1584,6 +1588,7 @@ export function getManifest(): object {
               type: p.type,
               description: p.description,
               ...(p.itemsSchema ? { items: p.itemsSchema } : p.items ? { items: { type: p.items } } : {}),
+              ...(p.maxItems !== undefined ? { maxItems: p.maxItems } : {}),
               ...(p.enum ? { enum: p.enum } : {}),
             },
           ])

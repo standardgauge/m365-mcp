@@ -194,7 +194,7 @@ describe('tools/list', () => {
     const shape = (schema: any) => ({
       required: [...(schema.required ?? [])].sort(),
       props: Object.fromEntries(
-        Object.entries(schema.properties ?? {}).map(([k, v]: [string, any]) => [k, { type: v.type, items: v.items?.type, enum: v.enum }]),
+        Object.entries(schema.properties ?? {}).map(([k, v]: [string, any]) => [k, { type: v.type, items: v.items?.type, maxItems: v.maxItems, enum: v.enum }]),
       ),
     });
     for (const name of PLANNER_TOOLS) {
@@ -203,6 +203,12 @@ describe('tools/list', () => {
       expect(m).toBeDefined();
       expect(l).toBeDefined();
       expect(shape(m!.inputSchema)).toEqual(shape(l!.inputSchema));
+    }
+    for (const name of ['create_planner_task', 'update_planner_task']) {
+      const m = manifest.tools.find((t) => t.name === name)!;
+      const l = live.find((t) => t.name === name)!;
+      expect(m.inputSchema.properties.assigneeIds.maxItems).toBe(MAX_ASSIGNEES);
+      expect(l.inputSchema.properties.assigneeIds.maxItems).toBe(MAX_ASSIGNEES);
     }
   });
 });
