@@ -98,7 +98,7 @@ jest.mock('../services/sharepointFilter.js', () => ({
   filterAndDisambiguateSites: (sites: unknown) => sites,
 }));
 jest.mock('../services/serviceSettings.js', () => ({
-  getEnabledServices: () => Promise.resolve(['mail', 'sharepoint', 'onedrive', 'calendar', 'onenote', 'contacts', 'teams']),
+  getEnabledServices: () => Promise.resolve(['mail', 'sharepoint', 'onedrive', 'calendar', 'onenote', 'contacts', 'teams', 'planner']),
   getReadOnlyServices: () => Promise.resolve([]),
   getAllowedSites: () => Promise.resolve([]),
 }));
@@ -249,6 +249,9 @@ describe('Invariant 2 — list/search verbs surface truncation', () => {
     { tool: 'list_teams', args: {}, rowsKey: 'items' },
     { tool: 'list_folders_mail', args: {}, rowsKey: 'items' },
     { tool: 'list_onedrive', args: {}, rowsKey: 'items' },
+    { tool: 'list_planner_plans', args: {}, rowsKey: 'items' },
+    { tool: 'list_planner_buckets', args: { planId: 'p1' }, rowsKey: 'items' },
+    { tool: 'list_planner_tasks', args: { planId: 'p1' }, rowsKey: 'items' },
     // get_attachments in list mode (attachmentId omitted) is a Graph collection
     // GET like the rest; the single-attachment download branch is not a list.
     { tool: 'get_attachments', args: { messageId: 'm1' }, rowsKey: 'attachments' },

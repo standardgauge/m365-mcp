@@ -55,6 +55,7 @@ function getMsalConfig(): MsalConfig {
 // ChannelMessage.Send, Team.ReadBasic.All, Channel.ReadBasic.All) are granted via admin
 // consent — documented in README.md and docs/entra-setup.md — and flow into the token
 // automatically on the next silent refresh once consent lands, with no re-login.
+// The Planner tools (Tasks.ReadWrite) do the same.
 // (create_event's isOnlineMeeting flag needs no new scope: it only sets fields on the
 // POST /me/events calendar API — already covered by Calendars.ReadWrite — and never calls
 // the standalone /onlineMeetings API, so OnlineMeetings.ReadWrite is not required.)

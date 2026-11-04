@@ -237,7 +237,7 @@ describe('post-deploy smoke against a correct instance', () => {
     const { result } = await run();
     const passed = result.checks.filter((c) => c.ok === true).map((c) => c.name);
     for (const svc of ['mail', 'calendar', 'sharepoint']) expect(passed).toContain(`write ${smoke.WRITE_PROBES[svc].tool} refused`);
-    for (const svc of ['onedrive', 'onenote', 'contacts', 'teams']) expect(passed).toContain(`${svc} outside the key refused`);
+    for (const svc of ['onedrive', 'onenote', 'contacts', 'teams', 'planner']) expect(passed).toContain(`${svc} outside the key refused`);
     for (const name of ['POST /api/mail/settings refused', 'admin API refused', 'logout refused']) expect(passed).toContain(name);
   });
 

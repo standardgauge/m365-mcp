@@ -4,12 +4,12 @@ import React from 'react';
 // "constructor" must not resolve through the prototype chain.
 const SERVICE_LABELS = new Map<string, string>([
   ['mail', 'Mail'], ['sharepoint', 'SharePoint'], ['calendar', 'Calendar'], ['onedrive', 'OneDrive'],
-  ['onenote', 'OneNote'], ['contacts', 'Contacts'], ['teams', 'Teams'],
+  ['onenote', 'OneNote'], ['contacts', 'Contacts'], ['teams', 'Teams'], ['planner', 'Planner'],
 ]);
 export function serviceLabel(s: string): string {
   return SERVICE_LABELS.get(s) ?? s;
 }
-export const SERVICE_ORDER = ['mail', 'sharepoint', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams'];
+export const SERVICE_ORDER = ['mail', 'sharepoint', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams', 'planner'];
 
 export interface SitePick { id: string; name: string }
 export interface KeyPolicy { services: string[]; readOnlyServices: string[]; allowedSites: SitePick[] }

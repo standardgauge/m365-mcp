@@ -7,7 +7,7 @@ const ROW_KEY = 'enabledServices';
 const DEFAULT_SERVICES = ['mail', 'sharepoint'];
 
 // Full list of known service keys (for reference/validation)
-export const ALL_SERVICE_KEYS = ['mail', 'sharepoint', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams'];
+export const ALL_SERVICE_KEYS = ['mail', 'sharepoint', 'calendar', 'onedrive', 'onenote', 'contacts', 'teams', 'planner'];
 
 function getTableClient(): TableClient {
   return getStorageTableClient(TABLE);

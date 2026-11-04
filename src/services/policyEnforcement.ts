@@ -21,7 +21,7 @@ import { auditClientAddress } from './clientAddress.js';
 import { ValidationError } from './opaqueId.js';
 import { SessionStoreUnavailableError, SESSION_STORE_RETRY_AFTER_S } from './sessionStoreError.js';
 
-export type ServiceCategory = 'mail' | 'sharepoint' | 'onedrive' | 'calendar' | 'onenote' | 'contacts' | 'teams';
+export type ServiceCategory = 'mail' | 'sharepoint' | 'onedrive' | 'calendar' | 'onenote' | 'contacts' | 'teams' | 'planner';
 
 export interface PolicyViolation {
   status: number;

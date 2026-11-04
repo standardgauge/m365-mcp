@@ -213,6 +213,7 @@ services decided in [Before you start](#before-you-start), and nothing more.
   | Calendar | `Calendars.ReadWrite`, `Calendars.Read.Shared`, `Place.Read.All`, `MailboxSettings.Read` |
   | SharePoint, OneDrive, Contacts | Nothing beyond the sign-in set |
   | OneNote | `Notes.ReadWrite.All` |
+  | Planner | `Tasks.ReadWrite` (assigning by email address also uses `User.ReadBasic.All`) |
   | Teams | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `ChatMessage.Send`; plus `ChatMember.Read` and `ChannelMember.Read.All` if the outbound policy will set Teams to internal only |
 
   Do not add anything to `GRAPH_SCOPES` for this tenant. The README explains
