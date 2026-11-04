@@ -12,7 +12,7 @@
 # ── Stage 1: build ─────────────────────────────────────────────────────────────
 # Same ECR Public mirror and digest as the production Dockerfile, so no image
 # in this repo depends on Docker Hub's anonymous pull limit.
-FROM --platform=linux/amd64 public.ecr.aws/docker/library/node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS builder
+FROM --platform=linux/amd64 public.ecr.aws/docker/library/node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS builder
 WORKDIR /build
 
 COPY package*.json tsconfig.json ./
@@ -24,7 +24,7 @@ RUN npm run build
 # ── Stage 2: runtime ───────────────────────────────────────────────────────────
 # azure-functions/node images are amd64-only; runs under Rosetta on Apple Silicon.
 # Same host build as the production Dockerfile; bump the two together.
-FROM --platform=linux/amd64 mcr.microsoft.com/azure-functions/node:4.1055.250-1-node22@sha256:ede6fb7e132078c3c2a5760fd6b35179a15278d22ec3e93345deea2945768ab5
+FROM --platform=linux/amd64 mcr.microsoft.com/azure-functions/node:4.1055.300-3-node22@sha256:5d70744cc5e5aa04e2b767db2651f97be13d6fc5f81224f7bba2c936b48f7a76
 
 ENV AzureWebJobsScriptRoot=/home/site/wwwroot \
     AzureFunctionsJobHost__Logging__Console__IsEnabled=true \
