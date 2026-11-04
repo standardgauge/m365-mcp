@@ -19,6 +19,7 @@
  */
 import type { Client } from '@microsoft/microsoft-graph-client';
 import { filterDeniedPaths, type DenySubject } from './denyList.js';
+import { collectPage } from './graphPaging.js';
 import { encodeGraphId } from './opaqueId.js';
 import { ToolCallError } from './toolCallError.js';
 
@@ -71,17 +72,46 @@ function priorityToNumber(priority: unknown): number {
 /**
  * A caller-supplied start or due date as Graph wants it, or null to clear it.
  *
- * A bare date ("2026-11-10") is pinned to 12:00 UTC. Planner shows dates in the
- * viewer's local time, so midnight UTC would display as the previous day for
- * anyone west of Greenwich; noon keeps the calendar date from UTC-11 to UTC+11.
- * An empty string clears the date.
+ * Accepted shapes are ISO 8601 only: a bare date (`2026-11-10`), or a date-time
+ * with minutes and optional seconds and fraction (`2026-11-10T09:30`,
+ * `2026-11-10T09:30:00.000Z`, `2026-11-10T09:30:00-08:00`). A date-time with no
+ * offset is read as UTC rather than the server's local zone. The calendar date
+ * and the time are range-checked, so an impossible date such as `2026-02-31` is
+ * refused instead of rolling over into March the way `Date.parse` would.
+ *
+ * A bare date is pinned to 12:00 UTC. Planner shows dates in the viewer's local
+ * time, so midnight UTC would display as the previous day for anyone west of
+ * Greenwich; noon keeps the calendar date from UTC-11 to UTC+11. An empty string
+ * clears the date.
  */
+const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+// eslint-disable-next-line security/detect-unsafe-regex -- anchored, every group is fixed-width or bounded (\d{1,7}) and no two quantifiers can match the same characters, so matching is linear
+const ISO_TIME_RE = /^(\d{2}):(\d{2})(:\d{2})?(\.\d{1,7})?(Z|[+-]\d{2}:\d{2})?$/;
+
+function daysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
 export function plannerDate(value: unknown, field: string): string | null {
   if (value === '') return null;
-  if (typeof value !== 'string') throw new ToolCallError(`${field} must be an ISO 8601 date or date-time string`);
-  const iso = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T12:00:00Z` : value;
-  const ms = Date.parse(iso);
-  if (Number.isNaN(ms)) throw new ToolCallError(`${field} must be an ISO 8601 date or date-time string`);
+  const invalid = () => new ToolCallError(`${field} must be an ISO 8601 date (YYYY-MM-DD) or date-time (YYYY-MM-DDTHH:MM[:SS][Z|±HH:MM])`);
+  if (typeof value !== 'string') throw invalid();
+  const [datePart, timePart, ...rest] = value.split('T');
+  const m = ISO_DATE_RE.exec(datePart);
+  const t = timePart === undefined ? null : ISO_TIME_RE.exec(timePart);
+  if (!m || rest.length > 0 || (timePart !== undefined && !t)) throw invalid();
+  const [, y, mo, d] = m;
+  const [, hh, mi, sec, frac, offset] = t ?? [];
+  const ss = sec?.slice(1);
+  const year = Number(y);
+  const month = Number(mo);
+  const day = Number(d);
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) throw invalid();
+  if (hh === undefined) return new Date(Date.UTC(year, month - 1, day, 12)).toISOString();
+  if (Number(hh) > 23 || Number(mi) > 59 || (ss !== undefined && Number(ss) > 59)) throw invalid();
+  if (offset && offset !== 'Z' && (Number(offset.slice(1, 3)) > 23 || Number(offset.slice(4, 6)) > 59)) throw invalid();
+  const ms = Date.parse(`${y}-${mo}-${d}T${hh}:${mi}:${ss ?? '00'}${frac ?? ''}${offset ?? 'Z'}`);
+  if (Number.isNaN(ms)) throw invalid();
   return new Date(ms).toISOString();
 }
 
@@ -284,10 +314,25 @@ export async function filterDeniedPlans<T extends { id: string; title?: string }
 }
 
 /**
+ * How many plans the cross-plan task listing will read one at a time when the
+ * user's own plan collection doesn't include them. Past this, the remaining
+ * plans count as unreadable and their tasks are dropped.
+ */
+export const MAX_PLAN_LOOKUPS = 10;
+
+/** How many plans the cross-plan task listing reads from `/me/planner/plans`. */
+const PLAN_INDEX_LIMIT = 1000;
+
+/**
  * Drop tasks whose plan the deny list blocks, for the cross-plan "assigned to
- * me" listing. Each distinct plan is read once for its title. A plan that
- * cannot be read is treated as blocked, so its tasks are dropped rather than
- * returned unchecked.
+ * me" listing.
+ *
+ * Plan titles come from one paged read of `/me/planner/plans`, joined by plan
+ * ID, so the Graph request count doesn't grow with the number of tasks. A plan
+ * missing from that collection is read on its own, up to MAX_PLAN_LOOKUPS of
+ * them. A plan that still has no title (unreadable, or past the cap) is treated
+ * as blocked, so its tasks are dropped rather than returned unchecked. The deny
+ * list itself is consulted once for every plan together.
  */
 export async function filterTasksByAllowedPlan<T extends { planId?: string }>(
   graph: Client,
@@ -296,17 +341,36 @@ export async function filterTasksByAllowedPlan<T extends { planId?: string }>(
   tasks: T[],
 ): Promise<T[]> {
   const planIds = [...new Set(tasks.map((t) => t.planId).filter((id): id is string => typeof id === 'string' && id.length > 0))];
-  const allowed = new Set<string>();
+  if (planIds.length === 0) return [];
+
+  const titles = new Map<string, string | undefined>();
+  try {
+    const page = await collectPage<GraphObject>(
+      () => graph.api('/me/planner/plans').get(),
+      (link) => graph.api(link).get(),
+      0,
+      PLAN_INDEX_LIMIT,
+    );
+    for (const plan of page.items) if (typeof plan?.id === 'string') titles.set(plan.id, plan.title);
+  } catch {
+    // Fall through to the bounded per-plan reads below.
+  }
+
+  let lookups = 0;
   for (const planId of planIds) {
-    let title: string | undefined;
+    if (titles.has(planId)) continue;
+    if (lookups >= MAX_PLAN_LOOKUPS) break;
+    lookups++;
     try {
       const plan: GraphObject = await graph.api(`/planner/plans/${encodeGraphId(planId, 'planId')}`).get();
-      title = plan?.title;
+      titles.set(planId, plan?.title);
     } catch {
-      continue;
+      // Unreadable: left out of `titles`, so its tasks are dropped.
     }
-    if (!(await planDenied(tenantId, subject, { id: planId, title }))) allowed.add(planId);
   }
+
+  const known = planIds.filter((id) => titles.has(id)).map((id) => ({ id, title: titles.get(id) }));
+  const allowed = new Set((await filterDeniedPlans(tenantId, subject, known)).map((p) => p.id));
   return tasks.filter((t) => typeof t.planId === 'string' && allowed.has(t.planId));
 }
 

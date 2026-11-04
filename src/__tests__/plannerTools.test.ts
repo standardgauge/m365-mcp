@@ -85,6 +85,7 @@ jest.mock('@azure/functions', () => ({ app: { http: jest.fn() } }));
 
 import { app } from '@azure/functions';
 import '../functions/mcp/mcpEndpoint.js';
+import { MAX_PLAN_LOOKUPS, plannerDate } from '../services/planner.js';
 
 interface HttpRegistration {
   handler: (req: HttpRequest, context: InvocationContext) => Promise<{ status: number; jsonBody?: unknown }>;
@@ -316,6 +317,30 @@ describe('list_planner_tasks', () => {
     const r = await call('list_planner_tasks', {});
     expect(r.parsed.items.map((t: { id: string }) => t.id)).toEqual(['task-2']);
   });
+
+  it("takes plan titles from the user's plan collection instead of reading each plan", async () => {
+    deniedPlans = ['Launch'];
+    routes['get /me/planner/tasks'] = { value: [TASK, { ...TASK, id: 'task-2', planId: 'plan-2' }] };
+    routes['get /me/planner/plans'] = { value: [PLAN, { id: 'plan-2', title: 'Ops' }] };
+    const r = await call('list_planner_tasks', {});
+    expect(r.parsed.items.map((t: { id: string }) => t.id)).toEqual(['task-2']);
+    expect(graphCalls.filter((c) => c.path.startsWith('/planner/plans/'))).toEqual([]);
+  });
+
+  it('keeps upstream requests bounded when the tasks span many plans', async () => {
+    const tasks = Array.from({ length: 1000 }, (_, i) => ({ ...TASK, id: `task-${i}`, planId: `plan-x${i}` }));
+    routes['get /me/planner/tasks'] = { value: tasks };
+    routes['get /me/planner/plans'] = { value: [0, 1, 2].map((i) => ({ id: `plan-x${i}`, title: `Plan ${i}` })) };
+    // Plans outside the collection are readable one at a time, but only up to the cap.
+    for (let i = 3; i < 1000; i++) routes[`get /planner/plans/plan-x${i}`] = { id: `plan-x${i}`, title: `Plan ${i}` };
+    const r = await call('list_planner_tasks', { maxResults: 200 });
+    expect(r.isError).toBe(false);
+    expect(graphCalls.length).toBeLessThanOrEqual(2 + MAX_PLAN_LOOKUPS);
+    // The three indexed plans plus the capped lookups; every other plan fails closed.
+    expect(r.parsed.items.map((t: { planId: string }) => t.planId)).toEqual(
+      Array.from({ length: 3 + MAX_PLAN_LOOKUPS }, (_, i) => `plan-x${i}`),
+    );
+  });
 });
 
 describe('get_planner_task', () => {
@@ -439,6 +464,8 @@ describe('create_planner_task', () => {
       { status: 'done' },
       { priority: 'high' },
       { dueDateTime: 'next tuesday' },
+      { dueDateTime: '2026-02-31' },
+      { dueDateTime: '03/04/2026' },
       { assigneeIds: ['not-an-id'] },
     ]) {
       const r = await call('create_planner_task', { planId: 'plan-1', title: 'Ship', ...args });
@@ -521,5 +548,26 @@ describe('delete_planner_task', () => {
     const r = await call('delete_planner_task', { taskId: 'task-1' });
     expect(r.isError).toBe(true);
     expect(writes()).toEqual([]);
+  });
+});
+
+describe('plannerDate', () => {
+  it('pins a bare date to noon UTC and reads an offset-less date-time as UTC', () => {
+    expect(plannerDate('2026-11-20', 'dueDateTime')).toBe('2026-11-20T12:00:00.000Z');
+    expect(plannerDate('2028-02-29', 'dueDateTime')).toBe('2028-02-29T12:00:00.000Z');
+    expect(plannerDate('2026-11-20T09:30', 'dueDateTime')).toBe('2026-11-20T09:30:00.000Z');
+    expect(plannerDate('2026-11-20T09:30:00-08:00', 'dueDateTime')).toBe('2026-11-20T17:30:00.000Z');
+    expect(plannerDate('2026-11-20T09:30:00.123Z', 'dueDateTime')).toBe('2026-11-20T09:30:00.123Z');
+    expect(plannerDate('', 'dueDateTime')).toBeNull();
+  });
+
+  it('refuses impossible and non-ISO dates instead of normalising them', () => {
+    for (const bad of [
+      '2026-02-31', '2026-02-29', '2026-13-01', '2026-00-10', '2026-04-31',
+      '2026-11-20T24:00', '2026-11-20T09:60', '2026-11-20T09:30:61Z', '2026-11-20T09:30+25:00',
+      '03/04/2026', 'March 4, 2026', '2026-11-20 09:30', '20261120', '2026-11-20T09', 'next tuesday',
+    ]) {
+      expect(() => plannerDate(bad, 'dueDateTime')).toThrow(/ISO 8601/);
+    }
   });
 });
