@@ -423,7 +423,7 @@ Notes, categories, and postal addresses round-trip: anything written reads back 
 | `create_planner_plan` | Write | Create a plan owned by a group the user belongs to |
 | `create_planner_bucket` | Write | Add a bucket, first on the board |
 | `update_planner_bucket` | Write | Rename a bucket |
-| `create_planner_task` | Write | Create a task with bucket, dates, status, priority, assignees and description |
+| `create_planner_task` | Write | Create a task with bucket, dates, status, priority, assignees (at most 20, Planner's limit) and description |
 | `update_planner_task` | Write | Change any of those; `assigneeIds` replaces the set, an empty string clears a date |
 | `delete_planner_task` | Write | Delete a task |
 

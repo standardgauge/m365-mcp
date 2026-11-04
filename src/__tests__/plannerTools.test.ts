@@ -86,7 +86,7 @@ jest.mock('@azure/functions', () => ({ app: { http: jest.fn() } }));
 import { app } from '@azure/functions';
 import { logAccess } from '../services/auditLog.js';
 import '../functions/mcp/mcpEndpoint.js';
-import { MAX_PLAN_LOOKUPS, plannerDate } from '../services/planner.js';
+import { MAX_ASSIGNEES, MAX_PLAN_LOOKUPS, plannerDate } from '../services/planner.js';
 
 interface HttpRegistration {
   handler: (req: HttpRequest, context: InvocationContext) => Promise<{ status: number; jsonBody?: unknown }>;
@@ -487,6 +487,31 @@ describe('create_planner_task', () => {
       expect(r.isError).toBe(true);
     }
     expect(writes()).toEqual([]);
+  });
+
+  it('refuses more than MAX_ASSIGNEES assignees before any Graph call', async () => {
+    const emails = Array.from({ length: MAX_ASSIGNEES + 1 }, (_, i) => `user${i}@fabrikam.com`);
+    for (const [name, args] of [
+      ['create_planner_task', { planId: 'plan-1', title: 'Ship', assigneeIds: emails }],
+      ['update_planner_task', { taskId: 'task-1', assigneeIds: emails }],
+      ['create_planner_task', { planId: 'plan-1', title: 'Ship', assigneeIds: Array(5000).fill('pat@fabrikam.com') }],
+    ] as const) {
+      const r = await call(name, args);
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/at most 20/);
+    }
+    expect(graphCalls).toEqual([]);
+  });
+
+  it('looks each assignee up once, however often it is repeated', async () => {
+    const r = await call('create_planner_task', {
+      planId: 'plan-1',
+      title: 'Ship',
+      assigneeIds: ['pat@fabrikam.com', ' PAT@fabrikam.com', 'pat@fabrikam.com'],
+    });
+    expect(r.isError).toBe(false);
+    expect(graphCalls.filter((c) => c.path.startsWith('/users/'))).toHaveLength(1);
+    expect(Object.keys((writes()[0].body as { assignments: object }).assignments)).toEqual(['bbbbbbbb-0000-0000-0000-000000000009']);
   });
 
   it('rejects a path-shaped planId before any Graph call', async () => {

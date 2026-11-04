@@ -124,18 +124,44 @@ function assigneeList(value: unknown): string[] {
   return [...new Set((value as string[]).map((v) => v.trim().toLowerCase()))];
 }
 
+/** Planner's own limit on assignees per task. */
+export const MAX_ASSIGNEES = 20;
+
+/**
+ * Validate the caller's assignee list without touching Graph: an array of at
+ * most MAX_ASSIGNEES non-empty strings. Returns the entries trimmed, with
+ * repeats (compared case-insensitively) dropped. Handlers call this before
+ * their first Graph request, so an oversized list costs no upstream calls.
+ */
+export function assigneeInput(value: unknown): string[] {
+  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string' || !v.trim())) {
+    throw new ToolCallError('assigneeIds must be an array of Entra user object IDs or email addresses');
+  }
+  if (value.length > MAX_ASSIGNEES) {
+    throw new ToolCallError(`assigneeIds can name at most ${MAX_ASSIGNEES} people, Planner's limit per task`);
+  }
+  const seen = new Set<string>();
+  const entries: string[] = [];
+  for (const raw of value as string[]) {
+    const entry = raw.trim();
+    const key = entry.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push(entry);
+  }
+  return entries;
+}
+
 /**
  * Turn the caller's assignees into Entra object IDs, which is what Planner keys
  * assignments on. An agent usually knows people by address, so an entry with an
  * `@` is looked up through `/users/{upn}`; anything else must already be an ID.
+ * The list is checked by assigneeInput first, so it never makes more than
+ * MAX_ASSIGNEES lookups.
  */
 export async function resolveAssignees(graph: Client, value: unknown): Promise<string[]> {
-  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string' || !v.trim())) {
-    throw new ToolCallError('assigneeIds must be an array of Entra user object IDs or email addresses');
-  }
   const ids: string[] = [];
-  for (const raw of value as string[]) {
-    const entry = raw.trim();
+  for (const entry of assigneeInput(value)) {
     if (!entry.includes('@')) {
       ids.push(entry);
       continue;

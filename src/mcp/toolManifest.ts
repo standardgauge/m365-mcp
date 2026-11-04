@@ -1460,7 +1460,7 @@ export const TOOLS: McpTool[] = [
         name: 'assigneeIds',
         type: 'array',
         items: 'string',
-        description: 'People to assign: Entra user object IDs or email addresses.',
+        description: 'People to assign: Entra user object IDs or email addresses At most 20.',
         required: false,
       },
       {
@@ -1526,7 +1526,7 @@ export const TOOLS: McpTool[] = [
         name: 'assigneeIds',
         type: 'array',
         items: 'string',
-        description: 'The complete new assignee set: Entra user object IDs or email addresses.',
+        description: 'The complete new assignee set: Entra user object IDs or email addresses At most 20.',
         required: false,
       },
       {

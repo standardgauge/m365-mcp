@@ -74,6 +74,8 @@ import {
   getPlannerTaskDetails,
   plannerBucketBody,
   plannerTaskBody,
+  assigneeInput,
+  MAX_ASSIGNEES,
   resolveAssignees,
   setPlannerTaskDescription,
   shapeBucket,
@@ -2880,7 +2882,7 @@ const tools: ToolDef[] = [
         dueDateTime: prop('string', 'Due date (YYYY-MM-DD) or date-time, ISO 8601; a date-time without an offset is UTC'),
         status: prop('string', 'Progress (default notStarted)', { enum: [...PLANNER_STATUS_VALUES] }),
         priority: prop('string', 'Priority (default medium)', { enum: [...PLANNER_PRIORITY_VALUES] }),
-        assigneeIds: { type: 'array', items: { type: 'string' }, description: 'People to assign: Entra user object IDs or email addresses' },
+        assigneeIds: { type: 'array', items: { type: 'string' }, maxItems: MAX_ASSIGNEES, description: 'People to assign: Entra user object IDs or email addresses (at most 20)' },
         description: prop('string', 'Task description (plain text, shown as Notes in Planner)'),
       },
       required: ['planId', 'title'],
@@ -2890,6 +2892,8 @@ const tools: ToolDef[] = [
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
       if (args.description !== undefined && typeof args.description !== 'string') throw new ToolCallError('description must be a string');
+      // Checked before any Graph call, so an oversized assignee list costs nothing upstream.
+      if (args.assigneeIds !== undefined) assigneeInput(args.assigneeIds);
       await assertPlanAllowed(graph, tenantId, session.userId, args.planId);
       const assigneeIds = args.assigneeIds !== undefined ? await resolveAssignees(graph, args.assigneeIds) : undefined;
       // The whole body is built, and so validated, before anything is written.
@@ -2925,7 +2929,7 @@ const tools: ToolDef[] = [
         dueDateTime: prop('string', 'Due date (YYYY-MM-DD) or date-time, ISO 8601 (no offset means UTC); empty string clears it'),
         status: prop('string', 'Progress', { enum: [...PLANNER_STATUS_VALUES] }),
         priority: prop('string', 'Priority', { enum: [...PLANNER_PRIORITY_VALUES] }),
-        assigneeIds: { type: 'array', items: { type: 'string' }, description: 'The complete new assignee set: Entra user object IDs or email addresses' },
+        assigneeIds: { type: 'array', items: { type: 'string' }, maxItems: MAX_ASSIGNEES, description: 'The complete new assignee set: Entra user object IDs or email addresses (at most 20)' },
         description: prop('string', 'New description (replaces the existing one)'),
       },
       required: ['taskId'],
@@ -2939,6 +2943,8 @@ const tools: ToolDef[] = [
       if (!PLANNER_TASK_UPDATE_FIELDS.some((f) => args[f] !== undefined)) {
         throw new ToolCallError('Nothing to update: pass at least one field to change');
       }
+      // Checked before any Graph call, so an oversized assignee list costs nothing upstream.
+      if (args.assigneeIds !== undefined) assigneeInput(args.assigneeIds);
       const { item: task, etag } = await getPlannerTask(graph, args.taskId);
       await assertPlanAllowed(graph, tenantId, session.userId, task.planId);
       const assigneeIds = args.assigneeIds !== undefined ? await resolveAssignees(graph, args.assigneeIds) : undefined;
