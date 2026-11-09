@@ -148,6 +148,17 @@ export function skipArg(value: unknown): number {
   return value;
 }
 
+/**
+ * The next `skip` for a page listing. Graph applies `skip` to the raw
+ * collection and the deny list filters afterwards, so the cursor advances by
+ * the rows Graph returned, not by the rows the caller saw. Advancing by the
+ * filtered count would re-read part of the same page, and a page that was
+ * entirely denied would point the caller back at the same `skip` forever.
+ */
+export function pageContinuation(skip: number, rawCount: number, truncated: boolean): { nextSkip?: number } {
+  return truncated ? { nextSkip: skip + rawCount } : {};
+}
+
 const GENERATED_ID_RE = /^[A-Za-z0-9]+:\{[0-9A-Fa-f-]+\}\{\d+\}$/;
 const DATA_ID_RE = /^#[A-Za-z0-9_.:-]{1,200}$/;
 

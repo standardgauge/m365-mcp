@@ -1266,7 +1266,7 @@ export const TOOLS: McpTool[] = [
     name: 'list_onenote_pages',
     description:
       'List the pages in a OneNote section, most recently modified first, with title, id and last-modified time. ' +
-      'Up to 100 per call; use skip to read further.',
+      'Up to 100 per call; when truncated is true, pass the returned nextSkip as skip to read further.',
     parameters: [
       { name: 'sectionId', type: 'string', description: 'Section ID (from list_sections).', required: true },
       { name: 'skip', type: 'number', description: 'Pages to skip, for reading past the first 100 (default 0).', required: false },
@@ -1289,7 +1289,7 @@ export const TOOLS: McpTool[] = [
     name: 'search_onenote_pages',
     description:
       'Find OneNote pages whose title contains the query, in one section or every notebook. Titles only: Graph has no ' +
-      'full-text page search for work accounts.',
+      'full-text page search for work accounts. When truncated is true, pass the returned nextSkip as skip to read further.',
     parameters: [
       { name: 'query', type: 'string', description: 'Text to look for in page titles.', required: true },
       { name: 'sectionId', type: 'string', description: 'Section ID to search within (omit to search every notebook).', required: false },

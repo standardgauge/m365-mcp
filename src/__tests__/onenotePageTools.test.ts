@@ -152,6 +152,8 @@ const PAGE_HTML =
   '<body data-absolute-enabled="true"><div id="div:{33f8a242-7c33-4bb2-90c5-8425a68cc5bf}{40}">' +
   '<p>Agenda &amp; goals</p><ul><li>Scope</li><li>Budget &lt;$5k&gt;</li></ul></div></body></html>';
 
+const NEXT = 'https://graph.microsoft.com/v1.0/next';
+
 const PAGE_TOOLS = ['list_onenote_pages', 'read_onenote_page', 'search_onenote_pages', 'update_onenote_page'];
 const UPDATE = { pageId: 'pg-1', target: 'body', action: 'append', content: '<p>Next steps</p>' };
 
@@ -229,7 +231,28 @@ describe('list_onenote_pages', () => {
     routes['get /me/onenote/sections/sec-1/pages'] = { value: [PAGE], '@odata.nextLink': 'https://graph.microsoft.com/v1.0/next' };
     const { parsed } = await call('list_onenote_pages', { sectionId: 'sec-1', skip: 100 });
     expect(parsed.truncated).toBe(true);
+    expect(parsed.nextSkip).toBe(101);
     expect(graphCalls.find((c) => c.path === '/me/onenote/sections/sec-1/pages')!.options.skip).toBe(100);
+  });
+
+  it('omits nextSkip when there is nothing more to read', async () => {
+    const { parsed } = await call('list_onenote_pages', { sectionId: 'sec-1' });
+    expect(parsed.truncated).toBe(false);
+    expect(parsed).not.toHaveProperty('nextSkip');
+  });
+
+  it('advances nextSkip by the rows Graph returned when some were denied', async () => {
+    denied = ['nb-9'];
+    routes['get /me/onenote/sections/sec-1/pages'] = { value: [PAGE, OTHER_PAGE, OTHER_PAGE], '@odata.nextLink': NEXT };
+    const { parsed } = await call('list_onenote_pages', { sectionId: 'sec-1', skip: 10 });
+    expect(parsed).toMatchObject({ count: 1, truncated: true, nextSkip: 13 });
+  });
+
+  it('moves past a page where every row was denied instead of repeating it', async () => {
+    denied = ['nb-9'];
+    routes['get /me/onenote/sections/sec-1/pages'] = { value: [OTHER_PAGE, OTHER_PAGE], '@odata.nextLink': NEXT };
+    const { parsed } = await call('list_onenote_pages', { sectionId: 'sec-1' });
+    expect(parsed).toMatchObject({ items: [], count: 0, truncated: true, nextSkip: 2 });
   });
 
   it('refuses a deny-listed section by ID before calling Graph', async () => {
@@ -315,6 +338,21 @@ describe('search_onenote_pages', () => {
     expect(parsed.items.map((p: { id: string }) => p.id)).toEqual(['pg-1']);
     const search = graphCalls.find((c) => c.path === '/me/onenote/pages')!;
     expect(search.options.filter).toBe("contains(tolower(title),'kick''off')");
+  });
+
+  it('advances nextSkip by the rows Graph returned when some were denied', async () => {
+    denied = ['Board papers'];
+    routes['get /me/onenote/pages'] = { value: [OTHER_PAGE, PAGE, OTHER_PAGE], '@odata.nextLink': NEXT };
+    const { parsed } = await call('search_onenote_pages', { query: 'kickoff', skip: 100 });
+    expect(parsed).toMatchObject({ count: 1, truncated: true, nextSkip: 103 });
+    expect(graphCalls.find((c) => c.path === '/me/onenote/pages')!.options.skip).toBe(100);
+  });
+
+  it('moves past a page where every match was denied instead of repeating it', async () => {
+    denied = ['Board papers'];
+    routes['get /me/onenote/pages'] = { value: [OTHER_PAGE], '@odata.nextLink': NEXT };
+    const { parsed } = await call('search_onenote_pages', { query: 'kickoff' });
+    expect(parsed).toMatchObject({ items: [], count: 0, truncated: true, nextSkip: 1 });
   });
 
   it('searches one section when sectionId is given, after checking it', async () => {

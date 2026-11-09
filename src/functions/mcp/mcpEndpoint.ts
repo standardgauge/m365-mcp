@@ -65,7 +65,7 @@ import { readMailAttachment } from '../../services/mailAttachmentContent.js';
 import { readDriveFileContent } from '../../services/driveFileRead.js';
 import {
   ONENOTE_PAGE_LIMIT, ONENOTE_UPDATE_ACTIONS, ONENOTE_UPDATE_POSITIONS, PAGE_PARENT_EXPAND, PAGE_SELECT,
-  assertPageAllowed, assertSectionAllowed, filterDeniedPages, odataString, onenoteHtmlToText, readPageHtml,
+  assertPageAllowed, assertSectionAllowed, filterDeniedPages, odataString, onenoteHtmlToText, pageContinuation, readPageHtml,
   skipArg, toPageSummary, updateTarget,
 } from '../../services/onenote.js';
 import {
@@ -2569,8 +2569,9 @@ const tools: ToolDef[] = [
     name: 'list_onenote_pages',
     description:
       'List the pages in a OneNote section, most recently modified first. Returns { items: [{ id, title, createdDateTime, ' +
-      'lastModifiedDateTime, sectionId, sectionName, notebookId, notebookName }], count, limit, truncated }. Up to 100 pages per ' +
-      'call; when truncated is true, call again with skip set to the number already read.',
+      'lastModifiedDateTime, sectionId, sectionName, notebookId, notebookName }], count, limit, truncated, nextSkip? }. Up to 100 ' +
+      'pages per call; when truncated is true, call again with skip set to nextSkip. Pages in deny-listed sections or ' +
+      'notebooks are dropped after paging, so a page can hold fewer than 100 items, or none, and still have more after it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2595,9 +2596,10 @@ const tools: ToolDef[] = [
       const result = await request.get();
       // The section was checked above; the per-page filter also covers a page
       // Graph returns without its parents.
-      const allowed = await filterDeniedPages(tenantId, session.userId, result.value ?? []);
+      const raw = result.value ?? [];
+      const allowed = await filterDeniedPages(tenantId, session.userId, raw);
       const { items, count, limit, truncated } = toEnvelope(allowed.map(toPageSummary), ONENOTE_PAGE_LIMIT, graphCollectionHasMore(result));
-      return { items, count, limit, truncated };
+      return { items, count, limit, truncated, ...pageContinuation(skip, raw.length, truncated) };
     },
   },
   {
@@ -2633,7 +2635,8 @@ const tools: ToolDef[] = [
       'Find OneNote pages whose title contains the query (case-insensitive), most recently modified first. Graph has no ' +
       'full-text search over page content for work accounts, so only titles are matched. Pass sectionId to search one ' +
       'section; without it every notebook is searched, which Graph can refuse for accounts with very many sections. ' +
-      'Returns the same item shape as list_onenote_pages. Pages in deny-listed sections or notebooks are excluded.',
+      'Returns the same shape as list_onenote_pages, including nextSkip when truncated is true. Pages in deny-listed ' +
+      'sections or notebooks are excluded.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2665,9 +2668,10 @@ const tools: ToolDef[] = [
         .top(ONENOTE_PAGE_LIMIT);
       if (skip > 0) request = request.skip(skip);
       const result = await request.get();
-      const allowed = await filterDeniedPages(tenantId, session.userId, result.value ?? []);
+      const raw = result.value ?? [];
+      const allowed = await filterDeniedPages(tenantId, session.userId, raw);
       const { items, count, limit, truncated } = toEnvelope(allowed.map(toPageSummary), ONENOTE_PAGE_LIMIT, graphCollectionHasMore(result));
-      return { items, count, limit, truncated };
+      return { items, count, limit, truncated, ...pageContinuation(skip, raw.length, truncated) };
     },
   },
   {
