@@ -1263,6 +1263,57 @@ export const TOOLS: McpTool[] = [
     method: 'POST',
   },
   {
+    name: 'list_onenote_pages',
+    description:
+      'List the pages in a OneNote section, most recently modified first, with title, id and last-modified time. ' +
+      'Up to 100 per call; when truncated is true, pass the returned nextSkip as skip to read further.',
+    parameters: [
+      { name: 'sectionId', type: 'string', description: 'Section ID (from list_sections).', required: true },
+      { name: 'skip', type: 'number', description: 'Pages to skip, for reading past the first 100 (default 0).', required: false },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
+    name: 'read_onenote_page',
+    description:
+      "Read a OneNote page's content as HTML (with element ids update_onenote_page can target) or as plain text.",
+    parameters: [
+      { name: 'pageId', type: 'string', description: 'Page ID (from list_onenote_pages or search_onenote_pages).', required: true },
+      { name: 'format', type: 'string', description: "'html' (default) or 'text'.", required: false, enum: ['html', 'text'] },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
+    name: 'search_onenote_pages',
+    description:
+      'Find OneNote pages whose title contains the query, in one section or every notebook. Titles only: Graph has no ' +
+      'full-text page search for work accounts. When truncated is true, pass the returned nextSkip as skip to read further.',
+    parameters: [
+      { name: 'query', type: 'string', description: 'Text to look for in page titles.', required: true },
+      { name: 'sectionId', type: 'string', description: 'Section ID to search within (omit to search every notebook).', required: false },
+      { name: 'skip', type: 'number', description: 'Matches to skip, for reading past the first 100 (default 0).', required: false },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
+    name: 'update_onenote_page',
+    description:
+      "Change part of a OneNote page: append, prepend, insert or replace HTML at a target ('body', 'title', '#<data-id>', " +
+      'or an element id from read_onenote_page).',
+    parameters: [
+      { name: 'pageId', type: 'string', description: 'Page ID (from list_onenote_pages or search_onenote_pages).', required: true },
+      { name: 'target', type: 'string', description: "'body', 'title', '#<data-id>', or an element id such as 'div:{guid}{40}'.", required: true },
+      { name: 'action', type: 'string', description: 'append, insert, prepend or replace.', required: true, enum: ['append', 'insert', 'prepend', 'replace'] },
+      { name: 'content', type: 'string', description: 'HTML to write (plain text when the target is the title).', required: true },
+      { name: 'position', type: 'string', description: "'after' (default) or 'before', relative to the target.", required: false, enum: ['after', 'before'] },
+    ],
+    endpoint: '/api/mcp',
+    method: 'POST',
+  },
+  {
     name: 'list_planner_plans',
     description:
       "List Microsoft Planner plans: those shared with the signed-in user, or those owned by a Microsoft 365 group (a Team's ID is its group ID). Plans on the deny list are excluded.",
