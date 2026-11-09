@@ -94,7 +94,7 @@ const WRITE_TOOLS = [
   'create_calendar', 'create_event', 'update_event', 'delete_event', 'move_event', 'respond_to_event',
   'create_contact', 'update_contact', 'delete_contact',
   'create_contact_folder', 'create_contacts_batch',
-  'create_notebook', 'create_section', 'create_onenote_page',
+  'create_notebook', 'create_section', 'create_onenote_page', 'update_onenote_page',
   'send_chat_message', 'send_channel_message',
   'create_planner_plan', 'create_planner_bucket', 'update_planner_bucket',
   'create_planner_task', 'update_planner_task', 'delete_planner_task',

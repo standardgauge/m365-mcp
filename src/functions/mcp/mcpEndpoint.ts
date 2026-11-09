@@ -64,6 +64,11 @@ import { collectPage } from '../../services/graphPaging.js';
 import { readMailAttachment } from '../../services/mailAttachmentContent.js';
 import { readDriveFileContent } from '../../services/driveFileRead.js';
 import {
+  ONENOTE_PAGE_LIMIT, ONENOTE_UPDATE_ACTIONS, ONENOTE_UPDATE_POSITIONS, PAGE_PARENT_EXPAND, PAGE_SELECT,
+  assertPageAllowed, assertSectionAllowed, filterDeniedPages, odataString, onenoteHtmlToText, readPageHtml,
+  skipArg, toPageSummary, updateTarget,
+} from '../../services/onenote.js';
+import {
   PLANNER_STATUS_VALUES,
   PLANNER_PRIORITY_VALUES,
   assertPlanAllowed,
@@ -152,6 +157,8 @@ const TOOL_SERVICE_MAP: Record<string, string> = {
   // OneNote
   list_notebooks: 'onenote', create_notebook: 'onenote', list_sections: 'onenote',
   create_section: 'onenote', create_onenote_page: 'onenote',
+  list_onenote_pages: 'onenote', read_onenote_page: 'onenote', search_onenote_pages: 'onenote',
+  update_onenote_page: 'onenote',
   // Teams
   list_teams: 'teams', list_channels: 'teams',
   send_chat_message: 'teams', send_channel_message: 'teams',
@@ -229,7 +236,7 @@ const WRITE_TOOLS: ReadonlySet<string> = new Set([
   'create_contact', 'update_contact', 'delete_contact',
   'create_contact_folder', 'create_contacts_batch',
   // OneNote
-  'create_notebook', 'create_section', 'create_onenote_page',
+  'create_notebook', 'create_section', 'create_onenote_page', 'update_onenote_page',
   // Teams
   'send_chat_message', 'send_channel_message',
   // Planner
@@ -255,7 +262,7 @@ const OPAQUE_ID_PARAMS: ReadonlySet<string> = new Set([
   'siteId', 'driveId', 'parentId', 'itemId', 'listId',
   'messageId', 'folderId', 'parentFolderId', 'destinationFolderId',
   'destinationParentFolderId', 'attachmentId', 'mailboxId',
-  'calendarId', 'targetCalendarId', 'eventId', 'contactId', 'notebookId', 'sectionId',
+  'calendarId', 'targetCalendarId', 'eventId', 'contactId', 'notebookId', 'sectionId', 'pageId',
   'teamId', 'channelId', 'chatId', 'messageOrEventId',
   'groupId', 'planId', 'bucketId', 'taskId',
 ]);
@@ -2558,6 +2565,149 @@ const tools: ToolDef[] = [
       return { id: result.id, title: result.title, contentUrl: result.contentUrl, status: 'created' };
     },
   },
+  {
+    name: 'list_onenote_pages',
+    description:
+      'List the pages in a OneNote section, most recently modified first. Returns { items: [{ id, title, createdDateTime, ' +
+      'lastModifiedDateTime, sectionId, sectionName, notebookId, notebookName }], count, limit, truncated }. Up to 100 pages per ' +
+      'call; when truncated is true, call again with skip set to the number already read.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sectionId: prop('string', 'Section ID (from list_sections)'),
+        skip: prop('number', 'Pages to skip, for reading past the first 100 (default 0)'),
+      },
+      required: ['sectionId'],
+    },
+    handler: async (args, session) => {
+      const skip = skipArg(args.skip);
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      await assertSectionAllowed(graph, tenantId, session.userId, args.sectionId);
+      let request = graph
+        .api(`/me/onenote/sections/${encodeGraphId(args.sectionId, 'sectionId')}/pages`)
+        .select(PAGE_SELECT)
+        .expand(PAGE_PARENT_EXPAND)
+        .orderby('lastModifiedDateTime desc')
+        .top(ONENOTE_PAGE_LIMIT);
+      if (skip > 0) request = request.skip(skip);
+      const result = await request.get();
+      // The section was checked above; the per-page filter also covers a page
+      // Graph returns without its parents.
+      const allowed = await filterDeniedPages(tenantId, session.userId, result.value ?? []);
+      const { items, count, limit, truncated } = toEnvelope(allowed.map(toPageSummary), ONENOTE_PAGE_LIMIT, graphCollectionHasMore(result));
+      return { items, count, limit, truncated };
+    },
+  },
+  {
+    name: 'read_onenote_page',
+    description:
+      "Read a OneNote page's content. format 'html' (default) returns the page HTML with element ids (data-id and generated " +
+      "id attributes) that update_onenote_page can target; format 'text' returns plain text with the title first. Returns " +
+      '{ id, title, lastModifiedDateTime, sectionId, sectionName, notebookId, notebookName, format, content }. Images and ' +
+      'attachments appear as resource URLs in the HTML, not inline.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageId: prop('string', 'Page ID (from list_onenote_pages or search_onenote_pages)'),
+        format: prop('string', "'html' (default) or 'text'", { enum: ['html', 'text'] }),
+      },
+      required: ['pageId'],
+    },
+    handler: async (args, session) => {
+      const format = args.format ?? 'html';
+      if (format !== 'html' && format !== 'text') throw new ToolCallError("format must be 'html' or 'text'");
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      const page = await assertPageAllowed(graph, tenantId, session.userId, args.pageId);
+      const html = await readPageHtml(graph, args.pageId, format === 'html');
+      const { createdDateTime: _created, ...meta } = page;
+      return { ...meta, format, content: format === 'text' ? onenoteHtmlToText(html) : html };
+    },
+  },
+  {
+    name: 'search_onenote_pages',
+    description:
+      'Find OneNote pages whose title contains the query (case-insensitive), most recently modified first. Graph has no ' +
+      'full-text search over page content for work accounts, so only titles are matched. Pass sectionId to search one ' +
+      'section; without it every notebook is searched, which Graph can refuse for accounts with very many sections. ' +
+      'Returns the same item shape as list_onenote_pages. Pages in deny-listed sections or notebooks are excluded.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: prop('string', 'Text to look for in page titles'),
+        sectionId: prop('string', 'Section ID to search within (from list_sections; omit to search every notebook)'),
+        skip: prop('number', 'Matches to skip, for reading past the first 100 (default 0)'),
+      },
+      required: ['query'],
+    },
+    handler: async (args, session) => {
+      const query = typeof args.query === 'string' ? args.query.trim() : '';
+      if (!query) throw new ToolCallError('query is required');
+      if (query.length > 255) throw new ToolCallError('query must be 255 characters or fewer');
+      const skip = skipArg(args.skip);
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      let base = '/me/onenote/pages';
+      if (args.sectionId) {
+        await assertSectionAllowed(graph, tenantId, session.userId, args.sectionId);
+        base = `/me/onenote/sections/${encodeGraphId(args.sectionId, 'sectionId')}/pages`;
+      }
+      let request = graph
+        .api(base)
+        .filter(`contains(tolower(title),${odataString(query.toLowerCase())})`)
+        .select(PAGE_SELECT)
+        .expand(PAGE_PARENT_EXPAND)
+        .orderby('lastModifiedDateTime desc')
+        .top(ONENOTE_PAGE_LIMIT);
+      if (skip > 0) request = request.skip(skip);
+      const result = await request.get();
+      const allowed = await filterDeniedPages(tenantId, session.userId, result.value ?? []);
+      const { items, count, limit, truncated } = toEnvelope(allowed.map(toPageSummary), ONENOTE_PAGE_LIMIT, graphCollectionHasMore(result));
+      return { items, count, limit, truncated };
+    },
+  },
+  {
+    name: 'update_onenote_page',
+    description:
+      "Change part of a OneNote page (Graph PATCH /pages/{id}/content). target is 'body', 'title', '#<data-id>', or an element " +
+      "id from read_onenote_page in html format. action 'append' adds content as the target's last child, 'prepend' as its " +
+      "first child, 'insert' as a sibling (position 'after', the default, or 'before'), and 'replace' swaps the target for " +
+      "content. The body takes append and prepend only; the title takes replace only, with plain text. Returns " +
+      '{ status: "updated", pageId }.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageId: prop('string', 'Page ID (from list_onenote_pages or search_onenote_pages)'),
+        target: prop('string', "'body', 'title', '#<data-id>', or an element id such as 'div:{guid}{40}'"),
+        action: prop('string', 'append, insert, prepend or replace', { enum: [...ONENOTE_UPDATE_ACTIONS] }),
+        content: prop('string', 'HTML to write (plain text when the target is the title)'),
+        position: prop('string', "'after' (default) or 'before', relative to the target", { enum: [...ONENOTE_UPDATE_POSITIONS] }),
+      },
+      required: ['pageId', 'target', 'action', 'content'],
+    },
+    handler: async (args, session) => {
+      const target = updateTarget(args.target);
+      if (!(ONENOTE_UPDATE_ACTIONS as readonly string[]).includes(args.action)) {
+        throw new ToolCallError(`action must be one of ${ONENOTE_UPDATE_ACTIONS.join(', ')}`);
+      }
+      if (typeof args.content !== 'string') throw new ToolCallError('content is required');
+      if (args.position !== undefined && !(ONENOTE_UPDATE_POSITIONS as readonly string[]).includes(args.position)) {
+        throw new ToolCallError("position must be 'after' or 'before'");
+      }
+      const token = await getValidAccessTokenForSession(session);
+      const graph = createGraphClient(token);
+      const tenantId = getTenantIdFromSession(session);
+      await assertPageAllowed(graph, tenantId, session.userId, args.pageId);
+      const command: Record<string, string> = { target, action: args.action, content: args.content };
+      if (args.position) command.position = args.position;
+      await graph.api(`/me/onenote/pages/${encodeGraphId(args.pageId, 'pageId')}/content`).patch([command]);
+      return { status: 'updated', pageId: args.pageId };
+    },
+  },
   // Teams
   {
     name: 'list_teams',
@@ -3299,6 +3449,9 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
         toolArgs.mailboxId,
         toolArgs.destinationFolderId,
         toolArgs.contactId,
+        toolArgs.notebookId,
+        toolArgs.sectionId,
+        toolArgs.pageId,
         toolArgs.teamId,
         toolArgs.channelId,
         toolArgs.chatId,
@@ -3339,6 +3492,7 @@ async function handleJsonRpc(msg: any, auth: { userId: string; session: any } | 
           toolArgs.siteId, toolArgs.driveId, toolArgs.listId, toolArgs.itemId,
           toolArgs.messageId, toolArgs.eventId, toolArgs.messageOrEventId, toolArgs.folderId,
           toolArgs.attachmentId, toolArgs.mailboxId,
+          toolArgs.notebookId, toolArgs.sectionId, toolArgs.pageId,
           toolArgs.groupId, toolArgs.planId, toolArgs.bucketId, toolArgs.taskId, toolArgs.path,
         ].filter(Boolean).join('/') || undefined;
         logAccess({
