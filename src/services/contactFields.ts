@@ -157,6 +157,20 @@ export function composeDisplayName(args: Record<string, any>): string | undefine
 }
 
 /**
+ * The error a create must be refused with when it has nothing to name the
+ * contact by: no non-blank `displayName`, and nothing {@link composeDisplayName}
+ * can use. Undefined when the create is sendable. Every create surface
+ * (create_contact over MCP and REST, create_contacts_batch) checks this before
+ * calling Graph, so a create never goes out without a display name.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function newContactNameError(args: Record<string, any>): string | undefined {
+  const explicit = typeof args.displayName === 'string' ? args.displayName.trim() : '';
+  if (explicit || composeDisplayName(args)) return undefined;
+  return 'a contact needs a name: displayName, givenName, middleName, surname or companyName must be non-blank';
+}
+
+/**
  * Build the Graph body for a new contact. Graph does not derive `displayName`
  * for a contact created through the API, and a contact without one is invisible
  * to search_contacts' displayName filter and blank in Outlook's contact list. So
@@ -172,8 +186,9 @@ export function buildNewContactBody(args: Record<string, any>): Record<string, u
     contact.displayName = given;
   } else {
     const composed = composeDisplayName(args);
-    if (composed) contact.displayName = composed;
-    else delete contact.displayName;
+    // Callers gate on newContactNameError first; this is the backstop.
+    if (!composed) throw new Error(newContactNameError(args));
+    contact.displayName = composed;
   }
   return contact;
 }
@@ -236,8 +251,9 @@ export const CONTACT_BATCH_LIMIT = 20;
 
 /**
  * Create contacts via Graph `$batch`, chunked at the 20-op-per-request limit
- *. Entries missing `givenName` are rejected client-side — parity with
- * create_contact — without consuming a Graph request. Result order matches input
+ *. Entries missing `givenName`, or with no non-blank name to compose a
+ * display name from ({@link newContactNameError}), are rejected client-side —
+ * parity with create_contact — without consuming a Graph request. Result order matches input
  * order; Graph may return sub-responses out of order, so they are matched by the
  * per-chunk id assigned here. A whole-chunk failure (network/token) marks every
  * entry in that chunk failed and continues with the next chunk.
@@ -256,6 +272,9 @@ export async function runContactBatch(
     if (!c || typeof c !== 'object' || c.givenName === undefined || c.givenName === null || c.givenName === '') {
       // eslint-disable-next-line security/detect-object-injection -- index is the forEach position in contacts
       results[index] = { index, status: 'failed', error: 'givenName is required' };
+    } else if (newContactNameError(c)) {
+      // eslint-disable-next-line security/detect-object-injection -- index is the forEach position in contacts
+      results[index] = { index, status: 'failed', error: newContactNameError(c) };
     } else {
       sendable.push(index);
     }

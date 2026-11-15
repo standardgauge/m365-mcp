@@ -173,6 +173,7 @@ jest.mock('@azure/functions', () => ({
 
 import { app } from '@azure/functions';
 import '../functions/mcp/mcpEndpoint.js';
+import { buildNewContactBody, newContactNameError } from '../services/contactFields.js';
 
 interface HttpRegistration {
   handler: (req: HttpRequest, context: InvocationContext) => Promise<{ status: number; jsonBody?: unknown }>;
@@ -497,6 +498,24 @@ describe('contact displayName', () => {
     expect(postedBody().displayName).toBe('Fabrikam');
   });
 
+  it('create_contact refuses a create whose every name field is blank, without calling Graph', async () => {
+    for (const args of [
+      { givenName: '   ' },
+      { givenName: ' ', middleName: '\t', surname: '  ', companyName: ' ', displayName: '   ' },
+    ]) {
+      const res = await callTool('create_contact', args);
+      const { isError, text } = toolResult(res);
+      expect(isError).toBe(true);
+      expect(text).toMatch(/needs a name/);
+    }
+    expect(graphCalls.filter((c) => c.method === 'POST')).toHaveLength(0);
+  });
+
+  it('create_contact accepts a whitespace givenName when an explicit displayName names it', async () => {
+    await callTool('create_contact', { givenName: '  ', displayName: ' Fabrikam Front Desk ' });
+    expect(postedBody().displayName).toBe('Fabrikam Front Desk');
+  });
+
   it('update_contact writes displayName and does not compose one when it is omitted', async () => {
     await callTool('update_contact', { contactId: 'contact-1', displayName: 'Jane Doe-Smith' });
     expect((graphCalls.find((c) => c.method === 'PATCH')!.body as Record<string, unknown>).displayName).toBe('Jane Doe-Smith');
@@ -516,6 +535,26 @@ describe('contact displayName', () => {
     const requests = (graphCalls.find((c) => c.path === '/$batch')!.body as { requests: Array<{ body: Record<string, unknown> }> }).requests;
     expect(requests[0].body.displayName).toBe('Annie Lee');
     expect(requests[1].body.displayName).toBe('Bo Ng');
+  });
+
+  it('create_contacts_batch fails an all-blank entry client-side and sends the rest', async () => {
+    const res = await callTool('create_contacts_batch', {
+      contacts: [{ givenName: 'Ann', surname: 'Lee' }, { givenName: '   ', surname: ' ' }],
+    });
+    const out = toolResult(res).parsed as { created: number; failed: number; results: Array<{ index: number; status: string; error?: string }> };
+    expect(out.created).toBe(1);
+    expect(out.failed).toBe(1);
+    expect(out.results.find((r) => r.index === 1)).toMatchObject({ status: 'failed', error: expect.stringMatching(/needs a name/) });
+    const requests = (graphCalls.find((c) => c.path === '/$batch')!.body as { requests: Array<{ body: Record<string, unknown> }> }).requests;
+    expect(requests).toHaveLength(1);
+    expect(requests[0].body.displayName).toBe('Ann Lee');
+  });
+
+  it('buildNewContactBody never returns a body without a displayName', () => {
+    expect(buildNewContactBody({ givenName: 'Jane' }).displayName).toBe('Jane');
+    expect(() => buildNewContactBody({ givenName: '   ' })).toThrow(/needs a name/);
+    expect(newContactNameError({ givenName: '   ' })).toMatch(/needs a name/);
+    expect(newContactNameError({ givenName: ' ', companyName: 'Fabrikam' })).toBeUndefined();
   });
 
   it('a full-name query finds contacts created and updated through every write tool', async () => {

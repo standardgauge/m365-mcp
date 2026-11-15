@@ -41,6 +41,7 @@ import { searchMail, listMessages, toMessageSummary, outcomeMeta, type MessageSu
 import {
   buildContactBody,
   buildNewContactBody,
+  newContactNameError,
   shapeContact,
   CONTACT_SELECT_FIELDS,
   ADDRESS_SCHEMA,
@@ -2341,6 +2342,8 @@ const tools: ToolDef[] = [
       required: ['givenName'],
     },
     handler: async (args, session) => {
+      const nameError = newContactNameError(args);
+      if (nameError) throw new ToolCallError(nameError);
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
