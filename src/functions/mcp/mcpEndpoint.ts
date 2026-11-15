@@ -40,6 +40,8 @@ import type { Client } from '@microsoft/microsoft-graph-client';
 import { searchMail, listMessages, toMessageSummary, outcomeMeta, type MessageSummary } from '../../services/mailSearch.js';
 import {
   buildContactBody,
+  buildNewContactBody,
+  newContactNameError,
   shapeContact,
   CONTACT_SELECT_FIELDS,
   ADDRESS_SCHEMA,
@@ -337,6 +339,7 @@ const ATTACHMENTS_SCHEMA = {
 // CONTACT_SELECT_FIELDS / shapeContact so written fields round-trip through
 // search_contacts.
 const CONTACT_FIELD_PROPS: Record<string, unknown> = {
+  displayName: prop('string', 'Display name, e.g. "Jane Q. Doe". On create, omit it to have it composed from given, middle and surname (or companyName when there is no name)'),
   givenName: prop('string', 'First name'),
   surname: prop('string', 'Last name'),
   middleName: prop('string', 'Middle name'),
@@ -2339,6 +2342,8 @@ const tools: ToolDef[] = [
       required: ['givenName'],
     },
     handler: async (args, session) => {
+      const nameError = newContactNameError(args);
+      if (nameError) throw new ToolCallError(nameError);
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const tenantId = getTenantIdFromSession(session);
@@ -2349,7 +2354,7 @@ const tools: ToolDef[] = [
         const defaultFolder = await resolveDefaultContactFolder(graph, session.userId);
         if (defaultFolder && await isPathDenied(tenantId, session.userId, 'contacts', defaultFolder)) throw new ToolCallError('Access to the default contacts folder is restricted by the deny list');
       }
-      const contact = buildContactBody(args);
+      const contact = buildNewContactBody(args);
       const result = await graph.api(contactsApiPath(args.folderId)).post(contact);
       return { id: result.id, displayName: result.displayName, status: 'created' };
     },

@@ -22,6 +22,7 @@ export interface PhysicalAddress {
 
 /** Tool-facing contact fields accepted by create/update/batch. */
 export interface ContactInput {
+  displayName?: string;
   givenName?: string;
   surname?: string;
   middleName?: string;
@@ -100,6 +101,7 @@ export function buildContactBody(args: Record<string, any>): Record<string, unkn
   const contact: Record<string, unknown> = {};
 
   const stringFields = [
+    'displayName',
     'givenName',
     'surname',
     'middleName',
@@ -136,6 +138,58 @@ export function buildContactBody(args: Record<string, any>): Record<string, unkn
   const other = pickAddress(args.otherAddress);
   if (other) contact.otherAddress = other;
 
+  return contact;
+}
+
+/**
+ * Compose a display name from the name parts, the way Outlook does for a
+ * contact created in its own UI: given, middle and surname joined by spaces,
+ * falling back to the company name. Returns undefined when there is nothing to
+ * compose from.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function composeDisplayName(args: Record<string, any>): string | undefined {
+  const part = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+  const name = [part(args.givenName), part(args.middleName), part(args.surname)].filter(Boolean).join(' ');
+  if (name) return name;
+  const company = part(args.companyName);
+  return company || undefined;
+}
+
+/**
+ * The error a create must be refused with when it has nothing to name the
+ * contact by: no non-blank `displayName`, and nothing {@link composeDisplayName}
+ * can use. Undefined when the create is sendable. Every create surface
+ * (create_contact over MCP and REST, create_contacts_batch) checks this before
+ * calling Graph, so a create never goes out without a display name.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function newContactNameError(args: Record<string, any>): string | undefined {
+  const explicit = typeof args.displayName === 'string' ? args.displayName.trim() : '';
+  if (explicit || composeDisplayName(args)) return undefined;
+  return 'a contact needs a name: displayName, givenName, middleName, surname or companyName must be non-blank';
+}
+
+/**
+ * Build the Graph body for a new contact. Graph does not derive `displayName`
+ * for a contact created through the API, and a contact without one is invisible
+ * to search_contacts' displayName filter and blank in Outlook's contact list. So
+ * when the caller gives no display name (or a blank one) it is composed with
+ * {@link composeDisplayName}. Updates use {@link buildContactBody} directly:
+ * a PATCH changes only what the caller sent.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function buildNewContactBody(args: Record<string, any>): Record<string, unknown> {
+  const contact = buildContactBody(args);
+  const given = typeof contact.displayName === 'string' ? contact.displayName.trim() : '';
+  if (given) {
+    contact.displayName = given;
+  } else {
+    const composed = composeDisplayName(args);
+    // Callers gate on newContactNameError first; this is the backstop.
+    if (!composed) throw new Error(newContactNameError(args));
+    contact.displayName = composed;
+  }
   return contact;
 }
 
@@ -197,8 +251,9 @@ export const CONTACT_BATCH_LIMIT = 20;
 
 /**
  * Create contacts via Graph `$batch`, chunked at the 20-op-per-request limit
- *. Entries missing `givenName` are rejected client-side — parity with
- * create_contact — without consuming a Graph request. Result order matches input
+ *. Entries missing `givenName`, or with no non-blank name to compose a
+ * display name from ({@link newContactNameError}), are rejected client-side —
+ * parity with create_contact — without consuming a Graph request. Result order matches input
  * order; Graph may return sub-responses out of order, so they are matched by the
  * per-chunk id assigned here. A whole-chunk failure (network/token) marks every
  * entry in that chunk failed and continues with the next chunk.
@@ -217,6 +272,9 @@ export async function runContactBatch(
     if (!c || typeof c !== 'object' || c.givenName === undefined || c.givenName === null || c.givenName === '') {
       // eslint-disable-next-line security/detect-object-injection -- index is the forEach position in contacts
       results[index] = { index, status: 'failed', error: 'givenName is required' };
+    } else if (newContactNameError(c)) {
+      // eslint-disable-next-line security/detect-object-injection -- index is the forEach position in contacts
+      results[index] = { index, status: 'failed', error: newContactNameError(c) };
     } else {
       sendable.push(index);
     }
@@ -230,7 +288,7 @@ export async function runContactBatch(
       url,
       headers: { 'Content-Type': 'application/json' },
       // eslint-disable-next-line security/detect-object-injection -- originalIndex is an array position collected from forEach above
-      body: buildContactBody(contacts[originalIndex]),
+      body: buildNewContactBody(contacts[originalIndex]),
     }));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let responses: any[] = [];
