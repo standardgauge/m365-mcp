@@ -35,27 +35,67 @@ const graphCalls: GraphCall[] = [];
 let contactFoldersValue: unknown[] = [];
 let contactsGetValue: unknown[] = [];
 
+// Optional in-memory contacts store for round-trip tests. When set, writes to
+// /me/contacts land in it and a GET evaluates search_contacts' OData
+// startswith() filter against it, the way Graph would (case-insensitive, and a
+// contact with no displayName stored never matches on displayName).
+let contactStore: Array<Record<string, unknown>> | null = null;
+
+function storeCreate(body: Record<string, unknown>): Record<string, unknown> {
+  const stored = { ...body, id: `stored-${contactStore!.length}`, parentFolderId: 'root' };
+  contactStore!.push(stored);
+  return stored;
+}
+
+function matchesFilter(c: Record<string, unknown>, filter: string | undefined): boolean {
+  if (!filter) return true;
+  const clauses = [...filter.matchAll(/startswith\((\w+),'((?:[^']|'')*)'\)/g)];
+  return clauses.some(([, field, raw]) => {
+    const v = c[field];
+    const needle = raw.replace(/''/g, "'").toLowerCase();
+    return typeof v === 'string' && v.toLowerCase().startsWith(needle);
+  });
+}
+
 function makeChain(path: string) {
   const chain: Record<string, unknown> = {};
-  for (const m of ['select', 'top', 'orderby', 'filter', 'expand', 'header']) chain[m] = () => chain;
+  let filterExpr: string | undefined;
+  for (const m of ['select', 'top', 'orderby', 'expand', 'header']) chain[m] = () => chain;
+  chain.filter = (f: string) => {
+    filterExpr = f;
+    return chain;
+  };
   chain.get = () => {
     graphCalls.push({ path, method: 'GET' });
     if (path === '/me/contactFolders') return Promise.resolve({ value: contactFoldersValue });
+    if (contactStore && path === '/me/contacts') {
+      return Promise.resolve({ value: contactStore.filter((c) => matchesFilter(c, filterExpr)) });
+    }
     return Promise.resolve({ value: contactsGetValue });
   };
   chain.post = (body?: unknown) => {
     graphCalls.push({ path, method: 'POST', body });
     if (path === '/$batch') {
-      const requests = ((body as { requests?: Array<{ id: string }> })?.requests) ?? [];
+      const requests = ((body as { requests?: Array<{ id: string; body?: Record<string, unknown> }> })?.requests) ?? [];
       return Promise.resolve({
-        responses: requests.map((r) => ({ id: r.id, status: 201, body: { id: `new-${r.id}`, displayName: 'Created' } })),
+        responses: requests.map((r) => ({
+          id: r.id,
+          status: 201,
+          body: contactStore ? storeCreate(r.body ?? {}) : { id: `new-${r.id}`, displayName: 'Created' },
+        })),
       });
     }
     const b = (body ?? {}) as Record<string, unknown>;
+    if (contactStore && path === '/me/contacts') return Promise.resolve(storeCreate(b));
     return Promise.resolve({ id: 'new-id', displayName: b.displayName ?? 'New', parentFolderId: b.parentFolderId ?? null });
   };
   chain.patch = (body?: unknown) => {
     graphCalls.push({ path, method: 'PATCH', body });
+    const target = contactStore?.find((c) => path === `/me/contacts/${c.id as string}`);
+    if (target) {
+      Object.assign(target, body);
+      return Promise.resolve(target);
+    }
     return Promise.resolve({ id: 'cid', displayName: 'Updated' });
   };
   chain.delete = () => {
@@ -171,6 +211,7 @@ beforeEach(() => {
   graphCalls.length = 0;
   contactFoldersValue = [];
   contactsGetValue = [];
+  contactStore = null;
   mockAuthenticateRequest.mockResolvedValue(AUTH);
   mockGetValidAccessTokenForSession.mockResolvedValue('access-token');
   mockGetTenantIdFromSession.mockReturnValue(TENANT);
@@ -423,6 +464,82 @@ describe('create_contacts_batch', () => {
   it('errors when contacts is empty', async () => {
     const res = await callTool('create_contacts_batch', { contacts: [] });
     expect(toolResult(res).isError).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// displayName — written by all three tools, composed on create when omitted,
+// and found by a full-name search_contacts query
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('contact displayName', () => {
+  const postedBody = () =>
+    graphCalls.find((c) => c.method === 'POST' && c.path === '/me/contacts')!.body as Record<string, unknown>;
+
+  it('create_contact writes an explicit displayName to Graph', async () => {
+    const res = await callTool('create_contact', { givenName: 'Jane', surname: 'Doe', displayName: 'Dr. Jane Doe' });
+    expect(toolResult(res).isError).toBe(false);
+    expect(postedBody().displayName).toBe('Dr. Jane Doe');
+  });
+
+  it('create_contact composes displayName from given, middle and surname when omitted', async () => {
+    await callTool('create_contact', { givenName: 'Jane', middleName: 'Q', surname: 'Doe' });
+    expect(postedBody().displayName).toBe('Jane Q Doe');
+  });
+
+  it('create_contact composes over a blank displayName rather than sending it', async () => {
+    await callTool('create_contact', { givenName: ' Jane ', surname: 'Doe', displayName: '   ' });
+    expect(postedBody().displayName).toBe('Jane Doe');
+  });
+
+  it('create_contact falls back to companyName when no name part is usable', async () => {
+    await callTool('create_contact', { givenName: '  ', companyName: 'Fabrikam' });
+    expect(postedBody().displayName).toBe('Fabrikam');
+  });
+
+  it('update_contact writes displayName and does not compose one when it is omitted', async () => {
+    await callTool('update_contact', { contactId: 'contact-1', displayName: 'Jane Doe-Smith' });
+    expect((graphCalls.find((c) => c.method === 'PATCH')!.body as Record<string, unknown>).displayName).toBe('Jane Doe-Smith');
+
+    graphCalls.length = 0;
+    await callTool('update_contact', { contactId: 'contact-1', surname: 'Smith' });
+    expect(graphCalls.find((c) => c.method === 'PATCH')!.body).not.toHaveProperty('displayName');
+  });
+
+  it('create_contacts_batch writes explicit displayNames and composes missing ones', async () => {
+    await callTool('create_contacts_batch', {
+      contacts: [
+        { givenName: 'Ann', surname: 'Lee', displayName: 'Annie Lee' },
+        { givenName: 'Bo', surname: 'Ng' },
+      ],
+    });
+    const requests = (graphCalls.find((c) => c.path === '/$batch')!.body as { requests: Array<{ body: Record<string, unknown> }> }).requests;
+    expect(requests[0].body.displayName).toBe('Annie Lee');
+    expect(requests[1].body.displayName).toBe('Bo Ng');
+  });
+
+  it('a full-name query finds contacts created and updated through every write tool', async () => {
+    contactStore = [];
+    await callTool('create_contact', { givenName: 'John', surname: 'Andersen' });
+    await callTool('create_contact', { givenName: 'Mary', surname: 'Okafor', displayName: 'Mary Okafor' });
+    await callTool('create_contacts_batch', { contacts: [{ givenName: 'Wei', surname: 'Zhang' }] });
+    // A card that predates the fix: stored with no displayName at all.
+    contactStore.push({ id: 'legacy', givenName: 'Lena', surname: 'Fischer', parentFolderId: 'root' });
+
+    const names = async (q: string) => {
+      const res = await callTool('search_contacts', { q });
+      return (toolResult(res).parsed as { contacts: Array<{ displayName?: string }> }).contacts.map((c) => c.displayName);
+    };
+
+    expect(await names('John Andersen')).toEqual(['John Andersen']);
+    expect(await names('Mary Okafor')).toEqual(['Mary Okafor']);
+    expect(await names('Wei Zhang')).toEqual(['Wei Zhang']);
+    // The defect this guards against: no displayName, so a full-name query misses.
+    expect(await names('Lena Fischer')).toEqual([]);
+
+    // update_contact backfills it, and the same query then finds the card.
+    await callTool('update_contact', { contactId: 'legacy', displayName: 'Lena Fischer' });
+    expect(await names('Lena Fischer')).toEqual(['Lena Fischer']);
   });
 });
 

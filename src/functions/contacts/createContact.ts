@@ -7,7 +7,7 @@ import { resolveDefaultContactFolder } from '../../services/containerResolver.js
 import { assertOpaqueId } from '../../services/opaqueId.js';
 import type { AuthResult } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
-import { buildContactBody, contactsApiPath, type ContactInput } from '../../services/contactFields.js';
+import { buildNewContactBody, contactsApiPath, type ContactInput } from '../../services/contactFields.js';
 
 interface ContactRequest extends ContactInput {
   givenName: string;
@@ -47,7 +47,7 @@ async function createContactHandler(
     }
   }
 
-  const contact = buildContactBody(body);
+  const contact = buildNewContactBody(body);
 
   const result = await graph.api(contactsApiPath(body.folderId)).post(contact);
 

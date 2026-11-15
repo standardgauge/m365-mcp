@@ -22,6 +22,7 @@ export interface PhysicalAddress {
 
 /** Tool-facing contact fields accepted by create/update/batch. */
 export interface ContactInput {
+  displayName?: string;
   givenName?: string;
   surname?: string;
   middleName?: string;
@@ -100,6 +101,7 @@ export function buildContactBody(args: Record<string, any>): Record<string, unkn
   const contact: Record<string, unknown> = {};
 
   const stringFields = [
+    'displayName',
     'givenName',
     'surname',
     'middleName',
@@ -136,6 +138,43 @@ export function buildContactBody(args: Record<string, any>): Record<string, unkn
   const other = pickAddress(args.otherAddress);
   if (other) contact.otherAddress = other;
 
+  return contact;
+}
+
+/**
+ * Compose a display name from the name parts, the way Outlook does for a
+ * contact created in its own UI: given, middle and surname joined by spaces,
+ * falling back to the company name. Returns undefined when there is nothing to
+ * compose from.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function composeDisplayName(args: Record<string, any>): string | undefined {
+  const part = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+  const name = [part(args.givenName), part(args.middleName), part(args.surname)].filter(Boolean).join(' ');
+  if (name) return name;
+  const company = part(args.companyName);
+  return company || undefined;
+}
+
+/**
+ * Build the Graph body for a new contact. Graph does not derive `displayName`
+ * for a contact created through the API, and a contact without one is invisible
+ * to search_contacts' displayName filter and blank in Outlook's contact list. So
+ * when the caller gives no display name (or a blank one) it is composed with
+ * {@link composeDisplayName}. Updates use {@link buildContactBody} directly:
+ * a PATCH changes only what the caller sent.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function buildNewContactBody(args: Record<string, any>): Record<string, unknown> {
+  const contact = buildContactBody(args);
+  const given = typeof contact.displayName === 'string' ? contact.displayName.trim() : '';
+  if (given) {
+    contact.displayName = given;
+  } else {
+    const composed = composeDisplayName(args);
+    if (composed) contact.displayName = composed;
+    else delete contact.displayName;
+  }
   return contact;
 }
 
@@ -230,7 +269,7 @@ export async function runContactBatch(
       url,
       headers: { 'Content-Type': 'application/json' },
       // eslint-disable-next-line security/detect-object-injection -- originalIndex is an array position collected from forEach above
-      body: buildContactBody(contacts[originalIndex]),
+      body: buildNewContactBody(contacts[originalIndex]),
     }));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let responses: any[] = [];
