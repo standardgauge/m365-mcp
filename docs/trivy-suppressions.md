@@ -68,7 +68,7 @@ October 2026 the rolling tag still served .NET 8.0.31, carrying CVE-2026-70188
 `4.1055.250-1-node22` with 8.0.32 was already published. Pinned, this was a
 one-line bump. On the rolling tag the only move was to wait.
 
-It recurred in November 2026 (AP-935). `4.1055.300-3-node22` shipped .NET
+It recurred in November 2026. `4.1055.300-3-node22` shipped .NET
 8.0.33, and CVE-2026-114146, CVE-2026-114147 and CVE-2026-114149 (HIGH, ASP.NET
 Core, fixed in 8.0.34) failed the scan on the first main push after they were
 published. The canary fork's deploy was skipped, so the fork-sync canary gate

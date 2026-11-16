@@ -40,7 +40,7 @@ RUN npm run build:admin
 # sets the Node version. Host tags through 4.1055.250 carried 22.23.3, and
 # 4.1055.300-3 carried 22.23.4, the October 2026 Node security release (read with
 # `node --version`). This one, 4.1055.300-8, is pinned for .NET 8.0.34: -3 and -4
-# ship 8.0.33, which fails the scan on three HIGH ASP.NET Core advisories (AP-935).
+# ship 8.0.33, which fails the scan on three HIGH ASP.NET Core advisories.
 FROM mcr.microsoft.com/azure-functions/node:4.1055.300-8-node22@sha256:b214e061940bea8221e7146c8d279f71c04ad5afb4666d2e12989e1dab326204
 
 # The Azure Functions host defaults to binding privileged port 80. A non-root
