@@ -14,6 +14,8 @@ import {
   attendeeRecipients,
   OutboundPolicyError,
 } from '../../services/outboundPolicy.js';
+import { toGraphAttendees, type GraphAttendee } from '../../services/calendarAttendees.js';
+import { ToolCallError } from '../../services/toolCallError.js';
 
 // Graph's free/busy status enum for an event (event.showAs). Writable on both
 // POST and PATCH; omitting it leaves Graph's own default (busy for timed
@@ -28,7 +30,8 @@ interface EventRequest {
   location?: string;
   body?: string;
   bodyType?: 'text' | 'html';
-  attendees?: string[];
+  /** Each an address (invited as required) or { email, type }; see calendarAttendees.ts. */
+  attendees?: unknown[];
   isAllDay?: boolean;
   showAs?: ShowAs;
   calendarId?: string;
@@ -46,6 +49,17 @@ async function createEventHandler(
     return { status: 400, jsonBody: { error: 'subject, start, and end are required' } };
   }
   if (body.calendarId) assertOpaqueId(body.calendarId, 'calendarId');
+
+  // Parse attendees before any Graph call, so a bad entry is refused up front.
+  let attendees: GraphAttendee[] | undefined;
+  if (body.attendees !== undefined) {
+    try {
+      attendees = toGraphAttendees(body.attendees);
+    } catch (err: unknown) {
+      if (err instanceof ToolCallError) return { status: 400, jsonBody: { error: err.message } };
+      throw err;
+    }
+  }
 
   const accessToken = await getValidAccessTokenForSession(auth.session);
   const graph = createGraphClient(accessToken);
@@ -78,11 +92,8 @@ async function createEventHandler(
       content: body.body,
     };
   }
-  if (body.attendees) {
-    event.attendees = body.attendees.map((addr) => ({
-      emailAddress: { address: addr },
-      type: 'required',
-    }));
+  if (attendees) {
+    event.attendees = attendees;
   }
   // Free/busy status. Only set it when supplied so an omitted showAs leaves
   // Graph's default untouched.

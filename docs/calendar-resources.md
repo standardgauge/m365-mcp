@@ -10,7 +10,11 @@ and **equipment** mailboxes (a pool car, a projector, a camera kit). Both are
 booked the same way, by inviting the mailbox to the event as an attendee of
 type `resource`.
 
-`create_event` and `update_event` take each attendee in one of two forms:
+`create_event` and `update_event` take each attendee in one of two forms. The
+HTTP routes take the same `attendees` body field and apply the same rules:
+`POST /api/calendar/events`, `PATCH /api/calendar/events/{eventId}`, and
+`GET /api/calendar/events/{eventId}` for the response shape below. A malformed
+attendee there is a `400`.
 
 ```json
 {

@@ -6,6 +6,7 @@ import { checkCalendarAccess } from '../../services/calendarAccess.js';
 import { assertOpaqueId, encodeGraphId } from '../../services/opaqueId.js';
 import type { AuthResult } from '../../services/authMiddleware.js';
 import { withSecurity } from '../../services/securityHeaders.js';
+import { shapeAttendee } from '../../services/calendarAttendees.js';
 
 async function getEventHandler(
   request: HttpRequest,
@@ -53,8 +54,8 @@ async function getEventHandler(
       end: event.end,
       location: event.location?.displayName ?? null,
       organizer: event.organizer?.emailAddress?.address ?? null,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      attendees: (event.attendees ?? []).map((a: any) => a.emailAddress?.address),
+      // Type and response, so a caller can see whether a booked resource accepted.
+      attendees: (event.attendees ?? []).map(shapeAttendee),
       isAllDay: event.isAllDay ?? false,
       body: event.body,
       webLink: event.webLink,
