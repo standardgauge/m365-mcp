@@ -381,9 +381,14 @@ export function eventPatchNotifies(patch: Record<string, unknown>): boolean {
   return NOTIFYING_EVENT_FIELDS.some((f) => patch[f] !== undefined);
 }
 
-/** Map `create_event` style attendee strings to recipients. */
-export function attendeeRecipients(addresses: unknown): OutboundRecipient[] {
-  return Array.isArray(addresses) ? addresses.map((a) => ({ address: typeof a === 'string' ? a : null })) : [];
+/** Map `create_event` style attendees (an address, or `{ email, type }`) to recipients. */
+export function attendeeRecipients(attendees: unknown): OutboundRecipient[] {
+  if (!Array.isArray(attendees)) return [];
+  return attendees.map((a) => {
+    if (typeof a === 'string') return { address: a };
+    const email = (a as { email?: unknown } | null)?.email;
+    return { address: typeof email === 'string' ? email : null };
+  });
 }
 
 /** Map Graph `attendees` objects to recipients. */

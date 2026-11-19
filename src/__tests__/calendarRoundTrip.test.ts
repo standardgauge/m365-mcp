@@ -42,6 +42,8 @@ const mockResolveCalendarName = jest.fn<() => Promise<string>>();
 
 interface GraphCall { path: string; verb: string; body?: unknown }
 const graphCalls: GraphCall[] = [];
+// The attendees get_event's lookup returns; a test sets it, beforeEach clears it.
+let eventAttendees: unknown[] = [];
 
 // Route a terminal Graph call to a canned response by path + verb.
 function graphRespond(path: string, verb: string): unknown {
@@ -66,7 +68,7 @@ function graphRespond(path: string, verb: string): unknown {
     end: { dateTime: '2026-09-09T17:15:00.0000000', timeZone: MAILBOX_TZ },
     location: { displayName: null },
     organizer: { emailAddress: { address: 'me@x.com' } },
-    attendees: [],
+    attendees: eventAttendees,
     isAllDay: false,
     body: { contentType: 'text', content: '' },
     webLink: 'https://outlook.office365.com/owa/?itemid=ev',
@@ -186,6 +188,7 @@ function toolResult(res: { jsonBody?: unknown }): { parsed: Record<string, any> 
 beforeEach(() => {
   jest.clearAllMocks();
   graphCalls.length = 0;
+  eventAttendees = [];
   mockAuthenticateRequest.mockResolvedValue(AUTH);
   mockGetValidAccessTokenForSession.mockResolvedValue('access-token');
   mockGetTenantIdFromSession.mockReturnValue('t');
@@ -262,6 +265,60 @@ describe('showAs — free/busy status', () => {
     const patch = graphCalls.find((c) => c.verb === 'patch');
     expect(patch).toBeDefined();
     expect(Object.prototype.hasOwnProperty.call(patch!.body, 'showAs')).toBe(false);
+  });
+});
+
+describe('attendees — typed input and response status', () => {
+  const postBody = () => graphCalls.find((c) => c.verb === 'post' && c.path === '/me/events')?.body as { attendees?: unknown } | undefined;
+  const patchBody = () => graphCalls.find((c) => c.verb === 'patch')?.body as { attendees?: unknown } | undefined;
+
+  it('create_event books a resource mailbox as type resource and keeps bare addresses required', async () => {
+    const res = await callTool('create_event', {
+      subject: 'Road trip', start: '2026-09-09T17:00:00', end: '2026-09-09T19:00:00',
+      attendees: ['a@example.com', { email: 'car@example.com', type: 'resource' }, { email: 'b@example.com', type: 'optional' }],
+    });
+    expect(toolResult(res).isError).toBe(false);
+    expect(postBody()?.attendees).toEqual([
+      { emailAddress: { address: 'a@example.com' }, type: 'required' },
+      { emailAddress: { address: 'car@example.com' }, type: 'resource' },
+      { emailAddress: { address: 'b@example.com' }, type: 'optional' },
+    ]);
+  });
+
+  it('create_event refuses an unknown attendee type before writing anything', async () => {
+    const res = await callTool('create_event', {
+      subject: 'x', start: '2026-09-09T17:00:00', end: '2026-09-09T17:15:00',
+      attendees: [{ email: 'car@example.com', type: 'equipment' }],
+    });
+    const { isError, text } = toolResult(res);
+    expect(isError).toBe(true);
+    expect(text).toContain('required, optional, resource');
+    expect(postBody()).toBeUndefined();
+  });
+
+  it('update_event patches typed attendees', async () => {
+    const res = await callTool('update_event', { eventId: EVENT_ID, attendees: [{ email: 'room@example.com', type: 'resource' }] });
+    expect(toolResult(res).isError).toBe(false);
+    expect(patchBody()?.attendees).toEqual([{ emailAddress: { address: 'room@example.com' }, type: 'resource' }]);
+  });
+
+  it('update_event refuses a malformed attendee before patching', async () => {
+    const res = await callTool('update_event', { eventId: EVENT_ID, attendees: [{ address: 'room@example.com' }] });
+    expect(toolResult(res).isError).toBe(true);
+    expect(patchBody()).toBeUndefined();
+  });
+
+  it("get_event returns each attendee's type and response, so a declined resource is visible", async () => {
+    eventAttendees = [
+      { type: 'required', status: { response: 'accepted', time: '2026-09-01T10:00:00Z' }, emailAddress: { name: 'A', address: 'a@example.com' } },
+      { type: 'resource', status: { response: 'declined', time: '2026-09-01T10:00:05Z' }, emailAddress: { name: 'Pool car', address: 'car@example.com' } },
+    ];
+    const { parsed, isError } = toolResult(await callTool('get_event', { eventId: EVENT_ID }));
+    expect(isError).toBe(false);
+    expect(parsed!.attendees).toEqual([
+      { email: 'a@example.com', name: 'A', type: 'required', response: 'accepted', respondedAt: '2026-09-01T10:00:00Z' },
+      { email: 'car@example.com', name: 'Pool car', type: 'resource', response: 'declined', respondedAt: '2026-09-01T10:00:05Z' },
+    ]);
   });
 });
 

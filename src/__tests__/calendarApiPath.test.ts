@@ -403,3 +403,83 @@ describe('deleteEvent — Graph API path', () => {
     expect(lastGraphCall.path).toBeNull();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Typed attendees on the HTTP routes: the same contract as the MCP
+// create_event / update_event / get_event tools.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('createEvent / updateEvent — typed attendees', () => {
+  const createEvent = getHandler('createEvent');
+  const updateEvent = getHandler('updateEvent');
+  const body = { subject: 'Sync', start: '2026-07-01T10:00:00', end: '2026-07-01T11:00:00' };
+  const typed = ['alice@example.com', { email: 'room1@example.com', type: 'resource' }, { email: 'bob@example.com', type: 'optional' }];
+  const graphTyped = [
+    { emailAddress: { address: 'alice@example.com' }, type: 'required' },
+    { emailAddress: { address: 'room1@example.com' }, type: 'resource' },
+    { emailAddress: { address: 'bob@example.com' }, type: 'optional' },
+  ];
+
+  it('createEvent sends a resource attendee to Graph as type resource', async () => {
+    const res = await createEvent(makeReq({ body: { ...body, attendees: typed } }), ctx);
+    expect(res.status).toBe(201);
+    expect(mockGraphPost).toHaveBeenCalledWith(expect.objectContaining({ attendees: graphTyped }));
+  });
+
+  it('updateEvent patches a resource attendee as type resource', async () => {
+    const res = await updateEvent(makeReq({ params: { eventId: EVENT_ID }, body: { attendees: typed } }), ctx);
+    expect(res.status).toBe(200);
+    expect(mockGraphPatch).toHaveBeenCalledWith({ attendees: graphTyped });
+  });
+
+  it.each([
+    ['an unknown type', [{ email: 'room1@example.com', type: 'room' }]],
+    ['an unknown field', [{ email: 'room1@example.com', address: 'x' }]],
+    ['a missing address', [{ type: 'resource' }]],
+    ['a duplicate', ['a@example.com', { email: 'A@example.com', type: 'optional' }]],
+  ])('createEvent refuses %s with 400 before any Graph call', async (_label, attendees) => {
+    const res = await createEvent(makeReq({ body: { ...body, attendees } }), ctx);
+    expect(res.status).toBe(400);
+    expect(lastGraphCall.path).toBeNull();
+    expect(mockEnforceOutboundPolicy).not.toHaveBeenCalled();
+  });
+
+  it('updateEvent refuses a malformed attendee with 400 before any Graph call', async () => {
+    const res = await updateEvent(
+      makeReq({ params: { eventId: EVENT_ID }, body: { attendees: [{ email: 'room1@example.com', type: 'room' }] } }),
+      ctx,
+    );
+    expect(res.status).toBe(400);
+    expect(lastGraphCall.path).toBeNull();
+    expect(mockEnforceEventUpdatePolicy).not.toHaveBeenCalled();
+  });
+});
+
+describe('getEvent — attendee type and response', () => {
+  const handler = getHandler('getEvent');
+
+  it('returns each attendee with its type and response status', async () => {
+    mockGraphGet.mockResolvedValue({
+      id: EVENT_ID,
+      subject: 'Sync',
+      attendees: [
+        {
+          emailAddress: { address: 'room1@example.com', name: 'Room 1' },
+          type: 'resource',
+          status: { response: 'accepted', time: '2026-07-01T09:00:00Z' },
+        },
+        {
+          emailAddress: { address: 'alice@example.com', name: 'Alice' },
+          type: 'required',
+          status: { response: 'none', time: '0001-01-01T00:00:00Z' },
+        },
+      ],
+    });
+    const res = await handler(makeReq({ params: { eventId: EVENT_ID } }), ctx);
+    expect(res.status).toBe(200);
+    expect((res.jsonBody as { attendees: unknown }).attendees).toEqual([
+      { email: 'room1@example.com', name: 'Room 1', type: 'resource', response: 'accepted', respondedAt: '2026-07-01T09:00:00Z' },
+      { email: 'alice@example.com', name: 'Alice', type: 'required', response: 'none', respondedAt: null },
+    ]);
+  });
+});
