@@ -13,6 +13,9 @@
   kill switch, evidence to preserve, who to notify, post-incident rotation
 - [Calendar access controls](calendar-access-controls.md) — how calendar reads
   and writes are gated
+- [Calendar resources](calendar-resources.md) — booking room and equipment
+  mailboxes as resource attendees, reading their responses, and why Graph
+  cannot list equipment
 - [SharePoint search access controls](sharepoint-search-access-controls.md) —
   how deny lists and the site allow-list apply to both search surfaces
 - [Agent API keys](agent-api-keys.md) — a narrower credential a user mints for

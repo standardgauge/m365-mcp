@@ -139,6 +139,7 @@ jest.mock('@azure/functions', () => ({
 
 import { app } from '@azure/functions';
 import '../functions/mcp/mcpEndpoint.js';
+import { GraphError } from '@microsoft/microsoft-graph-client';
 
 interface HttpRegistration {
   handler: (req: HttpRequest, context: InvocationContext) => Promise<{ status: number; jsonBody?: unknown }>;
@@ -300,6 +301,25 @@ describe('schema sync — manifest catalog vs live tools/list', () => {
     expect(byName['get_schedule'].inputSchema.properties.schedules).toMatchObject({ type: 'array', items: { type: 'string' } });
     expect(byName['find_meeting_times'].inputSchema.properties.attendees).toMatchObject({ type: 'array', items: { type: 'string' } });
   });
+
+  it('create_event / update_event attendees take an address or { email, type } in both surfaces', async () => {
+    const { getManifest } = await import('../mcp/toolManifest.js');
+    const manifest = getManifest() as { tools: Array<{ name: string; inputSchema: any }> };
+    const res = await rpc('tools/list', {});
+    const live = (res.jsonBody as { result: { tools: Array<{ name: string; inputSchema: any }> } }).result.tools;
+    for (const surface of [manifest.tools, live]) {
+      const byName = Object.fromEntries(surface.map((t) => [t.name, t]));
+      for (const tool of ['create_event', 'update_event']) {
+        const attendees = byName[tool].inputSchema.properties.attendees;
+        expect(attendees.type).toBe('array');
+        expect(attendees.items.anyOf[0]).toMatchObject({ type: 'string' });
+        expect(attendees.items.anyOf[1]).toMatchObject({
+          type: 'object', required: ['email'],
+          properties: { type: { enum: ['required', 'optional', 'resource'] } },
+        });
+      }
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -415,6 +435,22 @@ describe('MCP tools/call — list_rooms', () => {
     expect(isError).toBe(false);
     expect(lastGraphCall.path).toBe('/places/microsoft.graph.room');
     expect((parsed as { items: Array<{ emailAddress: string }> }).items[0]).toMatchObject({ displayName: 'Montgomery A', emailAddress: 'monta@example.com', capacity: 8 });
+  });
+
+  it('names the missing Place.Read.All permission when Graph answers 403', async () => {
+    mockGraphGet.mockRejectedValue(Object.assign(new GraphError(403, 'Access is denied. Check credentials and try again.'), { code: 'ErrorAccessDenied' }));
+    const { isError, text } = toolResult(await callTool('list_rooms', {}));
+    expect(isError).toBe(true);
+    expect(text).toContain('Place.Read.All');
+    expect(text).toContain('admin consent');
+  });
+
+  it('passes other Graph errors through unchanged', async () => {
+    mockGraphGet.mockRejectedValue(Object.assign(new GraphError(429, 'Too many requests'), { code: 'TooManyRequests' }));
+    const { isError, text } = toolResult(await callTool('list_rooms', {}));
+    expect(isError).toBe(true);
+    expect(text).toContain('429');
+    expect(text).not.toContain('Place.Read.All');
   });
 });
 

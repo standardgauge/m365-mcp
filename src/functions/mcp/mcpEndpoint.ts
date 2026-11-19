@@ -33,6 +33,7 @@ import { findUnsupportedArgs, unsupportedArgsMessage } from '../../services/tool
 import { resolveMaxResults, toEnvelope, graphCollectionHasMore } from '../../services/resultEnvelope.js';
 import { normalizeGraphDateTime, resolveWindow } from '../../services/calendarWindow.js';
 import { resolveMailboxTimeZone } from '../../services/mailboxTimeZone.js';
+import { ATTENDEE_ITEM_SCHEMA, ATTENDEES_DESCRIPTION, toGraphAttendees, shapeAttendee } from '../../services/calendarAttendees.js';
 import { withSecurity } from '../../services/securityHeaders.js';
 import { withRateLimit } from '../../services/rateLimit.js';
 import { resolveAuthUrlBase } from '../../services/frontendUrl.js';
@@ -1735,7 +1736,7 @@ const tools: ToolDef[] = [
   },
   {
     name: 'get_event',
-    description: 'Fetch full details of a single calendar event (body, attendees, location)',
+    description: 'Fetch full details of a single calendar event (body, location, and each attendee with its type and response status)',
     inputSchema: {
       type: 'object',
       properties: { eventId: prop('string', 'Event ID'), calendarId: prop('string', 'Calendar ID (default: default calendar)') },
@@ -1757,8 +1758,8 @@ const tools: ToolDef[] = [
         id: e.id, subject: e.subject, start: e.start, end: e.end,
         location: e.location?.displayName ?? null,
         organizer: e.organizer?.emailAddress?.address ?? null,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        attendees: (e.attendees ?? []).map((a: any) => a.emailAddress?.address),
+        // Type and response, so a caller can see whether a booked resource accepted.
+        attendees: (e.attendees ?? []).map(shapeAttendee),
         isAllDay: e.isAllDay ?? false, body: e.body, webLink: e.webLink,
       };
     },
@@ -1772,7 +1773,7 @@ const tools: ToolDef[] = [
       'the response then includes onlineMeetingUrl (the Teams "Join" URL) so you never have to ask "what\'s the link?".',
     inputSchema: {
       type: 'object',
-      properties: { subject: prop('string', 'Title'), start: prop('string', 'Start (ISO)'), end: prop('string', 'End (ISO)'), timeZone: prop('string', 'IANA or Windows time zone for start/end (default: the mailbox\u2019s configured time zone)'), location: prop('string', 'Location'), body: prop('string', 'Description'), bodyType: prop('string', 'text or html'), attendees: { type: 'array', items: { type: 'string' }, description: 'Attendee emails' }, isAllDay: prop('boolean', 'All-day'), showAs: prop('string', 'Free/busy status shown to others (default: Graph decides \u2014 busy for timed, free for all-day)', { enum: ['free', 'tentative', 'busy', 'oof', 'workingElsewhere', 'unknown'] }), isOnlineMeeting: prop('boolean', 'Set true to attach a Teams online meeting (returns onlineMeetingUrl)'), onlineMeetingProvider: prop('string', 'Online meeting provider (default: teamsForBusiness)', { enum: ['teamsForBusiness', 'skypeForBusiness', 'skypeForConsumer'] }), calendarId: prop('string', 'Calendar ID') },
+      properties: { subject: prop('string', 'Title'), start: prop('string', 'Start (ISO)'), end: prop('string', 'End (ISO)'), timeZone: prop('string', 'IANA or Windows time zone for start/end (default: the mailbox\u2019s configured time zone)'), location: prop('string', 'Location'), body: prop('string', 'Description'), bodyType: prop('string', 'text or html'), attendees: { type: 'array', items: ATTENDEE_ITEM_SCHEMA, description: ATTENDEES_DESCRIPTION }, isAllDay: prop('boolean', 'All-day'), showAs: prop('string', 'Free/busy status shown to others (default: Graph decides \u2014 busy for timed, free for all-day)', { enum: ['free', 'tentative', 'busy', 'oof', 'workingElsewhere', 'unknown'] }), isOnlineMeeting: prop('boolean', 'Set true to attach a Teams online meeting (returns onlineMeetingUrl)'), onlineMeetingProvider: prop('string', 'Online meeting provider (default: teamsForBusiness)', { enum: ['teamsForBusiness', 'skypeForBusiness', 'skypeForConsumer'] }), calendarId: prop('string', 'Calendar ID') },
       required: ['subject', 'start', 'end'],
     },
     handler: async (args, session) => {
@@ -1788,7 +1789,7 @@ const tools: ToolDef[] = [
       const event: Record<string, unknown> = { subject: args.subject, start: { dateTime: args.start, timeZone: tz }, end: { dateTime: args.end, timeZone: tz }, isAllDay: args.isAllDay ?? false };
       if (args.location) event.location = { displayName: args.location };
       if (args.body) event.body = { contentType: args.bodyType === 'html' ? 'HTML' : 'Text', content: args.body };
-      if (args.attendees) event.attendees = args.attendees.map((a: string) => ({ emailAddress: { address: a }, type: 'required' }));
+      if (args.attendees) event.attendees = toGraphAttendees(args.attendees);
       // Free/busy status. Only set it when supplied so an omitted showAs leaves Graph's default.
       if (args.showAs) event.showAs = args.showAs;
       // Attach a Teams (or Skype) online meeting so the invite carries a join URL.
@@ -1818,7 +1819,7 @@ const tools: ToolDef[] = [
     description: 'Update an existing calendar event',
     inputSchema: {
       type: 'object',
-      properties: { eventId: prop('string', 'Event ID'), subject: prop('string', 'New subject'), start: prop('string', 'New start'), end: prop('string', 'New end'), timeZone: prop('string', 'IANA or Windows time zone for start/end (default: the mailbox\u2019s configured time zone)'), location: prop('string', 'Location'), body: prop('string', 'Description'), bodyType: prop('string', 'text or html'), attendees: { type: 'array', items: { type: 'string' }, description: 'Attendees' }, isAllDay: prop('boolean', 'All-day'), showAs: prop('string', 'Free/busy status shown to others', { enum: ['free', 'tentative', 'busy', 'oof', 'workingElsewhere', 'unknown'] }), calendarId: prop('string', 'Calendar ID') },
+      properties: { eventId: prop('string', 'Event ID'), subject: prop('string', 'New subject'), start: prop('string', 'New start'), end: prop('string', 'New end'), timeZone: prop('string', 'IANA or Windows time zone for start/end (default: the mailbox\u2019s configured time zone)'), location: prop('string', 'Location'), body: prop('string', 'Description'), bodyType: prop('string', 'text or html'), attendees: { type: 'array', items: ATTENDEE_ITEM_SCHEMA, description: ATTENDEES_DESCRIPTION }, isAllDay: prop('boolean', 'All-day'), showAs: prop('string', 'Free/busy status shown to others', { enum: ['free', 'tentative', 'busy', 'oof', 'workingElsewhere', 'unknown'] }), calendarId: prop('string', 'Calendar ID') },
       required: ['eventId'],
     },
     handler: async (args, session) => {
@@ -1841,7 +1842,7 @@ const tools: ToolDef[] = [
       if (args.end !== undefined) patch.end = { dateTime: args.end, timeZone: tz };
       if (args.location !== undefined) patch.location = { displayName: args.location };
       if (args.body !== undefined) patch.body = { contentType: args.bodyType === 'html' ? 'HTML' : 'Text', content: args.body };
-      if (args.attendees !== undefined) patch.attendees = args.attendees.map((a: string) => ({ emailAddress: { address: a }, type: 'required' }));
+      if (args.attendees !== undefined) patch.attendees = toGraphAttendees(args.attendees);
       // Free/busy status. Only patch it when supplied so an omitted showAs leaves the current status untouched.
       if (args.showAs !== undefined) patch.showAs = args.showAs;
       const encUpdEventId = encodeGraphId(args.eventId, 'eventId');
@@ -2261,14 +2262,30 @@ const tools: ToolDef[] = [
     name: 'list_rooms',
     description:
       'List the conference room mailboxes (places) in the tenant (Graph GET /places/microsoft.graph.room). Use this to ' +
-      'pick a real, bookable room for a meeting location instead of leaving it blank — the returned emailAddress can be ' +
-      'added as an attendee to book the room, and the displayName/address can be used as the event location.',
+      'pick a real, bookable room for a meeting location instead of leaving it blank — add the returned emailAddress ' +
+      'to create_event as an attendee of type resource to book the room, and use the displayName/address as the event ' +
+      'location. Equipment mailboxes (cars, projectors) are not places and are not listed here; Graph has no listing ' +
+      'for them, so book one by its address as type resource.',
     inputSchema: { type: 'object', properties: { maxResults: prop('number', 'Maximum rooms to return (default 100)') }, required: [] },
     handler: async (args, session) => {
       const token = await getValidAccessTokenForSession(session);
       const graph = createGraphClient(token);
       const maxResults = resolveMaxResults(args.maxResults, 100, 200);
-      const result = await graph.api('/places/microsoft.graph.room').top(maxResults).get();
+      let result;
+      try {
+        result = await graph.api('/places/microsoft.graph.room').top(maxResults).get();
+      } catch (err) {
+        // Graph's own 403 text does not say which permission is missing.
+        if ((err as { statusCode?: number } | null)?.statusCode === 403) {
+          throw new ToolCallError(
+            'Microsoft Graph refused the room listing (403). list_rooms needs the delegated permission ' +
+            'Place.Read.All with admin consent on this server\'s app registration; an administrator can grant it ' +
+            'under API permissions in Entra ID. Booking a room by its address still works without it.',
+            { cause: err },
+          );
+        }
+        throw err;
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rooms = (result.value ?? []).map((r: any) => ({
         id: r.id,

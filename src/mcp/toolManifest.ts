@@ -13,6 +13,8 @@
  * corresponding Azure Function.
  */
 
+import { ATTENDEE_ITEM_SCHEMA, ATTENDEES_DESCRIPTION } from '../services/calendarAttendees.js';
+
 export interface McpToolParameter {
   name: string;
   type: 'string' | 'number' | 'boolean' | 'array';
@@ -777,8 +779,9 @@ export const TOOLS: McpTool[] = [
   {
     name: 'get_event',
     description:
-      'Fetch full details of a specific calendar event including body, attendees, ' +
-      'and location. Access is blocked if the calendar is on the deny list (by ID or name).',
+      'Fetch full details of a specific calendar event including body, location, and each attendee with its ' +
+      'type (required, optional, resource) and response status, so you can see whether a booked resource accepted. ' +
+      'Access is blocked if the calendar is on the deny list (by ID or name).',
     parameters: [
       {
         name: 'eventId',
@@ -846,6 +849,14 @@ export const TOOLS: McpTool[] = [
         description: '"text" (default) or "html".',
         required: false,
         enum: ['text', 'html'],
+      },
+      {
+        name: 'attendees',
+        type: 'array',
+        items: 'object',
+        itemsSchema: ATTENDEE_ITEM_SCHEMA,
+        description: ATTENDEES_DESCRIPTION,
+        required: false,
       },
       {
         name: 'isAllDay',
@@ -944,6 +955,14 @@ export const TOOLS: McpTool[] = [
         description: '"text" or "html".',
         required: false,
         enum: ['text', 'html'],
+      },
+      {
+        name: 'attendees',
+        type: 'array',
+        items: 'object',
+        itemsSchema: ATTENDEE_ITEM_SCHEMA,
+        description: ATTENDEES_DESCRIPTION,
+        required: false,
       },
       {
         name: 'isAllDay',
@@ -1159,7 +1178,9 @@ export const TOOLS: McpTool[] = [
     name: 'list_rooms',
     description:
       'List the conference room mailboxes (places) in the tenant. Use this to pick a real, bookable room for a meeting ' +
-      'location instead of leaving it blank — the returned emailAddress can be added as an attendee to book the room.',
+      'location instead of leaving it blank — add the returned emailAddress as an attendee of type resource to book ' +
+      'the room. Equipment mailboxes (cars, projectors) are not places and are not listed; book one by its address ' +
+      'as type resource. Needs the Place.Read.All permission with admin consent.',
     parameters: [
       {
         name: 'maxResults',

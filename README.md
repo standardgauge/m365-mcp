@@ -192,7 +192,7 @@ Add these under **API permissions → Add a permission → Microsoft Graph → D
 | `MailboxSettings.Read` | Working hours and time zones for scheduling |
 | `Calendars.ReadWrite` | Calendar read and write |
 | `Calendars.Read.Shared` | Colleagues' free/busy for `get_schedule` |
-| `Place.Read.All` | Conference room mailboxes for `list_rooms` |
+| `Place.Read.All` | Conference room mailboxes for `list_rooms` ([Calendar resources](docs/calendar-resources.md)) |
 | `Sites.ReadWrite.All` | SharePoint sites |
 | `Files.ReadWrite.All` | OneDrive and SharePoint files |
 | `Contacts.ReadWrite` | Contacts |
