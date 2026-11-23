@@ -8,7 +8,7 @@
 # which failed CI and the deploy on a tracking fork and held the release.
 # The runtime image is pulled from MCR on every build already. Keep the tag and
 # digest identical to stage 2 and bump both together.
-FROM mcr.microsoft.com/azure-functions/node:4.1055.300-8-node22@sha256:b214e061940bea8221e7146c8d279f71c04ad5afb4666d2e12989e1dab326204 AS builder
+FROM mcr.microsoft.com/azure-functions/node:4.1055.300-10-node22@sha256:db96ff70b60dbd5be5cb359cb64ffda865cf2f50fe665bdd2a964fd369634481 AS builder
 WORKDIR /build
 
 COPY package*.json ./
@@ -41,7 +41,7 @@ RUN npm run build:admin
 # 4.1055.300-3 carried 22.23.4, the October 2026 Node security release (read with
 # `node --version`). This one, 4.1055.300-8, is pinned for .NET 8.0.34: -3 and -4
 # ship 8.0.33, which fails the scan on three HIGH ASP.NET Core advisories.
-FROM mcr.microsoft.com/azure-functions/node:4.1055.300-8-node22@sha256:b214e061940bea8221e7146c8d279f71c04ad5afb4666d2e12989e1dab326204
+FROM mcr.microsoft.com/azure-functions/node:4.1055.300-10-node22@sha256:db96ff70b60dbd5be5cb359cb64ffda865cf2f50fe665bdd2a964fd369634481
 
 # The Azure Functions host defaults to binding privileged port 80. A non-root
 # user (see USER below, F8 /) cannot bind ports < 1024, so point
