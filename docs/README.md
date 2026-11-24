@@ -33,6 +33,12 @@
   storage fan-out, memory, paging, throttling, observability, ranked with
   evidence and the work it implies
 
+- [Releases](releasing.md) — what a version number promises a deployment, the
+  changelog format, how a release is cut, and pinning an instance to one
+- [Deployment pattern](deployment-pattern.md) — proposal: how an instance
+  stays current with releases without a fork that drifts, and the first-deploy
+  shortcuts evaluated against the go-live checklist
+
 Deployment is [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml),
 which is inert until you set `DEPLOY_ENABLED`. The Bicep templates are under
 [`infra/`](../infra). Start from the README's

@@ -29,6 +29,7 @@ on:
       - Dockerfile
       - package.json
       - package-lock.json
+      - scripts/release-check.sh
 
 permissions:
   contents: read
@@ -68,6 +69,17 @@ jobs:
           fi
           echo "VERSION=$V" >> "$GITHUB_ENV"
           echo "Building ${V} from ${GITHUB_SHA}"
+
+      # The tag has to be the version the tree carries and have changelog
+      # notes, or a deployment pinning it gets something other than it was
+      # promised. Checked before anything is built or signed. A failure leaves
+      # the release published with no assets: delete it and the tag, fix the
+      # tree, and cut it again (docs/releasing.md).
+      - name: Tag matches package.json and CHANGELOG.md
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: bash scripts/release-check.sh --tag "$TAG"
 
       # GitHub generates a tag's source archive on request and nothing signs
       # it. This one is a file on the release whose digest is attested.

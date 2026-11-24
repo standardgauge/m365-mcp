@@ -1,0 +1,45 @@
+name: Feature or control request
+description: A tool, a Graph surface, or a control over what agents can do.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A request for a new **control** (a deny rule, a read-only mode, a policy, an audit field) is as welcome as one for a new tool, and usually easier to say yes to.
+
+        This repository is public. Describe the need, not the organisation that has it.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - New tool or Graph surface
+        - Change to an existing tool
+        - Access control or policy
+        - Audit or observability
+        - Deployment or operations
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: need
+    attributes:
+      label: What you need to do
+      description: The task an agent or an administrator cannot do today, or cannot do safely.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+      description: The tool, setting or behaviour you have in mind, if you have one.
+  - type: textarea
+    id: permissions
+    attributes:
+      label: Graph permissions
+      description: |
+        Any delegated permission this would need that the server does not request today. A new scope is a consent change on every deployment, so it is released as a major version with an upgrade note (docs/releasing.md). Say if you do not know.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today

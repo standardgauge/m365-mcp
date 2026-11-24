@@ -1,0 +1,41 @@
+name: Deployment question
+description: Standing up, configuring, upgrading or operating your own instance.
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Worth reading first: the [go-live checklist](https://github.com/standardgauge/m365-mcp/blob/main/docs/customer-go-live.md), [Entra setup](https://github.com/standardgauge/m365-mcp/blob/main/docs/entra-setup.md), the [operations runbook](https://github.com/standardgauge/m365-mcp/blob/main/docs/operations-runbook.md), and [deployment pattern](https://github.com/standardgauge/m365-mcp/blob/main/docs/deployment-pattern.md) for staying current with releases.
+
+        This repository is public. Leave out hostnames, resource names, tenant and subscription IDs, and the names of the organisations you deploy for.
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Stage
+      options:
+        - First deploy
+        - Entra registration or consent
+        - Configuration and policy
+        - Upgrading to a new release
+        - Running an instance per client tenant
+        - Operations, rotation or incident
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release tag or `/health` sha you are on or moving to, if there is one yet.
+  - type: textarea
+    id: setup
+    attributes:
+      label: How you deploy
+      description: A fork running the deploy workflow, the Bicep by hand, your own pipeline, and where the image comes from.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What you are trying to do, what you tried, and the go-live checklist item or doc section you got stuck on.
+    validations:
+      required: true

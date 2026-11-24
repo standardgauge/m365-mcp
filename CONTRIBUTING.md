@@ -50,6 +50,10 @@ judgement about the change.
 
 ### How a change lands
 
+A change that alters behaviour adds a line under `## [Unreleased]` in
+[CHANGELOG.md](CHANGELOG.md), and anything a deployment has to do before it
+rolls forward goes under **Upgrade notes** there ([releases](docs/releasing.md)).
+
 [AGENTS.md](AGENTS.md) has the rest: one topic per pull request, the checks to
 run first, and how review findings get answered. It applies to everyone,
 including maintainers.
@@ -58,7 +62,9 @@ including maintainers.
 
 **Issues are welcome and are read.** Bug reports, reproductions, documentation
 that is wrong or missing, and questions about deploying this into a tenant are
-all worth filing.
+all worth filing. [New issue](https://github.com/standardgauge/m365-mcp/issues/new/choose)
+offers a form for each: a bug, a feature or control request, and a deployment
+question.
 
 **Security issues go to [SECURITY.md](SECURITY.md), not to the issue tracker.**
 
@@ -68,7 +74,7 @@ licence permits that and nothing here discourages it.
 
 ## If you are filing a bug
 
-Include the commit the running instance reports at `/health`, what you called,
+Include the release you run and the commit the running instance reports at `/health`, what you called,
 what you expected, and what happened. If it involves a permission or a deny
 rule, say which, because most surprising behaviour in this server is a policy
 evaluating exactly as configured.

@@ -17,6 +17,7 @@
 
 - [ ] Existing tests pass (`npm test`)
 - [ ] New behavior is covered by tests (or explain why not)
+- [ ] Behaviour changes have a line under `## [Unreleased]` in `CHANGELOG.md`, with **Upgrade notes** for anything a deployment must act on ([docs/releasing.md](../docs/releasing.md))
 
 ## Notes for reviewers
 
