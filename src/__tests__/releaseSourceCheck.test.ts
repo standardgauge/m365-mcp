@@ -70,6 +70,7 @@ describe('release-source-check.sh', () => {
     id,
     head_sha: head,
     head_branch: 'main',
+    head_repository: { full_name: REPO },
     status: 'completed',
     conclusion: 'success',
     created_at: '2026-11-24T20:00:00Z',
@@ -81,16 +82,22 @@ describe('release-source-check.sh', () => {
   const jobs = (id: number, list: Job[]): void =>
     fixture(`repos/${REPO}/actions/runs/${id}/jobs?filter=latest&per_page=100`, { jobs: list });
 
-  // Tested main: on main, both runs green, merged by #42.
+  const merged = (head: Record<string, unknown> = {}) => ({
+    number: 42,
+    merged_at: '2026-11-24T19:59:00Z',
+    merge_commit_sha: SHA,
+    base: { ref: 'main' },
+    head: { sha: PR_HEAD, ref: 'feature', repo: { full_name: REPO }, ...head },
+  });
+
+  // Tested main: on main, both runs green, merged by #42 from `feature`.
   function green(): void {
     fixture(`repos/${REPO}/compare/${SHA}...main`, { status: 'ahead' });
     const push = run(1, SHA);
     fixture(runsPath(SHA, 'push'), { workflow_runs: [push] });
     runDetail(push);
     jobs(1, PUSH_JOBS);
-    fixture(`repos/${REPO}/commits/${SHA}/pulls`, [
-      { number: 42, merged_at: '2026-11-24T19:59:00Z', merge_commit_sha: SHA, base: { ref: 'main' }, head: { sha: PR_HEAD } },
-    ]);
+    fixture(`repos/${REPO}/commits/${SHA}/pulls`, [merged()]);
     const pr = run(2, PR_HEAD, { head_branch: 'feature' });
     fixture(runsPath(PR_HEAD, 'pull_request'), { workflow_runs: [pr] });
     runDetail(pr);
@@ -205,6 +212,49 @@ describe('release-source-check.sh', () => {
     const r = check();
     expect(r.status).toBe(1);
     expect(r.out).toContain('DCO Sign-off: failure');
+  });
+
+  // The same commit can be the head of two pull requests. A newer green run on
+  // the other branch must not stand in for the merging PR's failed run.
+  it("judges the merging PR's own branch, not a newer green run on another branch with the same SHA", () => {
+    const ours = run(2, PR_HEAD, { head_branch: 'feature', conclusion: 'failure', created_at: '2026-11-24T19:00:00Z' });
+    const other = run(4, PR_HEAD, { head_branch: 'feature-copy', created_at: '2026-11-24T21:00:00Z' });
+    fixture(runsPath(PR_HEAD, 'pull_request'), { workflow_runs: [other, ours] });
+    runDetail(ours);
+    runDetail(other);
+    jobs(4, PR_JOBS);
+    const r = check();
+    expect(r.status).toBe(1);
+    expect(r.out).toContain('pull request #42 run 2');
+    expect(r.out).toContain("concluded 'failure', not success");
+  });
+
+  it('ignores a green run on a fork branch of the same name and SHA', () => {
+    const ours = run(2, PR_HEAD, { head_branch: 'feature', conclusion: 'failure', created_at: '2026-11-24T19:00:00Z' });
+    const fork = run(4, PR_HEAD, {
+      head_branch: 'feature',
+      head_repository: { full_name: 'someone/m365-mcp' },
+      created_at: '2026-11-24T21:00:00Z',
+    });
+    fixture(runsPath(PR_HEAD, 'pull_request'), { workflow_runs: [fork, ours] });
+    runDetail(ours);
+    const r = check();
+    expect(r.status).toBe(1);
+    expect(r.out).toContain('pull request #42 run 2');
+  });
+
+  it("refuses when the only pull-request run for the SHA is on another branch", () => {
+    fixture(runsPath(PR_HEAD, 'pull_request'), { workflow_runs: [run(4, PR_HEAD, { head_branch: 'feature-copy' })] });
+    const r = check();
+    expect(r.status).toBe(2);
+    expect(r.out).toContain(`no completed ci.yml pull_request run for ${PR_HEAD} on ${REPO}:feature`);
+  });
+
+  it('refuses a merging PR whose head repository is gone, rather than matching on SHA alone', () => {
+    fixture(`repos/${REPO}/commits/${SHA}/pulls`, [merged({ repo: null })]);
+    const r = check();
+    expect(r.status).toBe(1);
+    expect(r.out).toContain('cannot be bound to it');
   });
 
   it('waits for a push run that is still in progress', () => {

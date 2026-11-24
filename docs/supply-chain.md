@@ -124,8 +124,12 @@ the release unless all of these hold for the tagged commit:
    and every job succeeded, except `DCO Sign-off` and `Container Boot (PR)`,
    which may be skipped.
 3. It is the merge commit of a pull request into `main`, and the newest
-   `ci.yml` run on that pull request's head completed with every job
-   succeeding, except `Container Scan (Trivy)`, which may be skipped.
+   `ci.yml` run on that pull request's head commit, from its own head branch
+   and repository, completed with every job succeeding, except
+   `Container Scan (Trivy)`, which may be skipped. The same commit can head
+   more than one pull request, so a run on another branch or a fork never
+   counts. A merged pull request whose head repository has since been deleted
+   is refused, because its run can no longer be tied to it.
 
 A release published right after its merge waits up to 20 minutes for those runs
 to finish. The workflow takes the script from `main` rather than from the tag,

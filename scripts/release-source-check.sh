@@ -15,9 +15,10 @@
 #      and every job in it succeeded, except DCO Sign-off and Container Boot
 #      (PR), which skip on a push by design.
 #   3. The pull request that merged the commit into `main` has a `ci.yml` run on
-#      its head commit, the newest of which completed with every job succeeding
-#      except Container Scan (Trivy), which skips on a pull request by design.
-#      Container Boot (PR) and the installer release gates run only there.
+#      its head commit, from its own head branch and repository, the newest of
+#      which completed with every job succeeding except Container Scan (Trivy),
+#      which skips on a pull request by design. Container Boot (PR) and the
+#      installer release gates run only there.
 #
 # Usage: scripts/release-source-check.sh --repo <owner/name> --sha <commit>
 #          [--wait <seconds>] [--interval <seconds>]
@@ -83,10 +84,16 @@ case "$status" in
 esac
 
 # ── CI runs ──────────────────────────────────────────────────────────────────
-# Prints the id of the newest ci.yml run for a commit and event once it has
-# completed. Polls until --wait runs out while that run is missing or unfinished.
+# Prints the id of the newest ci.yml run for a commit and event, from the named
+# branch of the named repository, once it has completed. Polls until --wait runs
+# out while that run is missing or unfinished.
+#
+# The branch and repository matter because a SHA is not unique to one branch:
+# the same commit can be the head of two pull requests, from two branches or a
+# fork, and a newer green run on one must not stand in for a failed run on the
+# other.
 newest_completed_run() {
-  local head="$1" event="$2" filter="$3" deadline runs run state
+  local head="$1" event="$2" branch="$3" head_repo="$4" deadline runs run state
   deadline=$(( $(date +%s) + WAIT ))
   while :; do
     # This runs inside a command substitution, where errexit is off, so a
@@ -94,8 +101,12 @@ newest_completed_run() {
     runs=$(api "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${head}&event=${event}&per_page=100") || exit $?
     # Newest by creation. A re-run is a new attempt of the same run, so this is
     # the run as it stands after any re-run.
-    run=$(jq -c --arg head "$head" "[.workflow_runs[] | select(.head_sha == \$head) ${filter}]
-      | sort_by(.created_at) | last // empty" <<<"$runs") || exit 2
+    run=$(jq -c --arg head "$head" --arg branch "$branch" --arg repo "$head_repo" '
+      [.workflow_runs[]
+        | select(.head_sha == $head
+                 and .head_branch == $branch
+                 and .head_repository.full_name == $repo)]
+      | sort_by(.created_at) | last // empty' <<<"$runs") || exit 2
     if [ -n "$run" ]; then
       state=$(jq -r '.status' <<<"$run")
       if [ "$state" = "completed" ]; then
@@ -106,9 +117,9 @@ newest_completed_run() {
       state="not found"
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      unreadable "no completed ci.yml ${event} run for ${head} (newest: ${state}). Wait for CI, then re-run this workflow."
+      unreadable "no completed ci.yml ${event} run for ${head} on ${head_repo}:${branch} (newest: ${state}). Wait for CI, then re-run this workflow."
     fi
-    echo "waiting for the ci.yml ${event} run for ${head} (${state})" >&2
+    echo "waiting for the ci.yml ${event} run for ${head} on ${head_repo}:${branch} (${state})" >&2
     sleep "$INTERVAL"
   done
 }
@@ -134,7 +145,7 @@ require_green() {
 }
 
 # ── 2. the push run on main for the commit itself ────────────────────────────
-push_run=$(newest_completed_run "$SHA" push "| select(.head_branch == \"${BRANCH}\")")
+push_run=$(newest_completed_run "$SHA" push "$BRANCH" "$REPO")
 require_green "$push_run" '["DCO Sign-off", "Container Boot (PR)"]' "push"
 
 # ── 3. the pull request that merged it ───────────────────────────────────────
@@ -145,8 +156,14 @@ pr=$(api "repos/${REPO}/commits/${SHA}/pulls" | jq -c --arg sha "$SHA" --arg bas
 [ -n "$pr" ] || fail "${SHA} is not the merge commit of a pull request into ${BRANCH}, so its pull-request CI (container boot, installer gates) cannot be found."
 pr_number=$(jq -r '.number' <<<"$pr")
 pr_head=$(jq -r '.head.sha' <<<"$pr")
-echo "merged by #${pr_number} (head ${pr_head})"
-pr_run=$(newest_completed_run "$pr_head" pull_request "")
+pr_ref=$(jq -r '.head.ref // empty' <<<"$pr")
+pr_repo=$(jq -r '.head.repo.full_name // empty' <<<"$pr")
+# A fork deleted after the merge leaves head.repo null. Without it the run
+# cannot be tied to this pull request, so refuse rather than match on SHA alone.
+[ -n "$pr_ref" ] && [ -n "$pr_repo" ] \
+  || fail "#${pr_number} has no head branch or head repository on record, so its pull-request CI run cannot be bound to it."
+echo "merged by #${pr_number} (head ${pr_repo}:${pr_ref} at ${pr_head})"
+pr_run=$(newest_completed_run "$pr_head" pull_request "$pr_ref" "$pr_repo")
 require_green "$pr_run" '["Container Scan (Trivy)"]' "pull request #${pr_number}"
 
 echo "release-source-check: ${SHA} is tested ${BRANCH}"
