@@ -59,8 +59,11 @@ section_body() {
 
 # Whether a section body says anything: a line that is neither blank nor a
 # group heading. `### Added` on its own is a heading with no notes under it.
+# A here-string, not `printf | grep -q`: grep exits at its first match, and
+# under pipefail a producer still writing past the pipe buffer then dies of
+# SIGPIPE, so a long section with an early entry would read as having none.
 has_entries() {
-  printf '%s\n' "$1" | grep -qvE '^[[:space:]]*$|^### '
+  grep -qvE '^[[:space:]]*$|^### ' <<<"$1"
 }
 
 if [ "$MODE" = notes ]; then
