@@ -103,50 +103,185 @@ my-m365-mcp-deploy/
 ```
 
 The workflow calls this repository's deploy workflow as a reusable workflow,
-pinned to a release, once per instance:
+pinned to a release. The deploy repository belongs to the deployer's own
+account or organisation, which is almost never this repository's, so the
+caller cannot use `secrets: inherit`: GitHub passes inherited secrets only
+between workflows in the
+[same organisation or enterprise](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#passing-inputs-and-secrets-to-a-reusable-workflow).
+Across that boundary a secret reaches the called workflow in one of two ways:
+it is a secret the reusable workflow declares by name and the caller maps
+explicitly, or it is an environment secret in the caller's repository that the
+reusable workflow's own job reads by setting `environment`. The interface below
+supports both, and recommends the second.
+
+### The reusable workflow's interface
+
+`deploy.yml` would declare its secrets by name. Each is `required: false`
+because an environment can supply it instead of the caller, so the
+"Check required configuration" step has to gain a check that fails the run
+when `AZURE_CREDENTIALS` arrives from neither.
+
+```yaml
+on:
+  workflow_call:
+    inputs:
+      environment:          # a GitHub environment in the CALLER's repository
+        type: string
+        required: true
+      resource-group:
+        type: string
+        required: true
+      container-app:
+        type: string
+        required: true
+      acr-name:
+        type: string
+        required: true
+      smoke-expect-services:
+        type: string
+        required: false
+    secrets:
+      AZURE_CREDENTIALS:    # service principal JSON, as documented today
+        required: false
+      SMOKE_AGENT_KEY:      # read-only agent key; unset skips the smoke job
+        required: false
+
+jobs:
+  build-push-deploy:
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    # ...every existing step, reading secrets.AZURE_CREDENTIALS and
+    # secrets.SMOKE_AGENT_KEY exactly as it does now
+```
+
+Three GitHub rules decide how this behaves when a caller in another
+organisation runs it:
+
+- **The environment belongs to the caller.** A called workflow runs in the
+  caller's context (its `github` context is the caller's), so
+  `environment: contoso` names an environment in the deploy repository, with
+  that repository's required reviewers, wait timer, deployment-branch policy
+  and environment secrets. Nothing about any instance is configured here.
+- **Only the called job can name the environment.** A job that calls a
+  reusable workflow accepts `uses`, `with`, `secrets`, `strategy`, `needs`,
+  `if`, `concurrency`, `permissions` and `name`, and not `environment`. So the
+  caller cannot read an environment secret and map it across; the environment
+  has to be set inside `deploy.yml`, which is why it is an input.
+- **An environment secret wins over a passed one of the same name.** If the
+  environment holds `AZURE_CREDENTIALS`, the job uses it and ignores whatever
+  the caller mapped. Keep each secret in one place per instance, or the
+  reviewed caller file stops being the truth about which credential deployed.
+
+Every job that touches Azure or the instance (the deploy and the functional
+smoke) sets the same `environment`. The concurrency group keys on it, so one
+tenant's deploy does not queue behind another's, while two deploys to one
+tenant still serialise. The interface (input names, secret names, the
+environment rule) is public under semver from the first release that ships it.
+
+### Recommended caller: one environment per instance
+
+Each instance gets a GitHub environment in the deploy repository holding its
+`AZURE_CREDENTIALS` and `SMOKE_AGENT_KEY` as **environment secrets**, with
+required reviewers set to whoever approves changes to that instance and
+deployment branches limited to `main`. The caller passes no secrets at all:
+
+```yaml
+# my-m365-mcp-deploy/.github/workflows/deploy.yml
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  production:
+    uses: standardgauge/m365-mcp/.github/workflows/deploy.yml@v1.4.0
+    with:
+      environment: production
+      resource-group: rg-m365-mcp
+      container-app: m365-mcp
+      acr-name: m365mcpacr
+      smoke-expect-services: mail,calendar,sharepoint
+    # no secrets: block. AZURE_CREDENTIALS and SMOKE_AGENT_KEY are
+    # environment secrets on "production", read by deploy.yml's own jobs.
+```
+
+This is the model to use for anything under change control. The credential is
+released only to a job that has passed the environment's protection rules: a
+named reviewer approves the run, on `main`, before any step can read it. A
+repository or organisation secret has no such gate: any workflow run in the
+deploy repository can read it, on any branch someone with write access pushes.
+
+A provider with many client tenants keeps one deploy repository, one
+environment per tenant and one caller job per tenant, each with its own
+credential and reviewers, instead of one fork per tenant:
 
 ```yaml
 jobs:
-  deploy-tenant-a:
+  contoso:
     uses: standardgauge/m365-mcp/.github/workflows/deploy.yml@v1.4.0
     with:
-      environment: tenant-a
-      resource-group: rg-m365-mcp-tenant-a
+      environment: contoso
+      resource-group: rg-m365-mcp-contoso
       container-app: m365-mcp
-      acr-name: m365mcptenanta
-    secrets:
-      AZURE_CREDENTIALS: ${{ secrets.TENANT_A_AZURE_CREDENTIALS }}
-      SMOKE_AGENT_KEY: ${{ secrets.TENANT_A_SMOKE_AGENT_KEY }}
+      acr-name: contosom365mcp
+  fabrikam:
+    needs: contoso          # optional canary order: fabrikam after contoso
+    uses: standardgauge/m365-mcp/.github/workflows/deploy.yml@v1.4.0
+    with:
+      environment: fabrikam
+      resource-group: rg-m365-mcp-fabrikam
+      container-app: m365-mcp
+      acr-name: fabrikamm365mcp
 ```
 
-The secrets are named and mapped, not inherited. `secrets: inherit` only
-passes secrets when the caller and the called workflow are in the same
-organization or enterprise
-([GitHub's reusable-workflow rules](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#passing-inputs-and-secrets-to-a-reusable-workflow)),
-and an outside deployer's repository never is, so `inherit` would reach
-`deploy.yml` with no Azure credential at all. So `deploy.yml`'s `workflow_call`
-trigger declares each secret it reads (`AZURE_CREDENTIALS` required,
-`SMOKE_AGENT_KEY` optional) and each value it now reads from `vars` as an
-input, and those names are part of its public interface. The caller decides
-which of its own secrets fills each one, which is also what keeps one tenant's
-credential out of another tenant's job.
+Contoso's reviewers approve Contoso's job and nobody else's. A tenant can be
+held by leaving its job's approval pending or by pinning its job to an older
+tag, and `needs` gives the canary order the fork sync provides today.
 
-Per-instance change control comes from the `environment` input. The called
-workflow puts its deploy job in that environment, and because the run belongs
-to the deploy repository, that is the deploy repository's environment: its
-required reviewers and wait timer gate the deploy, and its deployment history
-is the instance's record. A provider with many client tenants keeps one deploy
-repository with one caller job and one environment per tenant, instead of one
-fork per tenant.
+### Alternative caller: explicit secret mapping
 
-Where the credential is stored is the part to settle when this is built.
-Mapped repository secrets, as above, work across organizations and are what
-this design assumes. GitHub also documents that a called job naming an
-environment uses that environment's secret in place of a passed secret of the
-same name, which would let each credential live in its tenant's environment,
-behind its reviewers, rather than as a repository secret. Whether that holds
-for a caller in another organization has not been tested here, so the design
-does not depend on it.
+A deployer who keeps credentials as repository or organisation secrets (a
+single instance with no reviewers, say) maps each one explicitly by name:
+
+```yaml
+jobs:
+  production:
+    uses: standardgauge/m365-mcp/.github/workflows/deploy.yml@v1.4.0
+    with:
+      environment: production
+      resource-group: rg-m365-mcp
+      container-app: m365-mcp
+      acr-name: m365mcpacr
+    secrets:
+      AZURE_CREDENTIALS: ${{ secrets.PRODUCTION_AZURE_CREDENTIALS }}
+      SMOKE_AGENT_KEY: ${{ secrets.PRODUCTION_SMOKE_AGENT_KEY }}
+```
+
+The `environment` input is still required, so the run still waits on that
+environment's reviewers if it has any, but the secret itself is readable,
+without that approval, by any workflow run in the deploy repository. And per
+the precedence rule above, an environment secret of the same name silently
+replaces the mapped one. Use this form only where that is acceptable, and
+never hold the same secret both ways.
+
+### Not depending on a stored credential
+
+`AZURE_CREDENTIALS` is a long-lived service principal secret. `azure/login`
+also accepts OpenID Connect: the job presents a GitHub-issued token and Azure
+exchanges it for an access token through a federated credential on the app
+registration, so no Azure secret is stored in GitHub at all. The token's
+subject names the caller's repository and environment
+(`repo:<owner>/<deploy-repo>:environment:<name>`), so one federated credential
+per environment binds an Azure identity to exactly one instance's environment
+and its reviewers. The client, tenant and subscription IDs are not secrets and
+can be inputs. It is worth adding to the interface as the preferred
+credential, alongside `AZURE_CREDENTIALS` for existing deployers, when
+`workflow_call` is built; it needs `id-token: write` on the calling job.
 
 **Upgrading** is a pull request in the deploy repository that changes
 `@v1.4.0` to `@v1.5.0`. Dependabot's `github-actions` ecosystem already opens
@@ -159,9 +294,11 @@ merge.
 
 - `deploy.yml` gains a `workflow_call` trigger alongside its current ones. It
   checks out this repository at the called ref rather than the caller's
-  repository, takes the resource names and the environment as inputs,
-  declares its secrets by name (no `inherit`), and keeps every proof step.
-  Its inputs and secret names become a public interface under semver.
+  repository, takes the resource names and the caller's environment as
+  inputs, declares `AZURE_CREDENTIALS` and `SMOKE_AGENT_KEY` as named secrets
+  (never relying on `secrets: inherit`), sets `environment` on every job that
+  reads them, and keeps every proof step. Those inputs and secret names become
+  a public interface under semver.
 - The gate on CI becomes "the tag is a release": `release.yml` refuses to
   build or sign a tag that is not on `main` or whose commit has no passing CI
   push run ([releasing](releasing.md)), so the caller does not need CI of its
@@ -241,7 +378,7 @@ request.
 | Deploy proof | every deploy | every deploy | if they run the script |
 | Can drift | yes, through the update path | no code to drift; version is in a file | no code; config in the portal |
 | Instances per provider | one fork each | one environment each | one parameters file each |
-| Upstream work | none | `workflow_call`, template repo | image publishing, Bicep change, ARM asset, smoke script |
+| Upstream work | none | `workflow_call` with named secrets, template repo | image publishing, Bicep change, ARM asset, smoke script |
 | Deploy to Azure button | no | no | yes |
 
 ## Recommendation
