@@ -9,16 +9,20 @@ The pieces:
 
 - every release carries an SBOM and a signed provenance attestation
   ([`release.yml`](../.github/workflows/release.yml));
+- every release is a commit of `main` whose CI passed, and `release.yml`
+  refuses to build or sign one that isn't
+  ([release evidence](#release-evidence-the-ci-runs-for-the-tagged-commit));
 - every release archives the hosted CI runs for its commit with its release
-  notes ([release evidence](#release-evidence-the-ci-runs-for-the-tagged-commit));
+  notes (same section);
 - every deploy pushes its image with a provenance statement attached
   ([`deploy.yml`](../.github/workflows/deploy.yml), `provenance: mode=max`);
 - every running instance reports the commit it was built from on `GET /health`.
 
 ## What a release carries
 
-Publishing a release runs `release.yml` on the tagged commit. It builds the
-image, catalogues it with [syft](https://github.com/anchore/syft), and attaches
+Publishing a release runs `release.yml` on the tagged commit. It first checks
+that the commit is tested `main` ([below](#the-check-releaseyml-runs-first)),
+then builds the image, catalogues it with [syft](https://github.com/anchore/syft), and attaches
 these files to the release:
 
 | File | What it is |
@@ -109,6 +113,43 @@ Sign-off` and `Container Boot (PR)` on the push run, `Container Scan (Trivy)` on
 the pull-request run. A release with any other job not green, or with
 `Container Boot (PR)` skipped on the pull-request run, is not published.
 
+### The check `release.yml` runs first
+
+That rule is code: [`scripts/release-source-check.sh`](../scripts/release-source-check.sh).
+`release.yml` runs it before it packs, builds or signs anything, and it fails
+the release unless all of these hold for the tagged commit:
+
+1. `main` contains it.
+2. The newest `ci.yml` push run on `main` for exactly that commit completed,
+   and every job succeeded, except `DCO Sign-off` and `Container Boot (PR)`,
+   which may be skipped.
+3. It is the merge commit of a pull request into `main`, and the newest
+   `ci.yml` run on that pull request's head completed with every job
+   succeeding, except `Container Scan (Trivy)`, which may be skipped.
+
+A release published right after its merge waits up to 20 minutes for those runs
+to finish. The workflow takes the script from `main` rather than from the tag,
+so a tag cannot carry a weaker copy of the check it is held to. When it fails,
+the release stays published with no assets: delete the release and the tag, and
+cut it again from a green commit of `main`. Archiving the evidence above is
+still a manual step, because the runs expire and the check only reads them.
+
+The check runs inside the workflow it protects, and on a release that workflow
+comes from the tagged commit. So it stops an off-main or untested tag cut by
+mistake; it does not stop someone with permission to push tags who also edits
+`release.yml` in the tagged commit. Two things cover that. A tag ruleset on
+`v*` limits who can create a release tag. And anyone can run the same check
+against a published release themselves, which needs only read access:
+
+```bash
+R=<owner>/m365-mcp; TAG=<tag>
+SHA=$(gh api "repos/$R/commits/$TAG" --jq .sha)
+bash scripts/release-source-check.sh --repo "$R" --sha "$SHA"
+```
+
+Exit 0 is tested `main`, 1 is a rule broken (the message says which), and 2 is
+an answer it could not read.
+
 These files are a record, not an attestation: they are not in `SHA256SUMS` and
 nothing signs them. While the runs still exist, the runs are the authority and
 the files let anyone check them; after they expire, the files are what is left.
@@ -169,7 +210,7 @@ syft scan "registry:$image" -o spdx-json > instance.spdx.json
 
 | Job | When | Produces |
 |---|---|---|
-| `release.yml` `build` | release published; pull requests touching the Dockerfile, `package.json`, `package-lock.json` or the workflow | SBOMs, source archive, checksums, attestations (signed only on a public repository), verified in the same job |
+| `release.yml` `build` | release published; pull requests touching the Dockerfile, `package.json`, `package-lock.json` or the workflow | on a release, the tested-`main` check first; then SBOMs, source archive, checksums, attestations (signed only on a public repository), verified in the same job |
 | `release.yml` `publish` | release published | the files above, attached to the release |
 | `deploy.yml` | every deploy | the image and its provenance statement, in your registry |
 | `ci.yml` `container-scan` | every push to `main` | Trivy scan of the image (see [trivy-suppressions.md](trivy-suppressions.md)) |

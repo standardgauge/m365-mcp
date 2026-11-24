@@ -110,9 +110,13 @@ with no SBOM and no provenance.
 
 Publishing starts [`release.yml`](../.github/workflows/release.yml). Before it
 builds anything it checks the tag against `package.json` and the changelog, and
-that the tagged commit is on `main` and CI's push run passed on exactly that
-commit. A tag on a branch, or on a commit CI has not finished with, gets no
-artifacts and no signature. Then it attaches the SBOMs, the source archive and
+that the tagged commit is tested `main`: on `main`, with CI green on its push
+run and on the pull request that merged it
+([`scripts/release-source-check.sh`](../scripts/release-source-check.sh),
+[supply chain](supply-chain.md#the-check-releaseyml-runs-first)). A release
+published right after its merge waits up to 20 minutes for those runs. A tag on
+a branch, or on a commit whose CI failed or never finished, gets no artifacts
+and no signature. Then it attaches the SBOMs, the source archive and
 the checksums, signed ([supply chain](supply-chain.md)). Check the release page
 carries them.
 
