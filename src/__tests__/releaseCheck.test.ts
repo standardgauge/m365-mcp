@@ -154,6 +154,36 @@ describe('release-check.sh', () => {
       expect(run(root, '--tag', 'v1.2.0').out).toContain('has headings but no entries');
     });
 
+    it('passes a tag whose section has entries under one group of several', () => {
+      tree(
+        '1.2.0',
+        '## [Unreleased]\n\n## [1.2.0] - 2026-12-03\n\n### Added\n\n### Fixed\n\n- A fix.\n',
+      );
+      expect(run(root, '--tag', 'v1.2.0').status).toBe(0);
+    });
+
+    it('fails a tag whose empty groups are followed by link references', () => {
+      tree(
+        '1.2.0',
+        '## [Unreleased]\n\n## [1.2.0] - 2026-12-03\n\n### Upgrade notes\n\n### Fixed\n\n' +
+          '[1.2.0]: https://example.com/v1.2.0\n',
+      );
+      const r = run(root, '--tag', 'v1.2.0');
+      expect(r.status).toBe(1);
+      expect(r.out).toContain('has headings but no entries');
+    });
+
+    // grep stops reading at its first match. Piped from printf under pipefail,
+    // a section longer than the pipe buffer would then fail with SIGPIPE.
+    it('passes a section far larger than a pipe buffer whose entry comes first', () => {
+      const filler = '### Fixed\n'.repeat(20000);
+      tree('1.2.0', `## [Unreleased]\n\n## [1.2.0] - 2026-12-03\n\n- An entry.\n\n${filler}`);
+      const r = run(root, '--tag', 'v1.2.0');
+      expect(r.out).not.toContain('no entries');
+      expect(r.status).toBe(0);
+      expect(run(root, '--notes', '1.2.0').status).toBe(0);
+    });
+
     it('fails a tag that is not vX.Y.Z', () => {
       tree('1.1.0', released);
       for (const tag of ['1.1.0', 'v1.1', 'v1.1.0-rc.1', 'release-1']) {
