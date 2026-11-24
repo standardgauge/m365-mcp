@@ -29,6 +29,7 @@ on:
       - Dockerfile
       - package.json
       - package-lock.json
+      - scripts/release-check.sh
 
 permissions:
   contents: read
@@ -40,6 +41,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      actions: read        # find CI's push run on the tagged commit
       id-token: write      # Sigstore signing certificate for the attestation
       attestations: write  # store the attestation against the subject digests
     env:
@@ -51,6 +53,9 @@ jobs:
              github.event.pull_request.head.repo.full_name == github.repository) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A release needs main's history to show the tag is on it.
+          fetch-depth: ${{ github.event_name == 'release' && 0 || 1 }}
 
       # On a release, github.sha is the commit the tag points at, and that is
       # what the image is built from and what /health will report.
@@ -68,6 +73,43 @@ jobs:
           fi
           echo "VERSION=$V" >> "$GITHUB_ENV"
           echo "Building ${V} from ${GITHUB_SHA}"
+
+      # The tag has to be the version the tree carries and have changelog
+      # notes, or a deployment pinning it gets something other than it was
+      # promised. Checked before anything is built or signed. A failure here or
+      # in the next step leaves the release published with no assets: delete it
+      # and the tag, fix the cause, and cut it again (docs/releasing.md).
+      - name: Tag matches package.json and CHANGELOG.md
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: bash scripts/release-check.sh --tag "$TAG"
+
+      # A release is a tested commit of main (docs/releasing.md). A tag can be
+      # created on any commit, including one from an unmerged branch, so the
+      # workflow checks both halves itself rather than trusting the person who
+      # cut it: the tagged commit is reachable from main, and CI's push run on
+      # main passed on exactly that commit. Like the check above, this runs
+      # before anything is built or signed.
+      - name: Tagged commit is on main and CI passed on it
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::${TAG} points at ${GITHUB_SHA}, which is not on main"
+            exit 1
+          fi
+          passed=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&event=push&branch=main&status=success&per_page=1" \
+            --jq '.total_count')
+          if [ "${passed:-0}" -lt 1 ]; then
+            echo "::error::CI has no passing push run on main for ${GITHUB_SHA}; cut the release once it has passed"
+            exit 1
+          fi
+          echo "${TAG}: ${GITHUB_SHA} is on main and CI passed on it"
 
       # GitHub generates a tag's source archive on request and nothing signs
       # it. This one is a file on the release whose digest is attested.

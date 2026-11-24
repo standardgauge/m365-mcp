@@ -88,6 +88,20 @@ jobs:
       - name: No deployment-specific identifiers in the tree
         run: bash scripts/identifier-scan.sh
 
+  # A deployment that pins a release pins a tag and reads its CHANGELOG.md
+  # section. The script holds the changelog's structure and package.json's
+  # version together on every change, so cutting a release never starts with
+  # repairing either (docs/releasing.md). release.yml runs it again with --tag.
+  release-check:
+    name: Changelog and Version
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: CHANGELOG.md is well formed and package.json matches its newest release
+        run: bash scripts/release-check.sh
+
   # ── DCO sign-off (pull requests) ─────────────────────────────────────────────
   # Contributions arrive under the repository's own licence with a Developer
   # Certificate of Origin sign-off on every commit (CONTRIBUTING.md). The script

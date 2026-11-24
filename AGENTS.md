@@ -13,6 +13,7 @@ npx eslint . --max-warnings 0   # lint, admin UI included; warnings fail, see be
 npm test                  # Jest, the whole server suite
 npm run test:admin        # Vitest + React Testing Library, the admin UI suite
 bash scripts/identifier-scan.sh   # no deployment-specific names in the tree
+bash scripts/release-check.sh     # CHANGELOG.md structure and package.json version
 ```
 
 Run all of them before opening a pull request. The admin UI's component
@@ -73,6 +74,11 @@ Consequences for a change here:
 - Anything that reaches the tree reaches every tracking deployment on its next
   sync, and a tracking deployment deploys it as soon as CI passes there. Treat
   `main` as production.
+- A change that alters behaviour adds its line under `## [Unreleased]` in
+  `CHANGELOG.md`. Anything a deployment must do before rolling forward (a
+  consent, a setting, a Bicep change) goes under **Upgrade notes** and makes
+  the next release major (`docs/releasing.md`). `scripts/release-check.sh`
+  checks the file's structure.
 - Never add a scope to `GRAPH_SCOPES` for one deployment's benefit. A scope a
   tenant has not consented to makes `acquireTokenSilent` throw
   `interaction_required` and breaks every tool call for signed-in users on

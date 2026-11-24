@@ -1,0 +1,7 @@
+# A security report filed as an issue is public the moment it is submitted.
+# Blank issues are off so every report passes this page first.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/standardgauge/m365-mcp/security/policy
+    about: Privately, per SECURITY.md. Never as an issue.

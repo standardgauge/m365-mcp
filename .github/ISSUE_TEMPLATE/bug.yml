@@ -1,0 +1,72 @@
+name: Bug report
+description: Something in the server, the admin UI or the deploy path does not do what the docs say.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security issues go to [SECURITY.md](https://github.com/standardgauge/m365-mcp/security/policy), not here.
+
+        This repository is public. Leave out hostnames, tenant IDs, user names, mail addresses and anything else that identifies your deployment or the people in it. Use `example.com` and the like.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release tag you run, and the `sha` your instance reports at `/health`.
+      placeholder: v1.2.0, sha 1a2b3c4
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Mail
+        - Calendar
+        - SharePoint
+        - OneDrive
+        - Contacts
+        - OneNote
+        - Teams
+        - Planner
+        - Authentication or sessions
+        - Agent keys
+        - Deny lists or access policy
+        - Admin UI
+        - Deploy workflow or Bicep
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What you did
+      description: The tool and its arguments, the route, or the workflow step.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: The error the client saw, and the log line or audit row behind it if you have it. Redact as above.
+    validations:
+      required: true
+  - type: textarea
+    id: policy
+    attributes:
+      label: Policy in force
+      description: |
+        Most surprising behaviour is a policy evaluating exactly as configured. Name any that could apply: enabled and read-only services, the site allow-list, deny lists, draft mode, outbound policy, the agent key's scopes.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I have removed anything that identifies my deployment, tenant or users.
+          required: true
