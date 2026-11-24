@@ -140,6 +140,20 @@ describe('release-check.sh', () => {
       expect(run(root, '--tag', 'v1.2.0').out).toContain('no section, or an empty one, for 1.2.0');
     });
 
+    it('fails a tag whose section has group headings but no entries', () => {
+      tree('1.2.0', '## [Unreleased]\n\n## [1.2.0] - 2026-12-03\n\n### Added\n\n');
+      const r = run(root, '--tag', 'v1.2.0');
+      expect(r.status).toBe(1);
+      expect(r.out).toContain('the section for 1.2.0 has headings but no entries');
+
+      tree(
+        '1.2.0',
+        '## [Unreleased]\n\n## [1.2.0] - 2026-12-03\n\n### Upgrade notes\n\n### Fixed\n\n' +
+          '## [1.1.0] - 2026-12-01\n\n- x\n',
+      );
+      expect(run(root, '--tag', 'v1.2.0').out).toContain('has headings but no entries');
+    });
+
     it('fails a tag that is not vX.Y.Z', () => {
       tree('1.1.0', released);
       for (const tag of ['1.1.0', 'v1.1', 'v1.1.0-rc.1', 'release-1']) {
@@ -159,6 +173,14 @@ describe('release-check.sh', () => {
 
       const last = run(root, '--notes', '1.0.0');
       expect(last.stdout).toBe('### Added\n\n- First release.\n');
+    });
+
+    it('refuses to print a section with headings but no entries', () => {
+      tree('1.2.0', '## [Unreleased]\n\n## [1.2.0] - 2026-12-03\n\n### Added\n');
+      const r = run(root, '--notes', '1.2.0');
+      expect(r.status).toBe(1);
+      expect(r.stdout).toBe('');
+      expect(r.out).toContain('has headings but no entries');
     });
 
     it('does not match a version that only shares a prefix', () => {

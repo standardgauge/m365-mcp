@@ -14,7 +14,8 @@
 #                                            newest release (CI, every PR)
 #   scripts/release-check.sh --tag vX.Y.Z    the above, and that the tag names
 #                                            package.json's version and has a
-#                                            non-empty section (release.yml)
+#                                            section with at least one entry
+#                                            under its headings (release.yml)
 #   scripts/release-check.sh --notes X.Y.Z   print that section's body, for
 #                                            `gh release create --notes-file`
 #
@@ -56,10 +57,17 @@ section_body() {
     }' "$CHANGELOG"
 }
 
+# Whether a section body says anything: a line that is neither blank nor a
+# group heading. `### Added` on its own is a heading with no notes under it.
+has_entries() {
+  printf '%s\n' "$1" | grep -qvE '^[[:space:]]*$|^### '
+}
+
 if [ "$MODE" = notes ]; then
   echo "$ARG" | grep -qxE "$SEMVER" || { echo "release-check: '$ARG' is not X.Y.Z" >&2; exit 2; }
   body=$(section_body "$ARG")
   [ -n "$body" ] || { echo "release-check: CHANGELOG.md has no section for ${ARG}" >&2; exit 1; }
+  has_entries "$body" || { echo "release-check: the section for ${ARG} has headings but no entries" >&2; exit 1; }
   printf '%s\n' "$body"
   exit 0
 fi
@@ -125,7 +133,12 @@ if [ "$MODE" = tag ]; then
   else
     tv=${ARG#v}
     [ "$tv" = "$pkg_version" ] || err "tag ${ARG} but package.json is ${pkg_version}"
-    [ -n "$(section_body "$tv")" ] || err "CHANGELOG.md has no section, or an empty one, for ${tv}"
+    body=$(section_body "$tv")
+    if [ -z "$body" ]; then
+      err "CHANGELOG.md has no section, or an empty one, for ${tv}"
+    elif ! has_entries "$body"; then
+      err "the section for ${tv} has headings but no entries"
+    fi
   fi
 fi
 

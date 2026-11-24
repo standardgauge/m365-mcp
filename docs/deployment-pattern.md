@@ -103,23 +103,50 @@ my-m365-mcp-deploy/
 ```
 
 The workflow calls this repository's deploy workflow as a reusable workflow,
-pinned to a release:
+pinned to a release, once per instance:
 
 ```yaml
 jobs:
-  deploy:
+  deploy-tenant-a:
     uses: standardgauge/m365-mcp/.github/workflows/deploy.yml@v1.4.0
     with:
-      environment: production
-    secrets: inherit
+      environment: tenant-a
+      resource-group: rg-m365-mcp-tenant-a
+      container-app: m365-mcp
+      acr-name: m365mcptenanta
+    secrets:
+      AZURE_CREDENTIALS: ${{ secrets.TENANT_A_AZURE_CREDENTIALS }}
+      SMOKE_AGENT_KEY: ${{ secrets.TENANT_A_SMOKE_AGENT_KEY }}
 ```
 
-Resource names and the other repository variables stay where they are today,
-in the deploy repository's settings or in a
-[GitHub environment](https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-deployments/managing-environments-for-deployment)
-per instance. A provider with many client tenants can keep one deploy
-repository with one environment per tenant, each with its own Azure credential
-and required reviewers, instead of one fork per tenant.
+The secrets are named and mapped, not inherited. `secrets: inherit` only
+passes secrets when the caller and the called workflow are in the same
+organization or enterprise
+([GitHub's reusable-workflow rules](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#passing-inputs-and-secrets-to-a-reusable-workflow)),
+and an outside deployer's repository never is, so `inherit` would reach
+`deploy.yml` with no Azure credential at all. So `deploy.yml`'s `workflow_call`
+trigger declares each secret it reads (`AZURE_CREDENTIALS` required,
+`SMOKE_AGENT_KEY` optional) and each value it now reads from `vars` as an
+input, and those names are part of its public interface. The caller decides
+which of its own secrets fills each one, which is also what keeps one tenant's
+credential out of another tenant's job.
+
+Per-instance change control comes from the `environment` input. The called
+workflow puts its deploy job in that environment, and because the run belongs
+to the deploy repository, that is the deploy repository's environment: its
+required reviewers and wait timer gate the deploy, and its deployment history
+is the instance's record. A provider with many client tenants keeps one deploy
+repository with one caller job and one environment per tenant, instead of one
+fork per tenant.
+
+Where the credential is stored is the part to settle when this is built.
+Mapped repository secrets, as above, work across organizations and are what
+this design assumes. GitHub also documents that a called job naming an
+environment uses that environment's secret in place of a passed secret of the
+same name, which would let each credential live in its tenant's environment,
+behind its reviewers, rather than as a repository secret. Whether that holds
+for a caller in another organization has not been tested here, so the design
+does not depend on it.
 
 **Upgrading** is a pull request in the deploy repository that changes
 `@v1.4.0` to `@v1.5.0`. Dependabot's `github-actions` ecosystem already opens
@@ -132,10 +159,13 @@ merge.
 
 - `deploy.yml` gains a `workflow_call` trigger alongside its current ones. It
   checks out this repository at the called ref rather than the caller's
-  repository, takes the resource names as inputs, and keeps every proof step.
-  Its inputs become a public interface under semver.
-- The gate on CI becomes "the tag is a release": a tag is only cut on a commit
-  whose CI passed, so the caller does not need CI of its own.
+  repository, takes the resource names and the environment as inputs,
+  declares its secrets by name (no `inherit`), and keeps every proof step.
+  Its inputs and secret names become a public interface under semver.
+- The gate on CI becomes "the tag is a release": `release.yml` refuses to
+  build or sign a tag that is not on `main` or whose commit has no passing CI
+  push run ([releasing](releasing.md)), so the caller does not need CI of its
+  own.
 - Optionally, the reusable workflow applies the Bicep from the caller's
   parameters file (with `what-if` on the pull request), which brings
   infrastructure changes under the same pinned version. Today nothing applies

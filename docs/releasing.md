@@ -108,13 +108,17 @@ Run it with a maintainer's own credentials. A release created with a
 workflow's `GITHUB_TOKEN` does not start other workflows, so it would publish
 with no SBOM and no provenance.
 
-Publishing starts [`release.yml`](../.github/workflows/release.yml). It
-checks the tag against `package.json` and the changelog before it builds
-anything, then attaches the SBOMs, the source archive and the checksums, signed
-([supply chain](supply-chain.md)). Check the release page carries them.
+Publishing starts [`release.yml`](../.github/workflows/release.yml). Before it
+builds anything it checks the tag against `package.json` and the changelog, and
+that the tagged commit is on `main` and CI's push run passed on exactly that
+commit. A tag on a branch, or on a commit CI has not finished with, gets no
+artifacts and no signature. Then it attaches the SBOMs, the source archive and
+the checksums, signed ([supply chain](supply-chain.md)). Check the release page
+carries them.
 
-If the tag check fails, the release is published with no assets. Delete the
-release and the tag, fix the tree with another pull request, and cut it again.
+If any of those checks fails, the release is published with no assets. Delete
+the release and the tag, fix the cause (the tree, with another pull request, or
+the target commit), and cut it again.
 Don't move a tag that has been published: somebody may already have pinned it.
 
 ### Not automated yet
