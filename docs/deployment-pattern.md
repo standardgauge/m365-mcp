@@ -108,18 +108,22 @@ account or organisation, which is almost never this repository's, so the
 caller cannot use `secrets: inherit`: GitHub passes inherited secrets only
 between workflows in the
 [same organisation or enterprise](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#passing-inputs-and-secrets-to-a-reusable-workflow).
-Across that boundary a secret reaches the called workflow in one of two ways:
-it is a secret the reusable workflow declares by name and the caller maps
-explicitly, or it is an environment secret in the caller's repository that the
-reusable workflow's own job reads by setting `environment`. The interface below
-supports both, and recommends the second.
+Across that boundary a secret reaches the called workflow only if the
+reusable workflow declares it by name and the caller passes it by name. Where
+the value comes from is the caller's choice: a repository or organisation
+secret, or an environment secret in the caller's repository that the reusable
+workflow's own job unlocks by setting `environment`. The interface below
+supports both, and recommends the environment.
 
 ### The reusable workflow's interface
 
-`deploy.yml` would declare its secrets by name. Each is `required: false`
-because an environment can supply it instead of the caller, so the
-"Check required configuration" step has to gain a check that fails the run
-when `AZURE_CREDENTIALS` arrives from neither.
+`deploy.yml` would declare its secrets by name, each `required: true`. A
+secret the caller does not pass resolves to an empty string in the called
+workflow, with no error, so `required: true` is what turns a forgotten
+`secrets:` line into a failed run. It only checks that the caller passed the
+name, not that the secret has a value, so the "Check required configuration"
+step still has to fail the run when `AZURE_CREDENTIALS` is empty, which is
+what a mapping to a secret that exists nowhere produces.
 
 ```yaml
 on:
@@ -142,9 +146,9 @@ on:
         required: false
     secrets:
       AZURE_CREDENTIALS:    # service principal JSON, as documented today
-        required: false
-      SMOKE_AGENT_KEY:      # read-only agent key; unset skips the smoke job
-        required: false
+        required: true
+      SMOKE_AGENT_KEY:      # read-only agent key; an empty value skips the
+        required: true      # smoke job, an unpassed one fails the run
 
 jobs:
   build-push-deploy:
@@ -167,11 +171,19 @@ organisation runs it:
 - **Only the called job can name the environment.** A job that calls a
   reusable workflow accepts `uses`, `with`, `secrets`, `strategy`, `needs`,
   `if`, `concurrency`, `permissions` and `name`, and not `environment`. So the
-  caller cannot read an environment secret and map it across; the environment
-  has to be set inside `deploy.yml`, which is why it is an input.
-- **An environment secret wins over a passed one of the same name.** If the
-  environment holds `AZURE_CREDENTIALS`, the job uses it and ignores whatever
-  the caller mapped. Keep each secret in one place per instance, or the
+  environment has to be set inside `deploy.yml`, which is why it is an input.
+- **The caller still passes every secret, environment secrets included.**
+  Setting `environment` on the called job releases the environment's secrets
+  to it, but only the ones the caller passes by name. The caller can pass a
+  name that exists only in the environment
+  (`AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}`); the job that sets
+  `environment` receives the environment's value. A secret the caller leaves
+  out resolves to an empty string, silently, which is why both are
+  `required: true`.
+- **An environment secret wins over a repository or organisation secret of
+  the same name.** If the caller passes `${{ secrets.AZURE_CREDENTIALS }}` and
+  both the environment and the repository hold `AZURE_CREDENTIALS`, the job
+  gets the environment's. Keep each secret in one place per instance, or the
   reviewed caller file stops being the truth about which credential deployed.
 
 Every job that touches Azure or the instance (the deploy and the functional
@@ -185,7 +197,9 @@ environment rule) is public under semver from the first release that ships it.
 Each instance gets a GitHub environment in the deploy repository holding its
 `AZURE_CREDENTIALS` and `SMOKE_AGENT_KEY` as **environment secrets**, with
 required reviewers set to whoever approves changes to that instance and
-deployment branches limited to `main`. The caller passes no secrets at all:
+deployment branches limited to `main`. The caller passes each secret under
+its own name, which `deploy.yml`'s environment-scoped job resolves to the
+environment's value:
 
 ```yaml
 # my-m365-mcp-deploy/.github/workflows/deploy.yml
@@ -206,8 +220,11 @@ jobs:
       container-app: m365-mcp
       acr-name: m365mcpacr
       smoke-expect-services: mail,calendar,sharepoint
-    # no secrets: block. AZURE_CREDENTIALS and SMOKE_AGENT_KEY are
-    # environment secrets on "production", read by deploy.yml's own jobs.
+    secrets:
+      # Environment secrets on "production". Passing them by name is
+      # required: an unpassed secret reaches deploy.yml as an empty string.
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+      SMOKE_AGENT_KEY: ${{ secrets.SMOKE_AGENT_KEY }}
 ```
 
 This is the model to use for anything under change control. The credential is
@@ -229,6 +246,9 @@ jobs:
       resource-group: rg-m365-mcp-contoso
       container-app: m365-mcp
       acr-name: contosom365mcp
+    secrets:                # resolved from the "contoso" environment
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+      SMOKE_AGENT_KEY: ${{ secrets.SMOKE_AGENT_KEY }}
   fabrikam:
     needs: contoso          # optional canary order: fabrikam after contoso
     uses: standardgauge/m365-mcp/.github/workflows/deploy.yml@v1.4.0
@@ -237,7 +257,17 @@ jobs:
       resource-group: rg-m365-mcp-fabrikam
       container-app: m365-mcp
       acr-name: fabrikamm365mcp
+    secrets:                # resolved from the "fabrikam" environment
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+      SMOKE_AGENT_KEY: ${{ secrets.SMOKE_AGENT_KEY }}
 ```
+
+The two jobs pass the same expressions. Each resolves to its own tenant's
+credential because each job's `environment` input selects a different
+environment inside `deploy.yml`. That only holds while no repository or
+organisation secret named `AZURE_CREDENTIALS` exists as well: a tenant whose
+environment lacks the secret would then fall back to it and deploy with the
+wrong credential. Hold per-tenant credentials only as environment secrets.
 
 Contoso's reviewers approve Contoso's job and nobody else's. A tenant can be
 held by leaving its job's approval pending or by pinning its job to an older
@@ -246,7 +276,8 @@ tag, and `needs` gives the canary order the fork sync provides today.
 ### Alternative caller: explicit secret mapping
 
 A deployer who keeps credentials as repository or organisation secrets (a
-single instance with no reviewers, say) maps each one explicitly by name:
+single instance with no reviewers, say) maps each one by name from a secret
+with a different name:
 
 ```yaml
 jobs:
@@ -265,8 +296,8 @@ jobs:
 The `environment` input is still required, so the run still waits on that
 environment's reviewers if it has any, but the secret itself is readable,
 without that approval, by any workflow run in the deploy repository. And per
-the precedence rule above, an environment secret of the same name silently
-replaces the mapped one. Use this form only where that is acceptable, and
+the precedence rule above, if the `production` environment also holds a secret
+named `PRODUCTION_AZURE_CREDENTIALS`, it silently replaces the repository one. Use this form only where that is acceptable, and
 never hold the same secret both ways.
 
 ### Not depending on a stored credential
@@ -282,6 +313,9 @@ and its reviewers. The client, tenant and subscription IDs are not secrets and
 can be inputs. It is worth adding to the interface as the preferred
 credential, alongside `AZURE_CREDENTIALS` for existing deployers, when
 `workflow_call` is built; it needs `id-token: write` on the calling job.
+Adding it makes `AZURE_CREDENTIALS` optional, so that release drops its
+`required: true` and the configuration check takes over: it fails the run when
+neither the OIDC inputs nor a non-empty `AZURE_CREDENTIALS` arrived.
 
 **Upgrading** is a pull request in the deploy repository that changes
 `@v1.4.0` to `@v1.5.0`. Dependabot's `github-actions` ecosystem already opens
@@ -295,8 +329,9 @@ merge.
 - `deploy.yml` gains a `workflow_call` trigger alongside its current ones. It
   checks out this repository at the called ref rather than the caller's
   repository, takes the resource names and the caller's environment as
-  inputs, declares `AZURE_CREDENTIALS` and `SMOKE_AGENT_KEY` as named secrets
-  (never relying on `secrets: inherit`), sets `environment` on every job that
+  inputs, declares `AZURE_CREDENTIALS` and `SMOKE_AGENT_KEY` as named,
+  required secrets that every caller passes by name (never relying on
+  `secrets: inherit`), sets `environment` on every job that
   reads them, and keeps every proof step. Those inputs and secret names become
   a public interface under semver.
 - The gate on CI becomes "the tag is a release": `release.yml` refuses to
