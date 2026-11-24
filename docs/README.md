@@ -1,5 +1,9 @@
 # Documentation
 
+Reviewing this for a compliance or risk team? Start with
+[what an agent can never do](what-an-agent-can-never-do.md), one page with the
+controls, the gaps, and a mapping to HIPAA, SEC and FINRA requirements.
+
 - [Customer go-live checklist](customer-go-live.md) — the ordered, tickable
   list a new tenant's deployment has to pass before its first user, with a
   check and a record entry per item

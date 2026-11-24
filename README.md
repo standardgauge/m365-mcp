@@ -1,8 +1,30 @@
 # M365 MCP Server
 
-A Microsoft 365 [MCP](https://modelcontextprotocol.io) server that gives Claude and other AI agents read/write access to Outlook Mail, Calendar, SharePoint, OneDrive, Contacts, OneNote, Teams, and Planner through the Microsoft Graph API.
+Scoped, governed access to Microsoft 365 for Claude and other AI agents, running in your own tenant. An [MCP](https://modelcontextprotocol.io) server for Outlook Mail, Calendar, SharePoint, OneDrive, Contacts, OneNote, Teams and Planner, through the Microsoft Graph API.
 
-Every user signs in individually with delegated OAuth. There is no service account and no application-level Graph permission, so the server can only ever reach what the signed-in user could reach themselves. On top of that, a two-tier deny list and per-service read-only switches let an administrator carve out what AI is allowed to touch.
+A CTO at a hedge fund wanted Claude working in the firm's mail and files. The Microsoft-built connector didn't meet the firm's GRC needs, so we wrote an MCP server that would, and made its controls configurable, so that as regulation of AI agents takes shape each firm can tailor them to what its regulators and its compliance team require. It started in alternative investments. It is built for any firm whose compliance team has to sign off before an agent touches the mailbox, whether that firm answers to the SEC and FINRA or to HIPAA.
+
+Microsoft's own Claude connector honors the user's permissions, but it can't tell the user from the user's agent.
+
+### The controls
+
+- **Agent keys, never wider than the owner.** A user mints a key for an app or agent that reaches the server as them with less than they have: fewer services, some of them read-only, fewer SharePoint sites, extra folder and calendar blocks. A key is not a new identity, and an administrator can narrow or switch off every key at once.
+- **Draft mode an agent can't lift.** Mail an agent writes lands in Drafts for a person to send. The agent can tighten the mode but never loosen it, which blocks the two-call send an injected prompt would otherwise need, one call to switch to send mode and one to send. An administrator can enforce draft mode for the tenant or for one user, and then only the admin console lifts it.
+- **Outbound policy that fails closed.** Calendar invitations, comments on meeting responses and Teams messages have no draft state in Graph, so each can be set to allow, internal only or block. If the policy, the tenant's domain list or the recipient list can't be read, the call is refused.
+- **Two-tier deny lists.** An administrator blocks folders, paths, calendars, notebooks and plans for everyone, and each user can hide their own on top. The same check runs on the MCP endpoint and on the REST routes, and on search results.
+- **Per-service read-only.** A service stays readable while its write tools are refused and hidden from the agent's tool list, so an agent can read a calendar for context without being able to move a meeting.
+
+Every allowed and denied call, every sign-in and every policy change is written to an audit log in your own Azure subscription. For compliance and risk reviewers there is a one-page summary, mapped against the HIPAA Security Rule and SEC and FINRA themes, with the gaps marked: [what an agent can never do](docs/what-an-agent-can-never-do.md).
+
+### One instance per tenant
+
+Each deployment is its own Container App, Entra app registration, keys and storage, inside the Azure subscription and tenant it serves. Nothing routes through a third party, Standard Gauge included. Every Graph call uses the signed-in user's own delegated token, with no service account and no application permission, so the server can only reach what that user could reach themselves.
+
+An internal CTO runs one instance for their firm. An MSP or fractional CTO runs one per client. Either way the deployment tracks this repository's `main` rather than diverging from it, and everything tenant-specific lives in deployment configuration, not in code (see [`AGENTS.md`](AGENTS.md)). A fix made for one firm reaches every firm on its next sync.
+
+### Maintainer
+
+Maintained by [Standard Gauge](https://standardgauge.ai). Firms that want help deploying or governing it can reach us there. Issues and pull requests are welcome here either way; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Built on Azure Functions v4 (TypeScript, Node 22), deployed as an Azure Container App, with a React admin UI for managing access controls.
 
