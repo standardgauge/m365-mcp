@@ -5,9 +5,11 @@ name: Release artifacts
 # what a version contains and that it was built here, from the tagged commit,
 # by this workflow. docs/supply-chain.md is the verifier's side of this file.
 #
-# On a published release it builds the image from the tagged commit, catalogues
-# it with syft (SPDX and CycloneDX, OS packages and npm packages both), packs
-# the tagged source, and signs a SLSA build provenance attestation over all of
+# On a published release it first refuses a tag that is not tested main: the
+# commit has to be on main with green CI (scripts/release-source-check.sh).
+# Then it builds the image from the tagged commit, catalogues it with syft
+# (SPDX and CycloneDX, OS packages and npm packages both), packs the tagged
+# source, and signs a SLSA build provenance attestation over all of
 # it through GitHub's Sigstore instance. The files go on the release; the
 # attestations are fetched by digest with `gh attestation verify`.
 #
@@ -38,10 +40,12 @@ jobs:
   build:
     name: SBOM and build provenance
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Up to 20 of these are the source check waiting for CI on a fresh merge.
+    timeout-minutes: 45
     permissions:
       contents: read
-      actions: read        # find CI's push run on the tagged commit
+      actions: read        # the CI runs for the tagged commit
+      pull-requests: read  # the pull request that merged it
       id-token: write      # Sigstore signing certificate for the attestation
       attestations: write  # store the attestation against the subject digests
     env:
@@ -53,9 +57,6 @@ jobs:
              github.event.pull_request.head.repo.full_name == github.repository) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # A release needs main's history to show the tag is on it.
-          fetch-depth: ${{ github.event_name == 'release' && 0 || 1 }}
 
       # On a release, github.sha is the commit the tag points at, and that is
       # what the image is built from and what /health will report.
@@ -85,31 +86,25 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: bash scripts/release-check.sh --tag "$TAG"
 
-      # A release is a tested commit of main (docs/releasing.md). A tag can be
-      # created on any commit, including one from an unmerged branch, so the
-      # workflow checks both halves itself rather than trusting the person who
-      # cut it: the tagged commit is reachable from main, and CI's push run on
-      # main passed on exactly that commit. Like the check above, this runs
-      # before anything is built or signed.
-      - name: Tagged commit is on main and CI passed on it
+      # A release is tested main: the tagged commit is on main, and its push run
+      # and its pull request's run in ci.yml are green (docs/supply-chain.md,
+      # "Release evidence"). Checked before anything is built or signed, so an
+      # off-main or untested tag gets no artifacts and no attestation. The
+      # script comes from main rather than from the tag, so a tag cannot carry a
+      # weaker copy of the check it is being held to. A release published right
+      # after its merge waits for CI rather than failing. A failure leaves the
+      # release published with no assets: delete the release and the tag, and
+      # cut it again from a green commit of main.
+      - name: Tagged commit is on main and passed CI
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::${TAG} points at ${GITHUB_SHA}, which is not on main"
-            exit 1
-          fi
-          passed=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&event=push&branch=main&status=success&per_page=1" \
-            --jq '.total_count')
-          if [ "${passed:-0}" -lt 1 ]; then
-            echo "::error::CI has no passing push run on main for ${GITHUB_SHA}; cut the release once it has passed"
-            exit 1
-          fi
-          echo "${TAG}: ${GITHUB_SHA} is on main and CI passed on it"
+          git fetch --no-tags --depth=1 origin main
+          git show FETCH_HEAD:scripts/release-source-check.sh > "$RUNNER_TEMP/release-source-check.sh"
+          bash "$RUNNER_TEMP/release-source-check.sh" \
+            --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA" --wait 1200
 
       # GitHub generates a tag's source archive on request and nothing signs
       # it. This one is a file on the release whose digest is attested.
